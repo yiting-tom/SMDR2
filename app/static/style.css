@@ -182,6 +182,149 @@ nav#class-toolbar .class-btn .count {
 
 main { flex: 1; position: relative; overflow: hidden; }
 
+/* ---- Rule sidebar (in viewer) ----------------------------------------- */
+#rule-sidebar {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 340px;
+  background: #0f1318;
+  border-left: 1px solid #2a3340;
+  display: flex;
+  flex-direction: column;
+  z-index: 5;
+}
+#rule-sidebar[hidden] { display: none; }
+#rule-sidebar > header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid #2a3340;
+  background: none;
+}
+#rule-sidebar h3 { margin: 0; font-size: 0.85rem; font-weight: 600; letter-spacing: 0.04em; }
+#rule-sidebar #rule-sidebar-summary {
+  color: #9aa5b1; font-size: 0.78rem;
+  font-family: ui-monospace, monospace;
+  flex: 1;
+}
+#rule-sidebar #rule-sidebar-close {
+  background: transparent;
+  border: none;
+  color: #c0cad6;
+  font-size: 1.2rem;
+  cursor: pointer;
+  line-height: 1;
+}
+#rule-sidebar #rule-sidebar-close:hover { color: #ff5252; }
+#rule-sidebar-body { overflow-y: auto; padding: 0.2rem 0 0.6rem 0; }
+
+#rule-sidebar details {
+  border-bottom: 1px solid #1a2028;
+}
+#rule-sidebar details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  align-items: start;
+  column-gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  user-select: none;
+}
+#rule-sidebar details > summary::-webkit-details-marker { display: none; }
+#rule-sidebar details > summary::before {
+  content: "▾";
+  grid-column: 1;
+  grid-row: 1;
+  color: #5d8aa8;
+  font-size: 0.7rem;
+  align-self: center;
+  transition: transform 0.12s ease;
+  text-align: center;
+}
+#rule-sidebar details:not([open]) > summary::before { transform: rotate(-90deg); }
+#rule-sidebar details > summary:hover { background: rgba(255, 255, 255, 0.025); }
+#rule-sidebar .rule-head-row {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+#rule-sidebar .rule-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2rem; height: 1.2rem;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 0.78rem;
+}
+#rule-sidebar .rule-status.pass { background: rgba(105, 240, 174, 0.18); color: #69f0ae; }
+#rule-sidebar .rule-status.fail { background: rgba(255, 82, 82, 0.18);  color: #ff5252; }
+#rule-sidebar .rule-name {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  font-size: 0.84rem;
+}
+#rule-sidebar .rule-text {
+  color: #9aa5b1;
+  font-size: 0.76rem;
+  grid-column: 2;
+  margin-top: 0.15rem;
+}
+#rule-sidebar .subrules {
+  list-style: none;
+  padding: 0 0.5rem 0.55rem 2.1rem;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+#rule-sidebar .subrules li {
+  display: grid;
+  grid-template-columns: 3ch 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-left: 2px solid #2a3340;
+  background: #131923;
+  border-radius: 0 3px 3px 0;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#rule-sidebar .subrules li:hover { border-left-color: #00ffff; background: rgba(0, 255, 255, 0.04); }
+#rule-sidebar .subrules li.focused {
+  border-left-color: #ffeb3b;
+  background: rgba(255, 235, 59, 0.08);
+}
+#rule-sidebar .subrules li.same-role .part { color: #69f0ae; }
+#rule-sidebar .subrules li.other-role { cursor: pointer; }
+#rule-sidebar .subrules li.other-role .part { color: #ffb84d; }
+#rule-sidebar .subrules li.missing-file {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+#rule-sidebar .subrules li.missing-file .part { color: #5d8aa8; }
+#rule-sidebar .subrules li .part {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+#rule-sidebar .subrules li .sub-text { color: #c0cad6; }
+#rule-sidebar .subrules li .nav-hint {
+  font-size: 0.7rem;
+  color: #5d8aa8;
+  font-family: ui-monospace, monospace;
+}
+#rule-sidebar .empty-msg {
+  color: #5d8aa8;
+  text-align: center;
+  padding: 1rem;
+  font-size: 0.82rem;
+}
+
 /* ---- Rule Check panel -------------------------------------------------- */
 #rule-panel {
   position: absolute;

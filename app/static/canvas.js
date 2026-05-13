@@ -523,40 +523,186 @@ function drawFocusedLabel() {
   ctx.restore();
 }
 
-async function loadFocusedRule(productId, role) {
+// ---- Rule check sidebar -------------------------------------------------
+const $rulesBtn = document.getElementById("rules-btn");
+const $ruleSidebar = document.getElementById("rule-sidebar");
+const $ruleSidebarSummary = document.getElementById("rule-sidebar-summary");
+const $ruleSidebarBody = document.getElementById("rule-sidebar-body");
+const $ruleSidebarClose = document.getElementById("rule-sidebar-close");
+
+const RULE_FOLD_KEY = "smdr2.viewer.ruleFolded";
+function getRuleFolded() {
+  try { return new Set(JSON.parse(sessionStorage.getItem(RULE_FOLD_KEY) ?? "[]")); }
+  catch { return new Set(); }
+}
+function setRuleFolded(s) {
+  sessionStorage.setItem(RULE_FOLD_KEY, JSON.stringify([...s]));
+}
+
+let currentProductInfo = null;     // /api/products/{id} response cached for sibling links
+let currentRuleResults = null;     // /api/products/{id}/rule-check response cached
+
+async function loadRuleSidebar(productId, role) {
+  $rulesBtn.hidden = false;
+  // Fetch the product (for sibling files_by_role) and the rule check together.
+  const [pRes, rRes] = await Promise.all([
+    fetch(`/api/products/${productId}`),
+    fetch(`/api/products/${productId}/rule-check`),
+  ]);
+  if (pRes.ok) currentProductInfo = await pRes.json();
+  if (!rRes.ok) {
+    // No rule check yet — keep the button visible but the sidebar empty.
+    currentRuleResults = null;
+    renderRuleSidebar(role);
+    return;
+  }
+  currentRuleResults = await rRes.json();
+  renderRuleSidebar(role);
+
+  // Apply ?rule=&idx= focus if requested.
   const params = new URLSearchParams(location.search);
   const ruleName = params.get("rule");
   const idxStr = params.get("idx");
-  if (!ruleName || idxStr === null) return;
-  const idx = parseInt(idxStr, 10);
-  try {
-    const res = await fetch(`/api/products/${productId}/rule-check`);
-    if (!res.ok) return;
-    const data = await res.json();
-    const rule = data.results?.[ruleName];
-    if (!rule) return;
-    const sub = rule.rules?.[idx];
-    if (!sub) return;
-    if (sub.part !== role) {
-      setBaseStatus(`sub-rule's part is ${sub.part}, this DXF is ${role}`);
-      return;
-    }
-    focusedSubRule = {
-      ruleName,
-      rulePass: !!rule.pass,
-      ruleText: rule.text,
-      idx,
-      part: sub.part,
-      from: sub.from || [],
-      to:   sub.to   || [],
-      text: sub.text || "",
-    };
-    render();
-    setBaseStatus(`Rule check focus: ${ruleName} · ${sub.text}`);
-  } catch (e) {
-    console.error("loadFocusedRule failed:", e);
+  if (ruleName && idxStr !== null) {
+    focusSubRuleByKey(ruleName, parseInt(idxStr, 10), role);
+    $ruleSidebar.hidden = false;
+    $rulesBtn.classList.add("active");
   }
 }
+
+function renderRuleSidebar(role) {
+  $ruleSidebarBody.innerHTML = "";
+  if (!currentRuleResults) {
+    $ruleSidebarSummary.textContent = "";
+    $ruleSidebarBody.innerHTML =
+      `<div class="empty-msg">No rule check yet for this product. ` +
+      `Run it from the dashboard.</div>`;
+    return;
+  }
+  const d = currentRuleResults;
+  $ruleSidebarSummary.textContent =
+    `${d.pass_count}/${d.rule_count} pass`;
+
+  const folded = getRuleFolded();
+  for (const [name, rule] of Object.entries(d.results)) {
+    const details = document.createElement("details");
+    details.dataset.ruleName = name;
+    details.open = !folded.has(name);
+    details.addEventListener("toggle", () => {
+      const f = getRuleFolded();
+      if (details.open) f.delete(name); else f.add(name);
+      setRuleFolded(f);
+    });
+
+    const summary = document.createElement("summary");
+    summary.innerHTML =
+      `<div class="rule-head-row">` +
+        `<span class="rule-status ${rule.pass ? "pass" : "fail"}">${rule.pass ? "✓" : "✗"}</span>` +
+        `<span class="rule-name">${escapeHtml(name)}</span>` +
+      `</div>` +
+      `<div class="rule-text">${escapeHtml(rule.text || "")}</div>`;
+    details.appendChild(summary);
+
+    const subList = document.createElement("ol");
+    subList.className = "subrules";
+    const subs = rule.rules || [];
+    if (!subs.length) {
+      const li = document.createElement("li");
+      li.className = "missing-file";
+      li.innerHTML = `<span class="part">—</span><span class="sub-text">(no sub-rules)</span><span></span>`;
+      subList.appendChild(li);
+    } else {
+      subs.forEach((sub, idx) => {
+        const li = renderSubRuleItem(name, idx, sub, role, rule.pass);
+        subList.appendChild(li);
+      });
+    }
+    details.appendChild(subList);
+    $ruleSidebarBody.appendChild(details);
+  }
+  highlightFocusedInSidebar();
+}
+
+function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
+  const li = document.createElement("li");
+  li.dataset.ruleName = ruleName;
+  li.dataset.idx = String(idx);
+  const sibling = currentProductInfo?.files_by_role?.[sub.part];
+
+  let hintHtml = "";
+  if (sub.part === currentRole) {
+    li.classList.add("same-role");
+    hintHtml = `<span class="nav-hint">show</span>`;
+  } else if (sibling) {
+    li.classList.add("other-role");
+    hintHtml = `<span class="nav-hint">→ ${escapeHtml(sub.part)} viewer</span>`;
+  } else {
+    li.classList.add("missing-file");
+    hintHtml = `<span class="nav-hint">(no file)</span>`;
+  }
+
+  li.innerHTML =
+    `<span class="part">${escapeHtml(sub.part)}</span>` +
+    `<span class="sub-text">${escapeHtml(sub.text || "")}</span>` +
+    hintHtml;
+
+  li.addEventListener("click", () => {
+    if (sub.part === currentRole) {
+      focusSubRule(ruleName, idx, rulePass, sub);
+      highlightFocusedInSidebar();
+    } else if (sibling) {
+      location.href = `/viewer/${sibling.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
+    }
+  });
+  return li;
+}
+
+function focusSubRule(ruleName, idx, rulePass, sub) {
+  focusedSubRule = {
+    ruleName,
+    rulePass: !!rulePass,
+    ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
+    idx,
+    part: sub.part,
+    from: sub.from || [],
+    to:   sub.to   || [],
+    text: sub.text || "",
+  };
+  render();
+  setBaseStatus(`Rule check focus: ${ruleName} · ${sub.text}`);
+}
+
+function focusSubRuleByKey(ruleName, idx, role) {
+  const rule = currentRuleResults?.results?.[ruleName];
+  if (!rule) return;
+  const sub = rule.rules?.[idx];
+  if (!sub) return;
+  if (sub.part !== role) {
+    // Navigate elsewhere — but loadRuleSidebar is invoked on the viewer for
+    // *this* file, so if the part disagrees we just don't focus anything.
+    return;
+  }
+  focusSubRule(ruleName, idx, rule.pass, sub);
+}
+
+function highlightFocusedInSidebar() {
+  for (const li of $ruleSidebarBody.querySelectorAll(".subrules li")) {
+    li.classList.toggle("focused",
+      focusedSubRule
+      && li.dataset.ruleName === focusedSubRule.ruleName
+      && parseInt(li.dataset.idx, 10) === focusedSubRule.idx
+    );
+  }
+}
+
+$rulesBtn.addEventListener("click", () => {
+  $ruleSidebar.hidden = !$ruleSidebar.hidden;
+  $rulesBtn.classList.toggle("active", !$ruleSidebar.hidden);
+});
+$ruleSidebarClose.addEventListener("click", () => {
+  $ruleSidebar.hidden = true;
+  $rulesBtn.classList.remove("active");
+});
 
 // ---- hit-tests -----------------------------------------------------------
 function distPointToSegmentSq(px, py, x1, y1, x2, y2) {
@@ -1508,10 +1654,11 @@ async function load() {
   // Pre-match overlay was computed at preprocessing time; show it
   // automatically so user sees library coverage on arrival.
   await loadPrematch();
-  // If the URL has ?rule=<name>&idx=<i>, fetch the product's saved rule
-  // check and highlight the corresponding sub-rule.
+  // Populate the rule-check sidebar (and apply ?rule=&idx= focus if any).
   if (currentFileInfo?.product_id && currentFileInfo?.dxf_role) {
-    await loadFocusedRule(currentFileInfo.product_id, currentFileInfo.dxf_role);
+    await loadRuleSidebar(currentFileInfo.product_id, currentFileInfo.dxf_role);
+  } else {
+    $rulesBtn.hidden = true;
   }
 }
 

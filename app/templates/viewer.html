@@ -17,6 +17,7 @@
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
     <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>
+    <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">Rules</button>
     <span id="status">loading…</span>
     <span class="spacer"></span>
     <span id="mode-hint" class="hint"></span>
@@ -26,6 +27,14 @@
   <nav id="class-toolbar" aria-label="Object classes"></nav>
   <main>
     <canvas id="dxf-canvas"></canvas>
+    <aside id="rule-sidebar" hidden>
+      <header>
+        <h3>Rule Check</h3>
+        <span id="rule-sidebar-summary"></span>
+        <button type="button" id="rule-sidebar-close" title="Hide">×</button>
+      </header>
+      <div id="rule-sidebar-body"></div>
+    </aside>
   </main>
 
   <div id="library-modal" class="modal" hidden>
