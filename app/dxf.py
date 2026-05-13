@@ -28,6 +28,11 @@ from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d
 # Smaller = more vertices, smoother arcs. 0.01 is fine for typical mm-scale CAD.
 CURVE_FLATTENING_DISTANCE = 0.01
 
+# DXF entity types that should be rendered but NOT participate in selection,
+# chain-grouping, or matching. Their primitives get a `"decorative": true`
+# flag at flatten time; everything downstream filters on that.
+DECORATIVE_DXFTYPES = frozenset({"TEXT", "MTEXT", "DIMENSION", "HATCH"})
+
 
 @dataclass
 class RenderOutput:
@@ -46,8 +51,11 @@ class JSONBackend(BackendInterface):
         self._ymin = float("inf")
         self._xmax = float("-inf")
         self._ymax = float("-inf")
+        # Set true while inside the enter_entity → exit_entity wrapper of a
+        # decorative DXF entity. Each appended primitive inherits this flag.
+        self._decorative: bool = False
 
-    # ---- lifecycle (no-ops for our use) ------------------------------------
+    # ---- lifecycle ---------------------------------------------------------
     def configure(self, config: Configuration) -> None:
         pass
 
@@ -58,10 +66,18 @@ class JSONBackend(BackendInterface):
         pass
 
     def enter_entity(self, entity, properties) -> None:  # noqa: ARG002
-        pass
+        try:
+            self._decorative = entity.dxftype() in DECORATIVE_DXFTYPES
+        except Exception:
+            self._decorative = False
 
     def exit_entity(self, entity) -> None:  # noqa: ARG002
-        pass
+        self._decorative = False
+
+    def _append(self, prim: dict[str, Any]) -> None:
+        if self._decorative:
+            prim["decorative"] = True
+        self.primitives.append(prim)
 
     def set_background(self, color: str) -> None:
         self.background = _normalize_color(color)
@@ -70,7 +86,7 @@ class JSONBackend(BackendInterface):
     def draw_point(self, pos: Vec2, properties: BackendProperties) -> None:
         x, y = float(pos.x), float(pos.y)
         self._track_point(x, y)
-        self.primitives.append(
+        self._append(
             {"type": "point", "pos": [x, y], **_props(properties)}
         )
 
@@ -78,7 +94,7 @@ class JSONBackend(BackendInterface):
         sx, sy, ex, ey = float(start.x), float(start.y), float(end.x), float(end.y)
         self._track_point(sx, sy)
         self._track_point(ex, ey)
-        self.primitives.append(
+        self._append(
             {
                 "type": "line",
                 "start": [sx, sy],
@@ -97,7 +113,7 @@ class JSONBackend(BackendInterface):
             sx, sy, ex, ey = float(start.x), float(start.y), float(end.x), float(end.y)
             self._track_point(sx, sy)
             self._track_point(ex, ey)
-            self.primitives.append(
+            self._append(
                 {"type": "line", "start": [sx, sy], "end": [ex, ey], **common}
             )
 
@@ -107,7 +123,7 @@ class JSONBackend(BackendInterface):
             if len(points) < 2:
                 continue
             self._track_points(points)
-            self.primitives.append(
+            self._append(
                 {
                     "type": "polyline",
                     "points": points,
@@ -130,7 +146,7 @@ class JSONBackend(BackendInterface):
                     self._track_points(pts)
                     rings.append(pts)
         if rings:
-            self.primitives.append(
+            self._append(
                 {"type": "filled_polygon", "rings": rings, **common}
             )
 
@@ -143,7 +159,7 @@ class JSONBackend(BackendInterface):
         if len(pts) < 3:
             return
         self._track_points(pts)
-        self.primitives.append(
+        self._append(
             {"type": "filled_polygon", "rings": [pts], **_props(properties)}
         )
 

@@ -52,3 +52,55 @@ def test_collect_entity_points_matches_shape_points(test_dxf_path):
     # EntityShape may drop a trailing-equals-first point of closed polylines;
     # raw includes it. So shape.vertex_count is either equal or one less.
     assert shapes[h].vertex_count in (len(raw), len(raw) - 1)
+
+
+def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
+    """TEXT / MTEXT / DIMENSION / HATCH must render but not participate in
+    selection or matching. JSONBackend tags them with `decorative: True` and
+    build_handle_index drops them."""
+    import ezdxf
+    from ezdxf.math import Vec3
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+
+    # One regular selectable entity:
+    line = msp.add_line((0, 0), (10, 0))
+    # Decorative entities:
+    txt = msp.add_text("hello", dxfattribs={"insert": (5, 5), "height": 1})
+    mtxt = msp.add_mtext("hello mtext", dxfattribs={"insert": (5, 10), "char_height": 1})
+    # Hatch needs at least one boundary path:
+    hatch = msp.add_hatch(dxfattribs={"layer": "FILL"})
+    hatch.paths.add_polyline_path([(0, 0), (1, 0), (1, 1), (0, 1)], is_closed=True)
+    # Dimension:
+    dim = msp.add_linear_dim(base=(0, 8), p1=(0, 5), p2=(10, 5))
+    dim.render()  # produces the dimension's geometry block
+
+    dxf_path = tmp_path / "synth.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    # Bucket primitives by their source-entity handle.
+    by_handle = {}
+    for p in out.primitives:
+        by_handle.setdefault(p.get("handle"), []).append(p)
+
+    # The LINE entity's primitives must NOT carry the decorative flag.
+    line_prims = by_handle.get(line.dxf.handle, [])
+    assert line_prims, "expected the LINE to produce at least one primitive"
+    assert all(not p.get("decorative") for p in line_prims)
+
+    # Each decorative entity's primitives MUST carry the flag.
+    for ent in (txt, mtxt, hatch):
+        prims = by_handle.get(ent.dxf.handle, [])
+        # Some entities (e.g. very thin text in some fonts) might collapse to
+        # nothing renderable — only assert flagging when there is geometry.
+        if prims:
+            assert all(p.get("decorative") for p in prims), \
+                f"{ent.dxftype()} primitives missing decorative flag"
+
+    # Build the matching handle index — decoratives must drop out.
+    idx = build_handle_index(out.primitives)
+    assert line.dxf.handle in idx
+    for ent in (txt, mtxt, hatch):
+        assert ent.dxf.handle not in idx

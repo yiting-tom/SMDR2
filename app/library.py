@@ -439,8 +439,16 @@ LIBRARIES.get(DEFAULT_LIBRARY_ID)
 
 # ---- Entity index helpers (unchanged) ------------------------------------
 def build_handle_index(primitives: list[dict]) -> dict[str, list[int]]:
+    """Group primitive indices by source DXF handle.
+
+    Primitives flagged `decorative` (TEXT / MTEXT / DIMENSION / HATCH) are
+    excluded — they're rendered for context but must not be selectable or
+    match-able.
+    """
     idx: dict[str, list[int]] = {}
     for i, p in enumerate(primitives):
+        if p.get("decorative"):
+            continue
         h = p.get("handle")
         if not h:
             continue

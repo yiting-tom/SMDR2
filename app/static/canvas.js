@@ -468,6 +468,7 @@ function pickIndexAt(wx, wy) {
   const tol = (PICKBOX_CSS_PX * dpr) / view.zoom;
   // First-hit linear scan, prefer last-drawn (top) on tie by iterating in reverse.
   for (let i = primitives.length - 1; i >= 0; i--) {
+    if (primitives[i].decorative) continue;
     const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
     if (wx < bxmin - tol || wx > bxmax + tol || wy < bymin - tol || wy > bymax + tol) continue;
     if (primHitTest(primitives[i], wx, wy, tol)) return i;
@@ -495,6 +496,7 @@ function buildConnectivity() {
 
   for (let i = 0; i < primitives.length; i++) {
     const p = primitives[i];
+    if (p.decorative) continue;
     if (p.type === "line") {
       addEndpoint(i, p.start[0], p.start[1]);
       addEndpoint(i, p.end[0], p.end[1]);
@@ -626,6 +628,7 @@ function selectByBox(x1, y1, x2, y2, mode, additive) {
   const xmax = Math.max(x1, x2), ymax = Math.max(y1, y2);
   if (!additive) selection.clear();
   for (let i = 0; i < primitives.length; i++) {
+    if (primitives[i].decorative) continue;
     const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
     let hit = false;
     if (mode === "window") {
