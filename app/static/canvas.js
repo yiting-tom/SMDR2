@@ -450,19 +450,33 @@ function render() {
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
-function computeHandlesCentroid(handles) {
+// Returns a [x, y] in world coords for the line endpoint of a handle group.
+// `edge` is optional ("top" | "bottom" | "left" | "right"); when omitted the
+// centre of the combined bbox is used.
+function endpointForHandles(handles, edge) {
   if (!handles || !handles.length) return null;
   ensureHandleStats();
-  let sx = 0, sy = 0, n = 0;
+  let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
+  let found = false;
   for (const h of handles) {
     const s = handleStats.get(h);
     if (!s) continue;
-    sx += (s.xmin + s.xmax) / 2;
-    sy += (s.ymin + s.ymax) / 2;
-    n++;
+    if (s.xmin < xmin) xmin = s.xmin;
+    if (s.ymin < ymin) ymin = s.ymin;
+    if (s.xmax > xmax) xmax = s.xmax;
+    if (s.ymax > ymax) ymax = s.ymax;
+    found = true;
   }
-  if (n === 0) return null;
-  return [sx / n, sy / n];
+  if (!found) return null;
+  const cx = (xmin + xmax) / 2;
+  const cy = (ymin + ymax) / 2;
+  switch (edge) {
+    case "top":    return [cx, ymax];
+    case "bottom": return [cx, ymin];
+    case "left":   return [xmin, cy];
+    case "right":  return [xmax, cy];
+    default:       return [cx, cy];
+  }
 }
 
 function drawFocusedSubRule(hairline) {
@@ -474,8 +488,8 @@ function drawFocusedSubRule(hairline) {
       drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
     }
   }
-  const fc = computeHandlesCentroid(focusedSubRule.from);
-  const tc = computeHandlesCentroid(focusedSubRule.to);
+  const fc = endpointForHandles(focusedSubRule.from, focusedSubRule.from_edge);
+  const tc = endpointForHandles(focusedSubRule.to, focusedSubRule.to_edge);
   if (fc && tc) {
     ctx.strokeStyle = FOCUS_COLOR;
     ctx.lineWidth = hairline * 2.2;
@@ -485,12 +499,22 @@ function drawFocusedSubRule(hairline) {
     ctx.lineTo(tc[0], tc[1]);
     ctx.stroke();
     ctx.setLineDash([]);
+    // Small endpoint markers so the user can tell which edge was used.
+    drawEndpointMarker(fc, hairline);
+    drawEndpointMarker(tc, hairline);
   }
 }
 
+function drawEndpointMarker(pt, hairline) {
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.beginPath();
+  ctx.arc(pt[0], pt[1], hairline * 2.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 function drawFocusedLabel() {
-  const fc = computeHandlesCentroid(focusedSubRule.from);
-  const tc = computeHandlesCentroid(focusedSubRule.to);
+  const fc = endpointForHandles(focusedSubRule.from, focusedSubRule.from_edge);
+  const tc = endpointForHandles(focusedSubRule.to, focusedSubRule.to_edge);
   let midX, midY;
   if (fc && tc) {
     [midX, midY] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
@@ -663,9 +687,11 @@ function focusSubRule(ruleName, idx, rulePass, sub) {
     rulePass: !!rulePass,
     ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
     idx,
-    part: sub.part,
-    from: sub.from || [],
-    to:   sub.to   || [],
+    part:      sub.part,
+    from:      sub.from || [],
+    to:        sub.to   || [],
+    from_edge: sub.from_edge || null,
+    to_edge:   sub.to_edge   || null,
     text: sub.text || "",
   };
   render();

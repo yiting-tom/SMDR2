@@ -111,10 +111,15 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                     f"Substrate-to-first-SMD distance must exceed "
                     f"{SUBSTRATE_TO_SMD_MIN_DIST} mm"
                 )
+                # Demo: anchor the annotation line on edges so it visually
+                # represents "from the top of the substrate to the bottom of
+                # the SMD". Real rules can pick whatever edge makes sense.
                 rule1_sub.append({
                     "part": "BD",
                     "from": list(substrate),
+                    "from_edge": "top",
                     "to":   list(first_smd),
+                    "to_edge": "bottom",
                     "text": f"distance = {dist:.3f} mm "
                             f"({'> ' if rule1_pass else '<= '}{SUBSTRATE_TO_SMD_MIN_DIST} mm)",
                 })
