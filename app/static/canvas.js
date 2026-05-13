@@ -450,33 +450,53 @@ function render() {
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
-// Returns a [x, y] in world coords for the line endpoint of a handle group.
-// `edge` is optional ("top" | "bottom" | "left" | "right"); when omitted the
-// centre of the combined bbox is used.
-function endpointForHandles(handles, edge) {
-  if (!handles || !handles.length) return null;
-  ensureHandleStats();
-  let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
-  let found = false;
-  for (const h of handles) {
-    const s = handleStats.get(h);
-    if (!s) continue;
-    if (s.xmin < xmin) xmin = s.xmin;
-    if (s.ymin < ymin) ymin = s.ymin;
-    if (s.xmax > xmax) xmax = s.xmax;
-    if (s.ymax > ymax) ymax = s.ymax;
-    found = true;
+// Collects every vertex of an entity's flattened primitives in world coords.
+function collectHandlesVertices(handles) {
+  const out = [];
+  if (!handles || !handles.length) return out;
+  const wanted = new Set(handles);
+  for (const p of primitives) {
+    if (!wanted.has(p.handle)) continue;
+    switch (p.type) {
+      case "line":
+        out.push(p.start, p.end);
+        break;
+      case "polyline":
+        for (const pt of p.points) out.push(pt);
+        break;
+      case "filled_polygon":
+        for (const ring of p.rings) for (const pt of ring) out.push(pt);
+        break;
+      case "point":
+        out.push(p.pos);
+        break;
+    }
   }
-  if (!found) return null;
-  const cx = (xmin + xmax) / 2;
-  const cy = (ymin + ymax) / 2;
-  switch (edge) {
-    case "top":    return [cx, ymax];
-    case "bottom": return [cx, ymin];
-    case "left":   return [xmin, cy];
-    case "right":  return [xmax, cy];
-    default:       return [cx, cy];
+  return out;
+}
+
+// Shortest-distance line between two handle groups. Returns [fromPt, toPt]
+// in world coords — the vertex pair with the minimum euclidean distance
+// across the cross-product. Good enough as a visual: for the small handle
+// groups produced by rule check (one entity per side), the all-pairs
+// distance computation is trivially fast.
+function shortestSegmentBetween(handlesA, handlesB) {
+  const ptsA = collectHandlesVertices(handlesA);
+  const ptsB = collectHandlesVertices(handlesB);
+  if (!ptsA.length || !ptsB.length) return null;
+  let best = Infinity, bestA = ptsA[0], bestB = ptsB[0];
+  for (const a of ptsA) {
+    for (const b of ptsB) {
+      const dx = a[0] - b[0], dy = a[1] - b[1];
+      const d2 = dx * dx + dy * dy;
+      if (d2 < best) {
+        best = d2;
+        bestA = a;
+        bestB = b;
+      }
+    }
   }
+  return [bestA, bestB];
 }
 
 function drawFocusedSubRule(hairline) {
@@ -488,9 +508,9 @@ function drawFocusedSubRule(hairline) {
       drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
     }
   }
-  const fc = endpointForHandles(focusedSubRule.from, focusedSubRule.from_edge);
-  const tc = endpointForHandles(focusedSubRule.to, focusedSubRule.to_edge);
-  if (fc && tc) {
+  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+  if (segment) {
+    const [fc, tc] = segment;
     ctx.strokeStyle = FOCUS_COLOR;
     ctx.lineWidth = hairline * 2.2;
     ctx.setLineDash([8 * hairline, 5 * hairline]);
@@ -499,7 +519,6 @@ function drawFocusedSubRule(hairline) {
     ctx.lineTo(tc[0], tc[1]);
     ctx.stroke();
     ctx.setLineDash([]);
-    // Small endpoint markers so the user can tell which edge was used.
     drawEndpointMarker(fc, hairline);
     drawEndpointMarker(tc, hairline);
   }
@@ -513,8 +532,9 @@ function drawEndpointMarker(pt, hairline) {
 }
 
 function drawFocusedLabel() {
-  const fc = endpointForHandles(focusedSubRule.from, focusedSubRule.from_edge);
-  const tc = endpointForHandles(focusedSubRule.to, focusedSubRule.to_edge);
+  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+  const fc = segment ? segment[0] : null;
+  const tc = segment ? segment[1] : null;
   let midX, midY;
   if (fc && tc) {
     [midX, midY] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
@@ -687,11 +707,9 @@ function focusSubRule(ruleName, idx, rulePass, sub) {
     rulePass: !!rulePass,
     ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
     idx,
-    part:      sub.part,
-    from:      sub.from || [],
-    to:        sub.to   || [],
-    from_edge: sub.from_edge || null,
-    to_edge:   sub.to_edge   || null,
+    part: sub.part,
+    from: sub.from || [],
+    to:   sub.to   || [],
     text: sub.text || "",
   };
   render();

@@ -16,9 +16,6 @@ def _bundle(match_json, shapes):
     return {"match_json": match_json, "entity_shapes": shapes}
 
 
-_VALID_EDGES = {None, "top", "bottom", "left", "right"}
-
-
 def _check_envelope(result):
     """Every rule must have the new top-level shape."""
     for name, payload in result.items():
@@ -31,10 +28,6 @@ def _check_envelope(result):
             assert isinstance(sub["from"], list)
             assert isinstance(sub["to"], list)
             assert isinstance(sub["text"], str)
-            # from_edge / to_edge are optional, but if present must be one
-            # of the four cardinal edges.
-            assert sub.get("from_edge") in _VALID_EDGES
-            assert sub.get("to_edge")   in _VALID_EDGES
 
 
 def test_envelope_with_empty_input():
@@ -60,12 +53,9 @@ def test_rule1_passes_with_far_apart_substrate_and_smd():
     assert len(r["Rule1"]["rules"]) == 1
     sub = r["Rule1"]["rules"][0]
     assert sub["part"] == "BD"
-    assert sub["from"] == ["S1"]
-    assert set(sub["to"]) == {"A", "B", "C"}
+    assert sub["from"] == ["S1"]                  # single handle
+    assert sub["to"]   == ["A"]                   # single handle (first SMD)
     assert "distance" in sub["text"]
-    # The mock anchors the annotation line on top→bottom edges.
-    assert sub["from_edge"] == "top"
-    assert sub["to_edge"] == "bottom"
 
 
 def test_rule1_fails_when_too_close():

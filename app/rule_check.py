@@ -13,8 +13,8 @@ RuleChecking JSON format:
             "rules": [              // zero or more concrete checks
                 {
                     "part": "SBT"|"BD"|"POD"|"RING",
-                    "from": [handleID, ...],   // source entities
-                    "to":   [handleID, ...],   // target entities
+                    "from": [handleID],        // single source entity
+                    "to":   [handleID],        // single target entity
                     "text": str                // per-sub-rule message
                 },
                 ...
@@ -22,6 +22,13 @@ RuleChecking JSON format:
         },
         ...
     }
+
+The viewer draws the *shortest distance* between the from and to
+entities — i.e., the segment between the closest pair of vertices
+across the two shapes. The from/to lists are arrays for forward-
+compat (e.g., if a future rule needs to reference a group of
+entities); the viewer collects vertices across every handle in each
+list and finds the global minimum-distance pair.
 """
 
 from __future__ import annotations
@@ -111,15 +118,12 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                     f"Substrate-to-first-SMD distance must exceed "
                     f"{SUBSTRATE_TO_SMD_MIN_DIST} mm"
                 )
-                # Demo: anchor the annotation line on edges so it visually
-                # represents "from the top of the substrate to the bottom of
-                # the SMD". Real rules can pick whatever edge makes sense.
+                # `from`/`to` carry one handle each; the viewer draws the
+                # shortest distance between the two entities' geometries.
                 rule1_sub.append({
                     "part": "BD",
-                    "from": list(substrate),
-                    "from_edge": "top",
-                    "to":   list(first_smd),
-                    "to_edge": "bottom",
+                    "from": [substrate[0]],
+                    "to":   [first_smd[0]],
                     "text": f"distance = {dist:.3f} mm "
                             f"({'> ' if rule1_pass else '<= '}{SUBSTRATE_TO_SMD_MIN_DIST} mm)",
                 })
