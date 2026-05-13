@@ -1,4 +1,4 @@
-"""Mock DRC: product-scoped (cross-DXF) rules."""
+"""Mock DRC: cross-DXF rules with from→to sub-rules."""
 
 from __future__ import annotations
 
@@ -7,79 +7,97 @@ from app.rule_check import check_rules, SUBSTRATE_TO_SMD_MIN_DIST
 
 
 def _shape(handle, x, y):
-    """A small square at (x, y) — enough geometry to have a centroid."""
     return EntityShape.from_points(handle, [
         (x, y), (x + 1.0, y), (x + 1.0, y + 1.0), (x, y + 1.0), (x, y)
     ])
 
 
-def _bd(match_json, shapes):
+def _bundle(match_json, shapes):
     return {"match_json": match_json, "entity_shapes": shapes}
 
 
-def test_output_shape():
-    result = check_rules("p", {})
-    assert isinstance(result, dict)
-    for rule_name, payload in result.items():
-        assert isinstance(rule_name, str)
-        assert "checkRule" in payload
-        assert "pass" in payload
-        assert "handleIds" in payload
+def _check_envelope(result):
+    """Every rule must have the new top-level shape."""
+    for name, payload in result.items():
+        assert isinstance(name, str)
         assert isinstance(payload["pass"], bool)
-        assert isinstance(payload["handleIds"], list)
+        assert isinstance(payload["text"], str)
+        assert isinstance(payload["rules"], list)
+        for sub in payload["rules"]:
+            assert sub["part"] in {"SBT", "BD", "POD", "RING"}
+            assert isinstance(sub["from"], list)
+            assert isinstance(sub["to"], list)
+            assert isinstance(sub["text"], str)
 
 
-def test_rule1_passes_when_bd_substrate_and_smd_are_far_apart():
-    bd_mj = {
-        "substrate.0": [["S1"]],
-        "smd.0":       [["A", "B", "C"]],
-    }
-    bd_shapes = {
+def test_envelope_with_empty_input():
+    r = check_rules("p", {})
+    _check_envelope(r)
+    # No BD / SBT / POD => both rules fail with empty sub-rule lists.
+    assert r["Rule1"]["pass"] is False
+    assert r["Rule1"]["rules"] == []
+    assert r["Rule2"]["pass"] is False
+
+
+def test_rule1_passes_with_far_apart_substrate_and_smd():
+    mj = {"substrate.0": [["S1"]], "smd.0": [["A", "B", "C"]]}
+    shapes = {
         "S1": _shape("S1", 0, 0),
         "A":  _shape("A", 100, 0),
         "B":  _shape("B", 102, 0),
         "C":  _shape("C", 104, 0),
     }
-    res = check_rules("p", {"BD": _bd(bd_mj, bd_shapes)})
-    assert res["Rule1"]["pass"] is True
-    assert "S1" in res["Rule1"]["handleIds"]
+    r = check_rules("p", {"BD": _bundle(mj, shapes)})
+    _check_envelope(r)
+    assert r["Rule1"]["pass"] is True
+    assert len(r["Rule1"]["rules"]) == 1
+    sub = r["Rule1"]["rules"][0]
+    assert sub["part"] == "BD"
+    assert sub["from"] == ["S1"]
+    assert set(sub["to"]) == {"A", "B", "C"}
+    assert "distance" in sub["text"]
 
 
 def test_rule1_fails_when_too_close():
-    bd_mj = {"substrate.0": [["S1"]], "smd.0": [["A", "B", "C"]]}
-    bd_shapes = {
+    mj = {"substrate.0": [["S1"]], "smd.0": [["A", "B", "C"]]}
+    shapes = {
         "S1": _shape("S1", 0, 0),
         "A":  _shape("A", 1, 0),
         "B":  _shape("B", 1.5, 0),
         "C":  _shape("C", 2, 0),
     }
-    res = check_rules("p", {"BD": _bd(bd_mj, bd_shapes)})
-    assert res["Rule1"]["pass"] is False
-    assert f"{SUBSTRATE_TO_SMD_MIN_DIST}" in res["Rule1"]["checkRule"]
+    r = check_rules("p", {"BD": _bundle(mj, shapes)})
+    assert r["Rule1"]["pass"] is False
+    assert f"{SUBSTRATE_TO_SMD_MIN_DIST}" in r["Rule1"]["text"]
+    # Even on failure we emit the sub-rule so the viewer can show the offending line.
+    assert len(r["Rule1"]["rules"]) == 1
 
 
-def test_rule1_fails_without_bd():
-    res = check_rules("p", {"POD": _bd({}, {})})
-    assert res["Rule1"]["pass"] is False
-    assert "BD" in res["Rule1"]["checkRule"]
+def test_rule1_no_subrules_when_bd_missing():
+    r = check_rules("p", {"POD": _bundle({}, {})})
+    assert r["Rule1"]["pass"] is False
+    assert r["Rule1"]["rules"] == []
+    assert "BD" in r["Rule1"]["text"]
 
 
-def test_rule2_cross_dxf_bga_count_match():
-    sbt = _bd({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
-    pod = _bd({"bga_ball.0": [["x"], ["y"], ["z"]]}, {})
-    res = check_rules("p", {"SBT": sbt, "POD": pod})
-    assert res["Rule2"]["pass"] is True
+def test_rule2_cross_dxf_match():
+    sbt = _bundle({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
+    pod = _bundle({"bga_ball.0": [["x"], ["y"], ["z"]]}, {})
+    r = check_rules("p", {"SBT": sbt, "POD": pod})
+    _check_envelope(r)
+    assert r["Rule2"]["pass"] is True
+    # One sub-rule for each part that has BGA balls.
+    parts = sorted(s["part"] for s in r["Rule2"]["rules"])
+    assert parts == ["POD", "SBT"]
 
 
-def test_rule2_cross_dxf_bga_count_mismatch():
-    sbt = _bd({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
-    pod = _bd({"bga_ball.0": [["x"], ["y"]]}, {})
-    res = check_rules("p", {"SBT": sbt, "POD": pod})
-    assert res["Rule2"]["pass"] is False
-    assert "3" in res["Rule2"]["checkRule"] and "2" in res["Rule2"]["checkRule"]
-
-
-def test_rule2_fails_when_either_role_missing():
-    res = check_rules("p", {"SBT": _bd({}, {})})
-    assert res["Rule2"]["pass"] is False
-    assert "POD" in res["Rule2"]["checkRule"]
+def test_rule2_cross_dxf_count_mismatch_still_emits_subrules():
+    sbt = _bundle({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
+    pod = _bundle({"bga_ball.0": [["x"], ["y"]]}, {})
+    r = check_rules("p", {"SBT": sbt, "POD": pod})
+    assert r["Rule2"]["pass"] is False
+    assert "3" in r["Rule2"]["text"] and "2" in r["Rule2"]["text"]
+    # Sub-rules still tag the parts so the viewer can highlight where the
+    # mismatch lives in each DXF.
+    parts = sorted(s["part"] for s in r["Rule2"]["rules"])
+    assert parts == ["POD", "SBT"]

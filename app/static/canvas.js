@@ -30,6 +30,11 @@ const $libraryBody = document.getElementById("library-body");
 const $librarySummary = document.getElementById("library-summary");
 const $productContext = document.getElementById("product-context");
 const $roleSwitcher = document.getElementById("role-switcher");
+
+// Rule-check focus state — populated when the viewer is opened with
+// ?rule=<name>&idx=<i> from the dashboard's rule-result modal.
+let focusedSubRule = null;
+// {ruleName, rulePass, ruleText, part, from, to, text, idx}
 const $modeHint = document.getElementById("mode-hint");
 const $classToolbar = document.getElementById("class-toolbar");
 const ctx = $canvas.getContext("2d");
@@ -52,6 +57,10 @@ const API = {
 
 const $librarySwitcher = document.getElementById("library-switcher");
 
+// Returned from loadFileInfo so the bootstrap can run the focused-rule
+// fetch only when the file lives inside a product.
+let currentFileInfo = null;
+
 async function loadFileInfo() {
   const [fileRes, libsRes] = await Promise.all([
     fetch(API.fileInfo()),
@@ -59,6 +68,7 @@ async function loadFileInfo() {
   ]);
   if (!fileRes.ok || !libsRes.ok) return;
   const file = await fileRes.json();
+  currentFileInfo = file;
   const libs = (await libsRes.json()).libraries;
   $librarySwitcher.innerHTML = "";
   for (const lib of libs) {
@@ -358,6 +368,13 @@ function drawPrimitive(p, opts) {
   }
 }
 
+function worldToScreen(x, y) {
+  return [
+    (x - view.cx) * view.zoom + $canvas.width / 2,
+    -(y - view.cy) * view.zoom + $canvas.height / 2,
+  ];
+}
+
 function render() {
   ctx.fillStyle = background;
   ctx.fillRect(0, 0, $canvas.width, $canvas.height);
@@ -404,6 +421,11 @@ function render() {
       }
     }
   }
+  // Rule-check focused sub-rule: highlight from + to and draw an annotation
+  // line between their centroids.
+  if (focusedSubRule) {
+    drawFocusedSubRule(hairline);
+  }
 
   // Drag rectangle (window or crossing).
   if (drag && drag.kind === "box" && drag.currentWorld) {
@@ -422,6 +444,118 @@ function render() {
   }
 
   ctx.restore();
+
+  // Screen-space annotations (don't scale with zoom).
+  if (focusedSubRule) drawFocusedLabel();
+}
+
+// ---- focused sub-rule from rule check ------------------------------------
+function computeHandlesCentroid(handles) {
+  if (!handles || !handles.length) return null;
+  ensureHandleStats();
+  let sx = 0, sy = 0, n = 0;
+  for (const h of handles) {
+    const s = handleStats.get(h);
+    if (!s) continue;
+    sx += (s.xmin + s.xmax) / 2;
+    sy += (s.ymin + s.ymax) / 2;
+    n++;
+  }
+  if (n === 0) return null;
+  return [sx / n, sy / n];
+}
+
+function drawFocusedSubRule(hairline) {
+  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
+  const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1.5);
+  const handles = new Set([...(focusedSubRule.from ?? []), ...(focusedSubRule.to ?? [])]);
+  for (const p of primitives) {
+    if (handles.has(p.handle)) {
+      drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
+    }
+  }
+  const fc = computeHandlesCentroid(focusedSubRule.from);
+  const tc = computeHandlesCentroid(focusedSubRule.to);
+  if (fc && tc) {
+    ctx.strokeStyle = FOCUS_COLOR;
+    ctx.lineWidth = hairline * 2.2;
+    ctx.setLineDash([8 * hairline, 5 * hairline]);
+    ctx.beginPath();
+    ctx.moveTo(fc[0], fc[1]);
+    ctx.lineTo(tc[0], tc[1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+function drawFocusedLabel() {
+  const fc = computeHandlesCentroid(focusedSubRule.from);
+  const tc = computeHandlesCentroid(focusedSubRule.to);
+  let midX, midY;
+  if (fc && tc) {
+    [midX, midY] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
+  } else if (fc) {
+    [midX, midY] = worldToScreen(fc[0], fc[1]);
+  } else if (tc) {
+    [midX, midY] = worldToScreen(tc[0], tc[1]);
+  } else {
+    return;
+  }
+  const text = focusedSubRule.text || focusedSubRule.ruleText || "";
+  if (!text) return;
+  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
+  ctx.save();
+  ctx.font = `${13 * dpr}px ui-monospace, monospace`;
+  const m = ctx.measureText(text);
+  const padX = 9 * dpr, padY = 5 * dpr;
+  const tw = m.width + padX * 2;
+  const th = 16 * dpr + padY * 2;
+  const x = midX - tw / 2, y = midY - th - 10 * dpr;
+  ctx.fillStyle = "rgba(0,0,0,0.85)";
+  ctx.fillRect(x, y, tw, th);
+  ctx.strokeStyle = FOCUS_COLOR;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeRect(x, y, tw, th);
+  ctx.fillStyle = FOCUS_COLOR;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, midX, y + th / 2);
+  ctx.restore();
+}
+
+async function loadFocusedRule(productId, role) {
+  const params = new URLSearchParams(location.search);
+  const ruleName = params.get("rule");
+  const idxStr = params.get("idx");
+  if (!ruleName || idxStr === null) return;
+  const idx = parseInt(idxStr, 10);
+  try {
+    const res = await fetch(`/api/products/${productId}/rule-check`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const rule = data.results?.[ruleName];
+    if (!rule) return;
+    const sub = rule.rules?.[idx];
+    if (!sub) return;
+    if (sub.part !== role) {
+      setBaseStatus(`sub-rule's part is ${sub.part}, this DXF is ${role}`);
+      return;
+    }
+    focusedSubRule = {
+      ruleName,
+      rulePass: !!rule.pass,
+      ruleText: rule.text,
+      idx,
+      part: sub.part,
+      from: sub.from || [],
+      to:   sub.to   || [],
+      text: sub.text || "",
+    };
+    render();
+    setBaseStatus(`Rule check focus: ${ruleName} · ${sub.text}`);
+  } catch (e) {
+    console.error("loadFocusedRule failed:", e);
+  }
 }
 
 // ---- hit-tests -----------------------------------------------------------
@@ -1374,6 +1508,11 @@ async function load() {
   // Pre-match overlay was computed at preprocessing time; show it
   // automatically so user sees library coverage on arrival.
   await loadPrematch();
+  // If the URL has ?rule=<name>&idx=<i>, fetch the product's saved rule
+  // check and highlight the corresponding sub-rule.
+  if (currentFileInfo?.product_id && currentFileInfo?.dxf_role) {
+    await loadFocusedRule(currentFileInfo.product_id, currentFileInfo.dxf_role);
+  }
 }
 
 load();

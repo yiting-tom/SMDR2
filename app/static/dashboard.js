@@ -277,17 +277,61 @@ async function runRuleCheck(p) {
   $status.textContent =
     `Rule check on "${p.name}": ${data.pass_count}/${data.rule_count} pass ` +
     `(roles: ${data.roles_covered.join(", ")})`;
-  alert(formatRuleResultDialog(p.name, data));
   await refresh();
+  showRuleResults(p, data);
 }
 
-function formatRuleResultDialog(productName, data) {
-  const lines = [`Rule check — ${productName}`, `Pass: ${data.pass_count}/${data.rule_count}`, ""];
-  for (const [name, r] of Object.entries(data.results)) {
-    const tick = r.pass ? "✓" : "✗";
-    lines.push(`${tick} ${name}: ${r.checkRule}`);
+const $ruleResultsModal = document.getElementById("rule-results-modal");
+const $ruleResultsTitle = document.getElementById("rule-results-title");
+const $ruleResultsSummary = document.getElementById("rule-results-summary");
+const $ruleResultsBody = document.getElementById("rule-results-body");
+
+$ruleResultsModal.addEventListener("click", (e) => {
+  if (e.target.matches("[data-close]")) $ruleResultsModal.hidden = true;
+});
+
+function showRuleResults(product, data) {
+  $ruleResultsTitle.textContent = `Rule Check — ${product.name}`;
+  $ruleResultsSummary.textContent =
+    `${data.pass_count}/${data.rule_count} pass · roles: ${data.roles_covered.join(", ")}`;
+  $ruleResultsBody.innerHTML = "";
+
+  for (const [name, rule] of Object.entries(data.results)) {
+    const card = document.createElement("section");
+    card.className = "rule-result-card";
+    const status = rule.pass ? "✓" : "✗";
+    const statusClass = rule.pass ? "pass" : "fail";
+    card.innerHTML =
+      `<header>` +
+        `<span class="status ${statusClass}">${status}</span>` +
+        `<span class="name">${escapeHtml(name)}</span>` +
+        `<span class="text">${escapeHtml(rule.text || "")}</span>` +
+      `</header>` +
+      `<ol class="subrules"></ol>`;
+    const subList = card.querySelector(".subrules");
+    const subs = rule.rules || [];
+    if (!subs.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No sub-rules emitted (rule could not be evaluated)";
+      subList.appendChild(li);
+    } else {
+      subs.forEach((sub, idx) => {
+        const file = product.files_by_role[sub.part];
+        const li = document.createElement("li");
+        const viewBtn = file
+          ? `<a class="view-link" href="/viewer/${file.id}?rule=${encodeURIComponent(name)}&idx=${idx}">View in ${sub.part} →</a>`
+          : `<span class="no-file">${sub.part} not uploaded</span>`;
+        li.innerHTML =
+          `<span class="part">${escapeHtml(sub.part)}</span>` +
+          `<span class="text">${escapeHtml(sub.text || "")}</span>` +
+          viewBtn;
+        subList.appendChild(li);
+      });
+    }
+    $ruleResultsBody.appendChild(card);
   }
-  return lines.join("\n");
+  $ruleResultsModal.hidden = false;
 }
 
 // ---- polling -------------------------------------------------------------

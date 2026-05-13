@@ -53,6 +53,20 @@
     </div>
   </div>
 
+  <!-- Rule check results modal -->
+  <div id="rule-results-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Rule Check results">
+      <header class="modal-header">
+        <h2 id="rule-results-title">Rule Check</h2>
+        <span id="rule-results-summary"></span>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div id="rule-results-body"></div>
+    </div>
+  </div>
+
   <!-- Hidden file picker reused per slot -->
   <input type="file" id="file-input" accept=".dxf" hidden />
 

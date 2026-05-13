@@ -1,32 +1,26 @@
 """Design Rule Checking (DRC) — mock for now.
 
-DRC is product-scoped: it sees every uploaded DXF in the product, keyed
-by role (SBT, BD, POD, RING). The real implementation lives elsewhere;
-this module provides a correctly-shaped mock so the UI and downstream
-integration can be developed end-to-end.
+DRC is product-scoped: it receives every uploaded DXF in the product
+keyed by role (SBT, BD, POD, RING) and returns RuleChecking JSON whose
+*sub-rules* each describe a from→to relationship on a specific DXF that
+the viewer can highlight + draw an annotation line for.
 
-Input
------
-`check_rules(product_id, dxfs_by_role)` where `dxfs_by_role` is:
-
-    {
-        "SBT": {"file_id": ..., "dxf_path": ..., "match_json": {...},
-                "entity_shapes": {handle: EntityShape}},
-        "BD":  {...},
-        "POD": {...},
-        "RING": {...},
-    }
-
-(roles absent from the product simply don't appear as keys.)
-
-Output — RuleChecking JSON
---------------------------
+RuleChecking JSON format:
     {
         "<ruleName>": {
-            "checkRule":  str,
-            "pass":        bool,
-            "handleIds":  [str, ...],  // entities for the UI to highlight
-        }, ...
+            "pass": bool,
+            "text": str,            // overall rule description
+            "rules": [              // zero or more concrete checks
+                {
+                    "part": "SBT"|"BD"|"POD"|"RING",
+                    "from": [handleID, ...],   // source entities
+                    "to":   [handleID, ...],   // target entities
+                    "text": str                // per-sub-rule message
+                },
+                ...
+            ]
+        },
+        ...
     }
 """
 
@@ -41,21 +35,29 @@ if TYPE_CHECKING:
 
 
 MatchJson = dict[str, list[list[str]]]
-RoleBundle = dict[str, dict]   # {role: {match_json, entity_shapes, ...}}
+RoleBundle = dict[str, dict]
+SubRule = dict[str, object]
 RuleResult = dict[str, dict[str, object]]
 
 
-# Thresholds (mm)
 SUBSTRATE_TO_SMD_MIN_DIST = 5.0
 
 
 # ---- helpers --------------------------------------------------------------
 def _first_match_handles(match_json: MatchJson, class_prefix: str) -> list[str] | None:
-    """First-occurrence entity handles for a class. None if no match exists."""
     for key, matches in match_json.items():
         if key.startswith(f"{class_prefix}.") and matches:
             return list(matches[0])
     return None
+
+
+def _all_handles_for_prefix(match_json: MatchJson, class_prefix: str) -> list[str]:
+    out: list[str] = []
+    for key, matches in match_json.items():
+        if key.startswith(f"{class_prefix}."):
+            for m in matches:
+                out.extend(m)
+    return out
 
 
 def _count_for_prefix(match_json: MatchJson, class_prefix: str) -> int:
@@ -81,80 +83,78 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
     """Mock product-scoped DRC. Replace with the real implementation when ready."""
     results: RuleResult = {}
 
-    # ---- Rule1 (single-DXF, BD): substrate-to-first-SMD distance > 5 mm
+    # ---- Rule1: substrate-to-first-SMD distance in BD --------------------
     bd = dxfs_by_role.get("BD")
+    rule1_sub: list[SubRule] = []
+    rule1_pass = False
+    rule1_text = "BD: substrate-to-first-SMD distance check"
     if bd is None:
-        results["Rule1"] = {
-            "checkRule": "BD DXF required for substrate-to-SMD distance check (not uploaded)",
-            "pass": False,
-            "handleIds": [],
-        }
+        rule1_text = "BD DXF required (not uploaded)"
     else:
         substrate = _first_match_handles(bd["match_json"], "substrate")
         first_smd = _first_match_handles(bd["match_json"], "smd")
         shapes = bd["entity_shapes"]
         if not substrate or not first_smd:
-            results["Rule1"] = {
-                "checkRule": (
-                    "BD must contain at least one substrate and one SMD; "
-                    f"found substrate={'yes' if substrate else 'no'}, "
-                    f"smd={'yes' if first_smd else 'no'}"
-                ),
-                "pass": False,
-                "handleIds": (substrate or []) + (first_smd or []),
-            }
+            rule1_text = (
+                f"BD must contain at least one substrate and one SMD "
+                f"(substrate={'yes' if substrate else 'no'}, smd={'yes' if first_smd else 'no'})"
+            )
         else:
             sub_c = _combined_centroid(shapes, substrate)
             smd_c = _combined_centroid(shapes, first_smd)
             if sub_c is None or smd_c is None:
-                results["Rule1"] = {
-                    "checkRule": "BD substrate/SMD centroid could not be computed",
-                    "pass": False,
-                    "handleIds": list(substrate) + list(first_smd),
-                }
+                rule1_text = "BD substrate/SMD centroid could not be computed"
             else:
                 dist = float(np.linalg.norm(sub_c - smd_c))
-                results["Rule1"] = {
-                    "checkRule": (
-                        f"BD: substrate-to-first-SMD distance must exceed "
-                        f"{SUBSTRATE_TO_SMD_MIN_DIST} mm (actual: {dist:.3f} mm)"
-                    ),
-                    "pass": dist > SUBSTRATE_TO_SMD_MIN_DIST,
-                    "handleIds": list(substrate) + list(first_smd),
-                }
+                rule1_pass = dist > SUBSTRATE_TO_SMD_MIN_DIST
+                rule1_text = (
+                    f"Substrate-to-first-SMD distance must exceed "
+                    f"{SUBSTRATE_TO_SMD_MIN_DIST} mm"
+                )
+                rule1_sub.append({
+                    "part": "BD",
+                    "from": list(substrate),
+                    "to":   list(first_smd),
+                    "text": f"distance = {dist:.3f} mm "
+                            f"({'> ' if rule1_pass else '<= '}{SUBSTRATE_TO_SMD_MIN_DIST} mm)",
+                })
+    results["Rule1"] = {"pass": rule1_pass, "text": rule1_text, "rules": rule1_sub}
 
-    # ---- Rule2 (cross-DXF SBT × POD): bga_ball count consistency
+    # ---- Rule2: SBT and POD must agree on BGA-ball count -----------------
     sbt = dxfs_by_role.get("SBT")
     pod = dxfs_by_role.get("POD")
+    rule2_sub: list[SubRule] = []
+    rule2_pass = False
     if sbt is None or pod is None:
-        results["Rule2"] = {
-            "checkRule": (
-                "SBT and POD both required for BGA-count consistency check "
-                f"(SBT={'present' if sbt else 'missing'}, "
-                f"POD={'present' if pod else 'missing'})"
-            ),
-            "pass": False,
-            "handleIds": [],
-        }
+        rule2_text = (
+            f"SBT and POD both required (SBT={'yes' if sbt else 'no'}, "
+            f"POD={'yes' if pod else 'no'})"
+        )
     else:
-        sbt_bga = _count_for_prefix(sbt["match_json"], "bga_ball")
-        pod_bga = _count_for_prefix(pod["match_json"], "bga_ball")
-        sbt_handles = []
-        for key, matches in sbt["match_json"].items():
-            if key.startswith("bga_ball."):
-                for m in matches: sbt_handles.extend(m)
-        pod_handles = []
-        for key, matches in pod["match_json"].items():
-            if key.startswith("bga_ball."):
-                for m in matches: pod_handles.extend(m)
-        results["Rule2"] = {
-            "checkRule": (
-                f"SBT BGA count must equal POD BGA count "
-                f"(SBT={sbt_bga}, POD={pod_bga})"
-            ),
-            "pass": sbt_bga == pod_bga,
-            # Sample a few from each side so the panel hover stays snappy.
-            "handleIds": sbt_handles[:50] + pod_handles[:50],
-        }
+        sbt_count = _count_for_prefix(sbt["match_json"], "bga_ball")
+        pod_count = _count_for_prefix(pod["match_json"], "bga_ball")
+        sbt_handles = _all_handles_for_prefix(sbt["match_json"], "bga_ball")
+        pod_handles = _all_handles_for_prefix(pod["match_json"], "bga_ball")
+        rule2_pass = sbt_count == pod_count
+        rule2_text = f"SBT BGA count ({sbt_count}) must equal POD BGA count ({pod_count})"
+
+        # Pair the first SBT BGA with the first POD BGA so the viewer (per
+        # part) has a concrete from→to to draw. We emit one sub-rule per
+        # part so the viewer for that DXF can render the annotation.
+        if sbt_handles:
+            rule2_sub.append({
+                "part": "SBT",
+                "from": sbt_handles[:1],
+                "to":   sbt_handles[-1:] if len(sbt_handles) > 1 else [],
+                "text": f"SBT bga_ball count = {sbt_count}",
+            })
+        if pod_handles:
+            rule2_sub.append({
+                "part": "POD",
+                "from": pod_handles[:1],
+                "to":   pod_handles[-1:] if len(pod_handles) > 1 else [],
+                "text": f"POD bga_ball count = {pod_count}",
+            })
+    results["Rule2"] = {"pass": rule2_pass, "text": rule2_text, "rules": rule2_sub}
 
     return results

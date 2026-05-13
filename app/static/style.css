@@ -548,6 +548,97 @@ body.dashboard main.dashboard-main {
   color: #00ffff;
   border-color: #00ffff;
 }
+.modal .modal-wide { width: min(960px, 96vw); }
+
+/* Rule-check results --------------------------------------------------- */
+#rule-results-body {
+  overflow-y: auto;
+  padding: 0.6rem 1rem 1rem 1rem;
+}
+.rule-result-card {
+  border: 1px solid #2a3340;
+  border-radius: 4px;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.6rem;
+}
+.rule-result-card > header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-bottom: 0.4rem;
+}
+.rule-result-card .status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+.rule-result-card .status.pass { background: rgba(105, 240, 174, 0.18); color: #69f0ae; }
+.rule-result-card .status.fail { background: rgba(255, 82, 82, 0.18);  color: #ff5252; }
+.rule-result-card .name {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+}
+.rule-result-card .text { color: #9aa5b1; font-size: 0.84rem; }
+
+.rule-result-card .subrules {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.rule-result-card .subrules li {
+  display: grid;
+  grid-template-columns: 4ch 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.32rem 0.5rem;
+  border-left: 2px solid #2a3340;
+  background: #0f1318;
+  border-radius: 0 3px 3px 0;
+  font-size: 0.84rem;
+}
+.rule-result-card .subrules li .part {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #00ffff;
+}
+.rule-result-card .subrules li .text { color: #c0cad6; font-size: 0.82rem; }
+.rule-result-card .subrules li .view-link {
+  color: #69f0ae;
+  text-decoration: none;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.18rem 0.6rem;
+  font-size: 0.78rem;
+}
+.rule-result-card .subrules li .view-link:hover {
+  border-color: #69f0ae;
+  background: rgba(105, 240, 174, 0.07);
+}
+.rule-result-card .subrules li .no-file {
+  color: #5d8aa8;
+  font-size: 0.78rem;
+}
+.rule-result-card .subrules li.empty {
+  display: block;
+  color: #5d8aa8;
+  border-left: 2px dashed #2a3340;
+  text-align: center;
+  font-size: 0.78rem;
+  padding: 0.4rem 0.5rem;
+}
 
 #upload-zone {
   border: 2px dashed #2a3340;
