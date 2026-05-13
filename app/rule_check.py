@@ -48,6 +48,7 @@ RuleResult = dict[str, dict[str, object]]
 
 
 SUBSTRATE_TO_SMD_MIN_DIST = 5.0
+SMD_TO_SUBSTRATE_MAX_DIST = 5.0
 
 
 # ---- helpers --------------------------------------------------------------
@@ -58,31 +59,103 @@ def _first_match_handles(match_json: MatchJson, class_prefix: str) -> list[str] 
     return None
 
 
-def _all_handles_for_prefix(match_json: MatchJson, class_prefix: str) -> list[str]:
-    out: list[str] = []
+def _all_match_groups(match_json: MatchJson, class_prefix: str) -> list[list[str]]:
+    """Every match group of the given class — one inner list per occurrence."""
+    out: list[list[str]] = []
     for key, matches in match_json.items():
         if key.startswith(f"{class_prefix}."):
             for m in matches:
-                out.extend(m)
+                out.append(list(m))
+    return out
+
+
+def _all_handles_for_prefix(match_json: MatchJson, class_prefix: str) -> list[str]:
+    out: list[str] = []
+    for groups in _all_match_groups(match_json, class_prefix):
+        out.extend(groups)
     return out
 
 
 def _count_for_prefix(match_json: MatchJson, class_prefix: str) -> int:
-    n = 0
-    for key, matches in match_json.items():
-        if key.startswith(f"{class_prefix}."):
-            n += len(matches)
-    return n
+    return sum(1 for _ in _all_match_groups(match_json, class_prefix))
 
 
-def _combined_centroid(
-    entity_shapes: dict[str, "EntityShape"],
-    handles: list[str],
-) -> np.ndarray | None:
-    pts = [entity_shapes[h].centroid for h in handles if h in entity_shapes]
-    if not pts:
+# Geometric shortest-distance helpers (mirror canvas.js shortestSegmentBetween).
+def _collect_segments(shapes: dict[str, "EntityShape"], handles: list[str]) -> list[tuple]:
+    """List of (a, b) point pairs forming the edges of every handle's geometry.
+    Treats any shape with ≥ 3 vertices as closed (good enough for the closed
+    polylines / circles / rectangles SMDR2 deals with)."""
+    segs: list[tuple] = []
+    for h in handles:
+        s = shapes.get(h)
+        if s is None:
+            continue
+        pts = s.points
+        n = pts.shape[0] if pts.ndim == 2 else 0
+        if n == 0:
+            continue
+        if n == 1:
+            p = (float(pts[0, 0]), float(pts[0, 1]))
+            segs.append((p, p))
+            continue
+        for i in range(1, n):
+            segs.append((
+                (float(pts[i - 1, 0]), float(pts[i - 1, 1])),
+                (float(pts[i, 0]),     float(pts[i, 1])),
+            ))
+        if n >= 3:
+            a = (float(pts[-1, 0]), float(pts[-1, 1]))
+            b = (float(pts[0, 0]),  float(pts[0, 1]))
+            if a != b:
+                segs.append((a, b))
+    return segs
+
+
+def _point_to_segment_dist(p, a, b) -> float:
+    dx = b[0] - a[0]; dy = b[1] - a[1]
+    len2 = dx * dx + dy * dy
+    if len2 == 0.0:
+        ex = p[0] - a[0]; ey = p[1] - a[1]
+        return (ex * ex + ey * ey) ** 0.5
+    t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2
+    if t < 0.0: t = 0.0
+    elif t > 1.0: t = 1.0
+    fx = a[0] + t * dx; fy = a[1] + t * dy
+    ex = p[0] - fx; ey = p[1] - fy
+    return (ex * ex + ey * ey) ** 0.5
+
+
+def _shortest_distance(
+    shapes: dict[str, "EntityShape"],
+    handles_a: list[str],
+    handles_b: list[str],
+) -> float | None:
+    segs_a = _collect_segments(shapes, handles_a)
+    segs_b = _collect_segments(shapes, handles_b)
+    if not segs_a or not segs_b:
         return None
-    return np.mean(np.stack(pts), axis=0)
+    best = float("inf")
+    seen_a: set = set()
+    for u, v in segs_a:
+        for p in (u, v):
+            if p in seen_a:
+                continue
+            seen_a.add(p)
+            for q1, q2 in segs_b:
+                d = _point_to_segment_dist(p, q1, q2)
+                if d < best:
+                    best = d
+    seen_b: set = set()
+    for u, v in segs_b:
+        for p in (u, v):
+            if p in seen_b:
+                continue
+            seen_b.add(p)
+            for q1, q2 in segs_a:
+                d = _point_to_segment_dist(p, q1, q2)
+                if d < best:
+                    best = d
+    return best
 
 
 # ---- main entry -----------------------------------------------------------
@@ -90,7 +163,7 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
     """Mock product-scoped DRC. Replace with the real implementation when ready."""
     results: RuleResult = {}
 
-    # ---- Rule1: substrate-to-first-SMD distance in BD --------------------
+    # ---- Rule1: substrate-to-first-SMD shortest distance in BD -----------
     bd = dxfs_by_role.get("BD")
     rule1_sub: list[SubRule] = []
     rule1_pass = False
@@ -107,23 +180,19 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                 f"(substrate={'yes' if substrate else 'no'}, smd={'yes' if first_smd else 'no'})"
             )
         else:
-            sub_c = _combined_centroid(shapes, substrate)
-            smd_c = _combined_centroid(shapes, first_smd)
-            if sub_c is None or smd_c is None:
-                rule1_text = "BD substrate/SMD centroid could not be computed"
+            dist = _shortest_distance(shapes, substrate, first_smd)
+            if dist is None:
+                rule1_text = "BD substrate/SMD geometry could not be computed"
             else:
-                dist = float(np.linalg.norm(sub_c - smd_c))
                 rule1_pass = dist > SUBSTRATE_TO_SMD_MIN_DIST
                 rule1_text = (
                     f"Substrate-to-first-SMD distance must exceed "
                     f"{SUBSTRATE_TO_SMD_MIN_DIST} mm"
                 )
-                # `from`/`to` carry one handle each; the viewer draws the
-                # shortest distance between the two entities' geometries.
                 rule1_sub.append({
                     "part": "BD",
-                    "from": [substrate[0]],
-                    "to":   [first_smd[0]],
+                    "from": list(substrate),
+                    "to":   list(first_smd),
                     "text": f"distance = {dist:.3f} mm "
                             f"({'> ' if rule1_pass else '<= '}{SUBSTRATE_TO_SMD_MIN_DIST} mm)",
                 })
@@ -165,5 +234,41 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                 "text": f"POD bga_ball count = {pod_count}",
             })
     results["Rule2"] = {"pass": rule2_pass, "text": rule2_text, "rules": rule2_sub}
+
+    # ---- Rule3: every SMD must be within 5 mm of the substrate in BD -----
+    rule3_sub: list[SubRule] = []
+    rule3_pass = False
+    if bd is None:
+        rule3_text = "BD DXF required for SMD-to-substrate proximity check (not uploaded)"
+    else:
+        substrate = _first_match_handles(bd["match_json"], "substrate")
+        smd_groups = _all_match_groups(bd["match_json"], "smd")
+        shapes = bd["entity_shapes"]
+        if not substrate:
+            rule3_text = "BD must contain a substrate"
+        elif not smd_groups:
+            rule3_text = "BD has no SMD matches to evaluate"
+        else:
+            all_under = True
+            for i, smd_handles in enumerate(smd_groups):
+                dist = _shortest_distance(shapes, smd_handles, substrate)
+                if dist is None:
+                    continue
+                passes = dist < SMD_TO_SUBSTRATE_MAX_DIST
+                if not passes:
+                    all_under = False
+                rule3_sub.append({
+                    "part": "BD",
+                    "from": list(smd_handles),
+                    "to":   list(substrate),
+                    "text": f"SMD #{i + 1} → substrate = {dist:.3f} mm "
+                            f"({'< ' if passes else '>= '}{SMD_TO_SUBSTRATE_MAX_DIST} mm)",
+                })
+            rule3_pass = all_under
+            rule3_text = (
+                f"Every SMD must be within {SMD_TO_SUBSTRATE_MAX_DIST} mm of the substrate "
+                f"({len(smd_groups)} SMD{'' if len(smd_groups) == 1 else 's'} checked)"
+            )
+    results["Rule3"] = {"pass": rule3_pass, "text": rule3_text, "rules": rule3_sub}
 
     return results
