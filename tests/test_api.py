@@ -35,14 +35,20 @@ def test_files_endpoint_returns_a_list():
         assert "files" in r.json()
 
 
-def test_upload_rejects_non_dxf():
+def test_upload_to_product_rejects_non_dxf():
     from fastapi.testclient import TestClient
     from app.main import app
     with TestClient(app) as client:
-        r = client.post("/api/files", files={"files": ("a.txt", b"not dxf", "text/plain")})
-        assert r.status_code == 200
-        body = r.json()
-        assert body["files"][0].get("skipped")
+        # Create a fresh product to upload into.
+        cr = client.post("/api/products", json={"name": "test-product", "library_id": "default"})
+        assert cr.status_code == 200
+        pid = cr.json()["id"]
+        r = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("a.txt", b"not dxf", "text/plain")},
+            data={"dxf_role": "BD"},
+        )
+        assert r.status_code == 400
 
 
 def test_match_endpoint_on_missing_file_404s():

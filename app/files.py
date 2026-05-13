@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS files (
     bbox_xmax       REAL,
     bbox_ymax       REAL,
     background      TEXT,
-    library_id      TEXT NOT NULL DEFAULT 'default'
+    library_id      TEXT NOT NULL DEFAULT 'default',
+    product_id      TEXT,
+    dxf_role        TEXT,
+    match_saved     INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -62,6 +65,9 @@ class FileRecord:
     uploaded_at: float
     status: str
     library_id: str = "default"
+    product_id: str | None = None
+    dxf_role: str | None = None
+    match_saved: bool = False
     error: str | None = None
     parsed_at: float | None = None
     primitive_count: int | None = None
@@ -76,6 +82,9 @@ class FileRecord:
             "uploaded_at": self.uploaded_at,
             "status": self.status,
             "library_id": self.library_id,
+            "product_id": self.product_id,
+            "dxf_role": self.dxf_role,
+            "match_saved": self.match_saved,
             "error": self.error,
             "parsed_at": self.parsed_at,
             "primitive_count": self.primitive_count,
@@ -116,21 +125,49 @@ class FileStore:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_library ON files(library_id)"
             )
+            # Product / role / match_saved migration for pre-product DBs.
+            cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(files)")]
+            if "product_id" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN product_id TEXT")
+            if "dxf_role" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN dxf_role TEXT")
+            if "match_saved" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE files ADD COLUMN match_saved INTEGER NOT NULL DEFAULT 0"
+                )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
+            )
+            # A product can have at most one file per role.
+            self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_product_role "
+                "ON files(product_id, dxf_role) "
+                "WHERE product_id IS NOT NULL AND dxf_role IS NOT NULL"
+            )
 
     # ---- writes -----------------------------------------------------------
-    def register(self, file_id: str, name: str, size: int,
-                 library_id: str = "default") -> FileRecord:
+    def register(
+        self,
+        file_id: str,
+        name: str,
+        size: int,
+        library_id: str = "default",
+        product_id: str | None = None,
+        dxf_role: str | None = None,
+    ) -> FileRecord:
         rec = FileRecord(
             id=file_id, name=name, size=size,
             uploaded_at=time.time(), status=PREPROCESSING,
             library_id=library_id,
+            product_id=product_id, dxf_role=dxf_role,
         )
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO files "
-                "(id, name, size, uploaded_at, status, library_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (rec.id, rec.name, rec.size, rec.uploaded_at, rec.status, rec.library_id),
+                "(id, name, size, uploaded_at, status, library_id, product_id, dxf_role, match_saved) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (rec.id, rec.name, rec.size, rec.uploaded_at, rec.status,
+                 rec.library_id, rec.product_id, rec.dxf_role),
             )
         return rec
 
@@ -140,6 +177,21 @@ class FileStore:
                 "UPDATE files SET library_id = ? WHERE id = ?",
                 (library_id, file_id),
             )
+
+    def set_match_saved(self, file_id: str, value: bool = True) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET match_saved = ? WHERE id = ?",
+                (1 if value else 0, file_id),
+            )
+
+    def list_by_product(self, product_id: str) -> list[FileRecord]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM files WHERE product_id = ? ORDER BY dxf_role",
+                (product_id,),
+            ).fetchall()
+        return [_row_to_record(r) for r in rows]
 
     def update_status(self, file_id: str, status: str, error: str | None = None) -> None:
         with self.lock, self.conn:
@@ -184,11 +236,13 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
     bbox = None
     if row["bbox_xmin"] is not None:
         bbox = (row["bbox_xmin"], row["bbox_ymin"], row["bbox_xmax"], row["bbox_ymax"])
-    # `library_id` is added by migration; older rows may not have it (defaults).
     try:
         library_id = row["library_id"]
     except (IndexError, KeyError):
         library_id = "default"
+    def _get(col, default=None):
+        try: return row[col]
+        except (IndexError, KeyError): return default
     return FileRecord(
         id=row["id"],
         name=row["name"],
@@ -196,6 +250,9 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         uploaded_at=row["uploaded_at"],
         status=row["status"],
         library_id=library_id or "default",
+        product_id=_get("product_id"),
+        dxf_role=_get("dxf_role"),
+        match_saved=bool(_get("match_saved", 0)),
         error=row["error"],
         parsed_at=row["parsed_at"],
         primitive_count=row["primitive_count"],

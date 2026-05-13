@@ -46,6 +46,7 @@ from app.matching import (
     find_matches,
     find_matches_from_pointsets,
 )
+from app.products import PRODUCT_STORE, VALID_ROLES, Product
 from app.rule_check import check_rules
 from app.storage import (
     DATA_DIR,
@@ -111,14 +112,22 @@ def _file_id_from_path(path: Path) -> str:
 
 
 def _ensure_test_dxf_registered() -> None:
-    """First-run convenience: pull `data/test.dxf` into the upload pool."""
+    """First-run convenience: pull `data/test.dxf` into a Sample product."""
     if not TEST_DXF.exists():
         return
     fid = _file_id_from_path(TEST_DXF)
+    # Find or create the auto-Sample product.
+    sample = next((p for p in PRODUCT_STORE.list_all() if p.name == "Sample"), None)
+    if sample is None:
+        sample = PRODUCT_STORE.create("Sample", DEFAULT_LIBRARY_ID)
     rec = FILE_STORE.get(fid)
     if rec is None:
-        FILE_STORE.register(fid, "test.dxf", TEST_DXF.stat().st_size,
-                            library_id=DEFAULT_LIBRARY_ID)
+        FILE_STORE.register(
+            fid, "test.dxf", TEST_DXF.stat().st_size,
+            library_id=sample.library_id,
+            product_id=sample.id,
+            dxf_role="BD",
+        )
         rec = FILE_STORE.get(fid)
     dst = upload_path(fid)
     if not dst.exists():
@@ -161,48 +170,137 @@ async def viewer(request: Request, file_id: str) -> HTMLResponse:
     )
 
 
-# ---- File API ------------------------------------------------------------
-@app.post("/api/files")
-async def upload_files(
-    files: list[UploadFile] = File(...),
-    library_id: str = Form(DEFAULT_LIBRARY_ID),
-) -> dict:
-    if not files:
-        raise HTTPException(status_code=400, detail="no files")
-    if not LIBRARIES.exists(library_id):
-        raise HTTPException(status_code=400, detail=f"unknown library {library_id!r}")
-    results = []
+# ---- Product API ---------------------------------------------------------
+class CreateProductRequest(BaseModel):
+    name: str
+    library_id: str = DEFAULT_LIBRARY_ID
+
+
+@app.get("/api/products")
+async def list_products() -> dict:
+    """Every product with its files (per role) and rule-check readiness."""
+    items = []
+    for p in PRODUCT_STORE.list_all():
+        files = FILE_STORE.list_by_product(p.id)
+        by_role = {role: None for role in VALID_ROLES}
+        for f in files:
+            if f.dxf_role in by_role:
+                by_role[f.dxf_role] = f.to_dict()
+        uploaded = [f for f in files if f.dxf_role is not None]
+        ready_for_rc = bool(uploaded) and all(f.match_saved for f in uploaded)
+        items.append({
+            **p.to_dict(),
+            "files_by_role": by_role,
+            "match_progress": {
+                "saved": sum(1 for f in uploaded if f.match_saved),
+                "total": len(uploaded),
+            },
+            "ready_for_rule_check": ready_for_rc,
+            "rule_check_available": rule_check_path(p.id).exists(),
+        })
+    return {"products": items}
+
+
+@app.get("/api/products/{product_id}")
+async def get_product(product_id: str) -> dict:
+    p = PRODUCT_STORE.get(product_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    files = FILE_STORE.list_by_product(product_id)
+    by_role = {role: None for role in VALID_ROLES}
     for f in files:
-        if not f.filename or not f.filename.lower().endswith(".dxf"):
-            results.append({"name": f.filename, "skipped": "not a .dxf"})
-            continue
-        content = await f.read()
-        if not content:
-            results.append({"name": f.filename, "skipped": "empty"})
-            continue
-        fid = _file_id_from_bytes(content)
-        dst = upload_path(fid)
-        if not dst.exists():
-            dst.write_bytes(content)
-        existing = FILE_STORE.get(fid)
-        if existing is None:
-            FILE_STORE.register(fid, f.filename, len(content), library_id=library_id)
-        elif (existing.status == READY
-              and parsed_path(fid).exists()
-              and prematch_path(fid).exists()
-              and existing.library_id == library_id):
-            results.append({"file_id": fid, "name": f.filename, "status": READY,
-                            "library_id": library_id, "deduped": True})
-            continue
-        else:
-            # Re-process if library changed or file isn't ready.
-            FILE_STORE.update_status(fid, PREPROCESSING)
-            if existing and existing.library_id != library_id:
-                FILE_STORE.update_library(fid, library_id)
-        job_id = jobs.submit_preprocess(fid, library_id=library_id)
-        results.append({"file_id": fid, "name": f.filename, "status": PREPROCESSING,
-                        "library_id": library_id, "job_id": job_id})
-    return {"files": results}
+        if f.dxf_role in by_role:
+            by_role[f.dxf_role] = f.to_dict()
+    uploaded = [f for f in files if f.dxf_role is not None]
+    return {
+        **p.to_dict(),
+        "files_by_role": by_role,
+        "match_progress": {
+            "saved": sum(1 for f in uploaded if f.match_saved),
+            "total": len(uploaded),
+        },
+        "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
+        "rule_check_available": rule_check_path(product_id).exists(),
+    }
+
+
+@app.post("/api/products")
+async def create_product(req: CreateProductRequest) -> dict:
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    if not LIBRARIES.exists(req.library_id):
+        raise HTTPException(status_code=400, detail=f"unknown library {req.library_id!r}")
+    p = PRODUCT_STORE.create(name, req.library_id)
+    return p.to_dict()
+
+
+@app.delete("/api/products/{product_id}")
+async def delete_product(product_id: str) -> dict:
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    PRODUCT_STORE.delete(product_id)
+    return {"deleted": product_id}
+
+
+@app.post("/api/products/{product_id}/files")
+async def upload_product_file(
+    product_id: str,
+    file: UploadFile = File(...),
+    dxf_role: str = Form(...),
+) -> dict:
+    """Upload one DXF into a product slot. Replaces an existing slot if any."""
+    product = PRODUCT_STORE.get(product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    if dxf_role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {VALID_ROLES}")
+    if not file.filename or not file.filename.lower().endswith(".dxf"):
+        raise HTTPException(status_code=400, detail="expected a .dxf file")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty upload")
+
+    # If a file already occupies this slot, free it so the unique index allows the new one.
+    existing_in_slot = next(
+        (f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role == dxf_role),
+        None,
+    )
+    if existing_in_slot is not None:
+        # Clear product/role on the old file so it doesn't collide with the new one.
+        with FILE_STORE.lock, FILE_STORE.conn:
+            FILE_STORE.conn.execute(
+                "UPDATE files SET product_id = NULL, dxf_role = NULL WHERE id = ?",
+                (existing_in_slot.id,),
+            )
+
+    fid = _file_id_from_bytes(content)
+    dst = upload_path(fid)
+    if not dst.exists():
+        dst.write_bytes(content)
+    existing = FILE_STORE.get(fid)
+    if existing is None:
+        FILE_STORE.register(
+            fid, file.filename, len(content),
+            library_id=product.library_id,
+            product_id=product_id, dxf_role=dxf_role,
+        )
+    else:
+        with FILE_STORE.lock, FILE_STORE.conn:
+            FILE_STORE.conn.execute(
+                "UPDATE files SET product_id = ?, dxf_role = ?, library_id = ?, "
+                "status = ?, match_saved = 0 WHERE id = ?",
+                (product_id, dxf_role, product.library_id, PREPROCESSING, fid),
+            )
+    job_id = jobs.submit_preprocess(fid, library_id=product.library_id)
+    return {
+        "file_id": fid,
+        "product_id": product_id,
+        "dxf_role": dxf_role,
+        "library_id": product.library_id,
+        "status": PREPROCESSING,
+        "job_id": job_id,
+    }
 
 
 class FilePatchRequest(BaseModel):
@@ -486,12 +584,15 @@ async def save_match_json(file_id: str) -> dict:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "w") as f:
         json.dump(out, f, indent=2)
+    # Marks the file as ready for product-level rule checking.
+    FILE_STORE.set_match_saved(file_id, True)
     return {
         "file_id": file_id,
         "library_id": rec.library_id,
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "saved_to": str(dst.relative_to(DATA_DIR.parent)),
+        "match_saved": True,
     }
 
 
@@ -505,45 +606,73 @@ async def get_match_json(file_id: str) -> dict:
         return json.load(f)
 
 
-# ---- Rule checking -------------------------------------------------------
-@app.post("/api/files/{file_id}/rule-check")
-async def run_rule_check(file_id: str) -> dict:
-    """Run DRC against the Match JSON, save and return the result."""
-    _resolve_file(file_id)
-    mp = match_path(file_id)
-    if not mp.exists():
+# ---- Rule checking (product-scoped, cross-DXF) --------------------------
+@app.post("/api/products/{product_id}/rule-check")
+async def run_product_rule_check(product_id: str) -> dict:
+    """Run DRC across every uploaded DXF in the product. Every file's
+    `match_saved` must be true; otherwise we 400 with a list of missing
+    roles."""
+    product = PRODUCT_STORE.get(product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    files = [f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role]
+    if not files:
+        raise HTTPException(status_code=400, detail="no DXFs uploaded to this product yet")
+    missing = [f.dxf_role for f in files if not f.match_saved]
+    if missing:
         raise HTTPException(
             status_code=400,
-            detail="Match JSON missing — Save Match first.",
+            detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
-    with open(mp) as f:
-        match_json = json.load(f)
-    _, shapes = _shapes_for(file_id)
-    result = check_rules(str(upload_path(file_id)), match_json, entity_shapes=shapes)
-    dst = rule_check_path(file_id)
+
+    # Build the per-role payload the rule checker consumes.
+    dxfs_by_role: dict[str, dict] = {}
+    for f in files:
+        mp = match_path(f.id)
+        if not mp.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
+            )
+        with open(mp) as fp:
+            mj = json.load(fp)
+        _, shapes = _shapes_for(f.id)
+        dxfs_by_role[f.dxf_role] = {
+            "file_id": f.id,
+            "dxf_path": str(upload_path(f.id)),
+            "match_json": mj,
+            "entity_shapes": shapes,
+        }
+
+    result = check_rules(product_id, dxfs_by_role)
+    dst = rule_check_path(product_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "w") as f:
-        json.dump(result, f, indent=2)
+    with open(dst, "w") as fp:
+        json.dump(result, fp, indent=2)
     n_pass = sum(1 for v in result.values() if v.get("pass"))
     return {
+        "product_id": product_id,
         "results": result,
         "rule_count": len(result),
         "pass_count": n_pass,
         "fail_count": len(result) - n_pass,
         "saved_to": str(dst.relative_to(DATA_DIR.parent)),
+        "roles_covered": sorted(dxfs_by_role.keys()),
     }
 
 
-@app.get("/api/files/{file_id}/rule-check")
-async def get_rule_check(file_id: str) -> dict:
-    _resolve_file(file_id)
-    rp = rule_check_path(file_id)
+@app.get("/api/products/{product_id}/rule-check")
+async def get_product_rule_check(product_id: str) -> dict:
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    rp = rule_check_path(product_id)
     if not rp.exists():
         raise HTTPException(status_code=404, detail="rule check not yet run")
-    with open(rp) as f:
-        result = json.load(f)
+    with open(rp) as fp:
+        result = json.load(fp)
     n_pass = sum(1 for v in result.values() if v.get("pass"))
     return {
+        "product_id": product_id,
         "results": result,
         "rule_count": len(result),
         "pass_count": n_pass,

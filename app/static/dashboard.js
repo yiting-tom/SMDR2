@@ -1,177 +1,302 @@
-// Dashboard: drop zone for multi-upload + polling file list.
+// Dashboard: product cards with per-role DXF slots. Rule check is
+// product-scoped and only available once every uploaded file has had its
+// Match JSON saved.
 
-const $zone = document.getElementById("upload-zone");
-const $input = document.getElementById("file-input");
-const $pick = document.getElementById("pick-files-btn");
-const $tbody = document.querySelector("#file-list tbody");
+const ROLES = ["SBT", "BD", "POD", "RING"];
+
+const $list = document.getElementById("product-list");
 const $empty = document.getElementById("empty-msg");
 const $status = document.getElementById("status");
 const $librarySelect = document.getElementById("library-select");
 const $newLibraryBtn = document.getElementById("new-library-btn");
-const $libraryInfo = document.getElementById("library-info");
-const $uploadTargetLib = document.getElementById("upload-target-lib");
+const $newProductBtn = document.getElementById("new-product-btn");
+const $modal = document.getElementById("product-modal");
+const $newProductName = document.getElementById("new-product-name");
+const $newProductLibrary = document.getElementById("new-product-library");
+const $newProductCreate = document.getElementById("new-product-create");
+const $fileInput = document.getElementById("file-input");
 
+let libraries = [];
+let products = [];
 let pollTimer = null;
-let libraries = [];          // [{id, name, template_count, class_count}, ...]
-const LIB_STORAGE_KEY = "smdr2.dashboard.selectedLibrary";
+let pendingSlot = null;   // when user clicks a slot or picks file: { productId, role }
 
-// ---- Drag & drop ---------------------------------------------------------
-$zone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  $zone.classList.add("dragover");
-});
-$zone.addEventListener("dragleave", () => $zone.classList.remove("dragover"));
-$zone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  $zone.classList.remove("dragover");
-  const files = [...(e.dataTransfer?.files ?? [])].filter(f => f.name.toLowerCase().endsWith(".dxf"));
-  if (files.length) upload(files);
-});
-
-$pick.addEventListener("click", () => $input.click());
-$input.addEventListener("change", () => {
-  const files = [...$input.files];
-  if (files.length) upload(files);
-  $input.value = "";
-});
-
-// ---- Upload --------------------------------------------------------------
-async function upload(files) {
-  const libId = currentLibraryId();
-  const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  fd.append("library_id", libId);
-  $status.textContent = `uploading ${files.length} file${files.length === 1 ? "" : "s"} → ${libraryName(libId)}…`;
-  try {
-    const res = await fetch("/api/files", { method: "POST", body: fd });
-    if (!res.ok) {
-      const err = await res.text();
-      $status.textContent = `upload failed: ${res.status}`;
-      console.error(err);
-      return;
-    }
-    const data = await res.json();
-    $status.textContent = `uploaded ${data.files.length} file${data.files.length === 1 ? "" : "s"} → ${libraryName(libId)}`;
-    await refresh();
-    startPollingIfBusy();
-  } catch (e) {
-    console.error(e);
-    $status.textContent = `upload error: ${e.message}`;
-  }
-}
-
-// ---- File list -----------------------------------------------------------
-async function refresh() {
-  const res = await fetch("/api/files");
-  if (!res.ok) return;
-  const data = await res.json();
-  renderTable(data.files);
-}
-
-function fmtSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-}
-
-function fmtTime(ts) {
-  const d = new Date(ts * 1000);
-  const now = new Date();
-  const diff = (now - d) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return d.toLocaleString();
-}
-
-function renderTable(files) {
-  $tbody.innerHTML = "";
-  if (!files.length) {
-    $empty.hidden = false;
-    return;
-  }
-  $empty.hidden = true;
-  for (const f of files) {
-    const tr = document.createElement("tr");
-    const canOpen = (f.status === "ready_to_match"
-                     || f.status === "checking_rules"
-                     || f.status === "report");
-    const link = canOpen
-      ? `<a class="open-link" href="/viewer/${f.id}">Open →</a>`
-      : `<span style="color:#5d8aa8">—</span>`;
-    const isBusy = f.status === "preprocessing" || f.status === "checking_rules";
-    const libOptions = libraries.map(l =>
-      `<option value="${l.id}" ${l.id === f.library_id ? "selected" : ""}>${escapeHtml(l.name)}</option>`
-    ).join("");
-    tr.innerHTML = `
-      <td>${escapeHtml(f.name)}</td>
-      <td class="numeric">${fmtSize(f.size)}</td>
-      <td><select class="row-library-select" data-file-id="${f.id}" ${isBusy ? "disabled" : ""}>${libOptions}</select></td>
-      <td><span class="status-pill status-${f.status}">${f.status}</span></td>
-      <td class="numeric">${f.primitive_count != null ? f.primitive_count.toLocaleString() : "—"}</td>
-      <td title="${new Date(f.uploaded_at * 1000).toLocaleString()}">${fmtTime(f.uploaded_at)}</td>
-      <td>${link}</td>
-    `;
-    if (f.status === "error" && f.error) {
-      const errRow = document.createElement("tr");
-      errRow.innerHTML = `<td colspan="7" style="color:#ff5252; font-size:0.78rem; padding-top:0">${escapeHtml(f.error.split("\n")[0])}</td>`;
-      $tbody.appendChild(tr);
-      $tbody.appendChild(errRow);
-    } else {
-      $tbody.appendChild(tr);
-    }
-  }
-  // Wire up per-row library selectors.
-  $tbody.querySelectorAll(".row-library-select").forEach(sel => {
-    sel.addEventListener("change", () => onRowLibraryChange(sel));
-  });
-}
-
-async function onRowLibraryChange(sel) {
-  const fileId = sel.dataset.fileId;
-  const newLibId = sel.value;
-  const newLibName = libraryName(newLibId);
-  sel.disabled = true;
-  $status.textContent = `moving file to "${newLibName}" — re-processing…`;
-  try {
-    const res = await fetch(`/api/files/${fileId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ library_id: newLibId }),
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      console.error("patch failed:", err);
-      $status.textContent = `move failed: ${res.status}`;
-      return;
-    }
-    await refresh();
-    startPollingIfBusy();
-  } catch (e) {
-    console.error(e);
-    $status.textContent = `move error: ${e.message}`;
-  } finally {
-    sel.disabled = false;
-  }
-}
-
+// ---- helpers -------------------------------------------------------------
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
 }
+function fmtSize(b) {
+  if (b == null) return "—";
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(2)} MB`;
+}
+function libraryName(id) {
+  const l = libraries.find(x => x.id === id);
+  return l ? l.name : id;
+}
 
-// ---- Polling -------------------------------------------------------------
-async function startPollingIfBusy() {
+// ---- modal -----------------------------------------------------------------
+function openModal() {
+  $newProductLibrary.innerHTML = "";
+  for (const lib of libraries) {
+    const opt = document.createElement("option");
+    opt.value = lib.id; opt.textContent = lib.name;
+    if (lib.id === $librarySelect.value) opt.selected = true;
+    $newProductLibrary.appendChild(opt);
+  }
+  $newProductName.value = "";
+  $modal.hidden = false;
+  setTimeout(() => $newProductName.focus(), 0);
+}
+function closeModal() { $modal.hidden = true; }
+$newProductBtn.addEventListener("click", openModal);
+$modal.addEventListener("click", (e) => { if (e.target.matches("[data-close]")) closeModal(); });
+window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$modal.hidden) closeModal(); });
+
+$newProductCreate.addEventListener("click", async () => {
+  const name = $newProductName.value.trim();
+  if (!name) { $newProductName.focus(); return; }
+  const libId = $newProductLibrary.value;
+  const res = await fetch("/api/products", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, library_id: libId }),
+  });
+  if (!res.ok) {
+    $status.textContent = `create failed: ${res.status}`;
+    return;
+  }
+  closeModal();
+  await refresh();
+});
+
+// ---- library bar ---------------------------------------------------------
+async function loadLibraries() {
+  const res = await fetch("/api/libraries");
+  if (!res.ok) return;
+  const data = await res.json();
+  libraries = data.libraries;
+  const prev = sessionStorage.getItem("smdr2.dashboard.selectedLibrary") || data.default_id;
+  $librarySelect.innerHTML = "";
+  for (const lib of libraries) {
+    const opt = document.createElement("option");
+    opt.value = lib.id; opt.textContent = lib.name;
+    $librarySelect.appendChild(opt);
+  }
+  $librarySelect.value = libraries.some(l => l.id === prev) ? prev : data.default_id;
+}
+$librarySelect.addEventListener("change", () => {
+  sessionStorage.setItem("smdr2.dashboard.selectedLibrary", $librarySelect.value);
+});
+$newLibraryBtn.addEventListener("click", async () => {
+  const name = prompt("New library name:");
+  if (!name || !name.trim()) return;
+  const res = await fetch("/api/libraries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!res.ok) { $status.textContent = `create library failed: ${res.status}`; return; }
+  const data = await res.json();
+  await loadLibraries();
+  $librarySelect.value = data.id;
+});
+
+// ---- product list --------------------------------------------------------
+async function refresh() {
+  const res = await fetch("/api/products");
+  if (!res.ok) return;
+  const data = await res.json();
+  products = data.products;
+  renderProducts();
+}
+
+function renderProducts() {
+  $list.innerHTML = "";
+  if (!products.length) {
+    $empty.hidden = false;
+    return;
+  }
+  $empty.hidden = true;
+  for (const p of products) $list.appendChild(productCard(p));
+}
+
+function productCard(p) {
+  const card = document.createElement("section");
+  card.className = "product-card";
+  card.dataset.productId = p.id;
+
+  const header = document.createElement("header");
+  header.innerHTML =
+    `<span class="product-name">${escapeHtml(p.name)}</span>` +
+    `<span class="product-library">${escapeHtml(libraryName(p.library_id))}</span>` +
+    `<span class="spacer"></span>` +
+    `<button class="product-delete" type="button" title="Delete this product">Delete</button>`;
+  header.querySelector(".product-delete").addEventListener("click", () => deleteProduct(p));
+  card.appendChild(header);
+
+  const grid = document.createElement("div");
+  grid.className = "slot-grid";
+  for (const role of ROLES) grid.appendChild(slotCell(p, role));
+  card.appendChild(grid);
+
+  const footer = document.createElement("div");
+  footer.className = "product-footer";
+  const prog = p.match_progress;
+  footer.innerHTML =
+    `<span class="match-progress">Match: <strong>${prog.saved}</strong>/${prog.total} saved</span>` +
+    `<span class="spacer"></span>`;
+
+  const rcBtn = document.createElement("button");
+  rcBtn.type = "button";
+  rcBtn.className = "rule-check-btn";
+  rcBtn.disabled = !p.ready_for_rule_check;
+  rcBtn.textContent = p.rule_check_available && p.ready_for_rule_check
+    ? "Re-run Rule Check"
+    : "Rule Check";
+  if (!p.ready_for_rule_check) {
+    const remaining = prog.total === 0
+      ? "upload at least one DXF first"
+      : `${prog.total - prog.saved} file(s) still need Save Match`;
+    rcBtn.title = remaining;
+  }
+  rcBtn.addEventListener("click", () => runRuleCheck(p));
+  footer.appendChild(rcBtn);
+  card.appendChild(footer);
+
+  return card;
+}
+
+function slotCell(product, role) {
+  const cell = document.createElement("div");
+  cell.className = "slot";
+  cell.dataset.role = role;
+  cell.dataset.productId = product.id;
+
+  const f = product.files_by_role[role];
+  cell.innerHTML = `<span class="role-label">${role}</span>`;
+
+  if (!f) {
+    cell.classList.add("empty");
+    cell.innerHTML += `<span class="file-name">+ Drop or click</span>`;
+    cell.addEventListener("click", () => pickFile(product.id, role));
+    wireDragAndDrop(cell, product.id, role);
+    return cell;
+  }
+
+  const statusColor =
+    f.status === "ready_to_match" ? "#69f0ae" :
+    f.status === "preprocessing" ? "#ffb84d" :
+    f.status === "error"         ? "#ff5252" : "#9aa5b1";
+  const matchBadge = f.match_saved
+    ? `<span style="color:#69f0ae;font-size:0.78rem;">✓ matched</span>`
+    : `<span style="color:#9aa5b1;font-size:0.78rem;">not matched</span>`;
+
+  cell.innerHTML +=
+    `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
+    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${f.status}</span></span>`;
+
+  const actions = document.createElement("div");
+  actions.className = "slot-actions";
+  if (f.status === "ready_to_match") {
+    actions.innerHTML = `<a class="open-link" href="/viewer/${f.id}">Open →</a>`;
+  }
+  const replace = document.createElement("button");
+  replace.className = "replace-btn";
+  replace.type = "button";
+  replace.textContent = "Replace";
+  replace.addEventListener("click", () => pickFile(product.id, role));
+  actions.appendChild(replace);
+  cell.appendChild(actions);
+
+  return cell;
+}
+
+function wireDragAndDrop(cell, productId, role) {
+  cell.addEventListener("dragover", (e) => { e.preventDefault(); cell.classList.add("dragover"); });
+  cell.addEventListener("dragleave", () => cell.classList.remove("dragover"));
+  cell.addEventListener("drop", (e) => {
+    e.preventDefault();
+    cell.classList.remove("dragover");
+    const file = [...(e.dataTransfer?.files ?? [])]
+      .find(f => f.name.toLowerCase().endsWith(".dxf"));
+    if (file) uploadFile(productId, role, file);
+  });
+}
+
+function pickFile(productId, role) {
+  pendingSlot = { productId, role };
+  $fileInput.click();
+}
+$fileInput.addEventListener("change", () => {
+  const f = $fileInput.files?.[0];
+  $fileInput.value = "";
+  if (f && pendingSlot) {
+    uploadFile(pendingSlot.productId, pendingSlot.role, f);
+  }
+});
+
+async function uploadFile(productId, role, file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("dxf_role", role);
+  $status.textContent = `uploading ${file.name} → ${role}…`;
+  const res = await fetch(`/api/products/${productId}/files`, { method: "POST", body: fd });
+  if (!res.ok) {
+    $status.textContent = `upload failed: ${res.status}`;
+    return;
+  }
+  $status.textContent = `uploaded ${file.name} → ${role}`;
+  await refresh();
+  startPollingIfBusy();
+}
+
+async function deleteProduct(p) {
+  if (!confirm(`Delete product "${p.name}" and all its files from this view?`)) return;
+  const res = await fetch(`/api/products/${p.id}`, { method: "DELETE" });
+  if (!res.ok) {
+    $status.textContent = `delete failed: ${res.status}`;
+    return;
+  }
+  await refresh();
+}
+
+async function runRuleCheck(p) {
+  $status.textContent = `running rule check on "${p.name}"…`;
+  const res = await fetch(`/api/products/${p.id}/rule-check`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.text();
+    $status.textContent = `rule-check failed: ${res.status}`;
+    console.error(err);
+    return;
+  }
+  const data = await res.json();
+  $status.textContent =
+    `Rule check on "${p.name}": ${data.pass_count}/${data.rule_count} pass ` +
+    `(roles: ${data.roles_covered.join(", ")})`;
+  alert(formatRuleResultDialog(p.name, data));
+  await refresh();
+}
+
+function formatRuleResultDialog(productName, data) {
+  const lines = [`Rule check — ${productName}`, `Pass: ${data.pass_count}/${data.rule_count}`, ""];
+  for (const [name, r] of Object.entries(data.results)) {
+    const tick = r.pass ? "✓" : "✗";
+    lines.push(`${tick} ${name}: ${r.checkRule}`);
+  }
+  return lines.join("\n");
+}
+
+// ---- polling -------------------------------------------------------------
+function startPollingIfBusy() {
   if (pollTimer) return;
   const tick = async () => {
-    const res = await fetch("/api/files");
-    if (!res.ok) return;
-    const data = await res.json();
-    renderTable(data.files);
-    const busy = data.files.some(f =>
-      f.status === "preprocessing" || f.status === "checking_rules"
-      || f.status === "queued" || f.status === "parsing"  /* legacy */
+    await refresh();
+    const busy = products.some(p =>
+      Object.values(p.files_by_role).some(f => f && (f.status === "preprocessing" || f.status === "checking_rules"))
     );
     if (busy) {
       pollTimer = setTimeout(tick, 1500);
@@ -183,84 +308,7 @@ async function startPollingIfBusy() {
   pollTimer = setTimeout(tick, 1500);
 }
 
-// ---- Libraries -----------------------------------------------------------
-function currentLibraryId() {
-  return $librarySelect.value || "default";
-}
-
-function libraryName(id) {
-  const lib = libraries.find(l => l.id === id);
-  return lib ? lib.name : (id || "—");
-}
-
-function setSelectedLibrary(id) {
-  $librarySelect.value = id;
-  sessionStorage.setItem(LIB_STORAGE_KEY, id);
-  updateLibraryInfo();
-}
-
-function updateLibraryInfo() {
-  const id = currentLibraryId();
-  const lib = libraries.find(l => l.id === id);
-  if (!lib) {
-    $libraryInfo.textContent = "";
-    $uploadTargetLib.textContent = "";
-    return;
-  }
-  $libraryInfo.textContent =
-    `${lib.template_count} template${lib.template_count === 1 ? "" : "s"} · ` +
-    `${lib.class_count} class${lib.class_count === 1 ? "" : "es"}`;
-  $uploadTargetLib.textContent = `→ uploads go to "${lib.name}"`;
-}
-
-async function loadLibraries() {
-  const res = await fetch("/api/libraries");
-  if (!res.ok) return;
-  const data = await res.json();
-  libraries = data.libraries;
-  const previous = sessionStorage.getItem(LIB_STORAGE_KEY)
-                 || $librarySelect.value
-                 || data.default_id;
-  $librarySelect.innerHTML = "";
-  for (const lib of libraries) {
-    const opt = document.createElement("option");
-    opt.value = lib.id;
-    opt.textContent = lib.name;
-    $librarySelect.appendChild(opt);
-  }
-  // Restore selection (or fall back to default).
-  if (libraries.some(l => l.id === previous)) {
-    $librarySelect.value = previous;
-  } else {
-    $librarySelect.value = data.default_id;
-  }
-  updateLibraryInfo();
-}
-
-$librarySelect.addEventListener("change", () => {
-  sessionStorage.setItem(LIB_STORAGE_KEY, currentLibraryId());
-  updateLibraryInfo();
-});
-
-$newLibraryBtn.addEventListener("click", async () => {
-  const name = prompt("New library name:");
-  if (!name || !name.trim()) return;
-  const res = await fetch("/api/libraries", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
-  });
-  if (!res.ok) {
-    $status.textContent = `create library failed: ${res.status}`;
-    return;
-  }
-  const data = await res.json();
-  await loadLibraries();
-  setSelectedLibrary(data.id);
-  $status.textContent = `created library "${data.name}"`;
-});
-
-// ---- Bootstrap -----------------------------------------------------------
+// ---- bootstrap -----------------------------------------------------------
 (async () => {
   await loadLibraries();
   await refresh();

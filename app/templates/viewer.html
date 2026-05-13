@@ -7,15 +7,16 @@
 </head>
 <body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}">
   <header>
-    <a class="title" href="/" title="Back to file list">SMDR2</a>
-    <a id="back-btn" href="/" title="Back to upload / file list">← Files</a>
+    <a class="title" href="/" title="Back to dashboard">SMDR2</a>
+    <a id="back-btn" href="/" title="Back to product dashboard">← Products</a>
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
-    <select id="library-switcher" title="Switch the library this file uses"></select>
+    <span id="product-context"></span>
+    <span id="role-switcher"></span>
+    <select id="library-switcher" title="Library this file uses (set by its product)"></select>
     <button id="chain-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
     <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>
-    <button id="rule-check-btn" type="button" title="Run design rule checks against the saved Match JSON">Rule Check</button>
     <span id="status">loading…</span>
     <span class="spacer"></span>
     <span id="mode-hint" class="hint"></span>
@@ -25,14 +26,6 @@
   <nav id="class-toolbar" aria-label="Object classes"></nav>
   <main>
     <canvas id="dxf-canvas"></canvas>
-    <aside id="rule-panel" hidden>
-      <header>
-        <h3>Rule Check</h3>
-        <span id="rule-panel-summary"></span>
-        <button type="button" id="rule-panel-close" title="Hide panel">×</button>
-      </header>
-      <ol id="rule-list"></ol>
-    </aside>
   </main>
 
   <div id="library-modal" class="modal" hidden>

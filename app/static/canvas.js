@@ -28,11 +28,8 @@ const $libraryBtn = document.getElementById("library-btn");
 const $libraryModal = document.getElementById("library-modal");
 const $libraryBody = document.getElementById("library-body");
 const $librarySummary = document.getElementById("library-summary");
-const $ruleCheckBtn = document.getElementById("rule-check-btn");
-const $rulePanel = document.getElementById("rule-panel");
-const $rulePanelSummary = document.getElementById("rule-panel-summary");
-const $rulePanelClose = document.getElementById("rule-panel-close");
-const $ruleList = document.getElementById("rule-list");
+const $productContext = document.getElementById("product-context");
+const $roleSwitcher = document.getElementById("role-switcher");
 const $modeHint = document.getElementById("mode-hint");
 const $classToolbar = document.getElementById("class-toolbar");
 const ctx = $canvas.getContext("2d");
@@ -51,7 +48,6 @@ const API = {
   classes:       () => `/api/classes?file_id=${FILE_ID}`,
   templates:     () => `/api/templates?file_id=${FILE_ID}`,
   templateOne:   (id) => `/api/templates/${id}`,
-  ruleCheck:     () => `/api/files/${FILE_ID}/rule-check`,
 };
 
 const $librarySwitcher = document.getElementById("library-switcher");
@@ -71,6 +67,35 @@ async function loadFileInfo() {
     opt.textContent = lib.name;
     if (lib.id === file.library_id) opt.selected = true;
     $librarySwitcher.appendChild(opt);
+  }
+
+  // Product context + sibling-DXF switcher.
+  if (file.product_id) {
+    const pRes = await fetch(`/api/products/${file.product_id}`);
+    if (pRes.ok) {
+      const p = await pRes.json();
+      $productContext.textContent = `${p.name} / ${file.dxf_role}`;
+      $roleSwitcher.innerHTML = "";
+      for (const role of ["SBT", "BD", "POD", "RING"]) {
+        const sibling = p.files_by_role[role];
+        const btn = document.createElement("a");
+        btn.className = "role-btn";
+        btn.dataset.role = role;
+        btn.textContent = role;
+        if (role === file.dxf_role) {
+          btn.classList.add("current");
+        } else if (sibling) {
+          btn.href = `/viewer/${sibling.id}`;
+        } else {
+          btn.classList.add("empty");
+          btn.title = `${role} not uploaded yet`;
+        }
+        $roleSwitcher.appendChild(btn);
+      }
+    }
+  } else {
+    $productContext.textContent = "";
+    $roleSwitcher.innerHTML = "";
   }
 }
 
@@ -1230,112 +1255,14 @@ async function refreshClassCounts() {
   await fetchClasses();
 }
 
-// ---- Rule Check panel ---------------------------------------------------
-$ruleCheckBtn.addEventListener("click", runRuleCheck);
-$rulePanelClose.addEventListener("click", () => {
-  $rulePanel.hidden = true;
-  clearHover();
-  unpinRule();
-});
-
-async function runRuleCheck() {
-  $ruleCheckBtn.disabled = true;
-  setBaseStatus("running rule check…");
-  try {
-    const res = await fetch(API.ruleCheck(), { method: "POST" });
-    if (!res.ok) {
-      const err = await res.text();
-      console.error("rule-check failed:", err);
-      setBaseStatus(`rule-check error: ${res.status}`);
-      return;
-    }
-    const data = await res.json();
-    unpinRule();  // results may be different — drop any stale pin
-    renderRulePanel(data);
-    $rulePanel.hidden = false;
-    setBaseStatus(
-      `rule check: ${data.pass_count} passed, ${data.fail_count} failed (${data.rule_count} total)`
-    );
-  } catch (e) {
-    console.error(e);
-    setBaseStatus(`rule-check error: ${e.message}`);
-  } finally {
-    $ruleCheckBtn.disabled = false;
-  }
-}
-
-function renderRulePanel(data) {
-  $rulePanelSummary.textContent =
-    `${data.pass_count}/${data.rule_count} pass`;
-  $ruleList.innerHTML = "";
-  for (const [name, r] of Object.entries(data.results)) {
-    const li = document.createElement("li");
-    li.className = "rule-item";
-    li.dataset.ruleName = name;
-    if (name === pinnedRuleName) li.classList.add("pinned");
-    const badge = r.pass ? "pass" : "fail";
-    const icon = r.pass ? "✓" : "✗";
-    li.innerHTML =
-      `<span class="rule-status ${badge}">${icon}</span>` +
-      `<div class="rule-body">` +
-        `<div class="rule-name">${escapeHtml(name)}</div>` +
-        `<div class="rule-desc">${escapeHtml(r.checkRule || "")}</div>` +
-        `<div class="rule-count">${r.handleIds.length} entit${r.handleIds.length === 1 ? "y" : "ies"}</div>` +
-      `</div>`;
-    li.addEventListener("mouseenter", () => setHover(r.handleIds));
-    li.addEventListener("mouseleave", () => clearHover());
-    li.addEventListener("click", () => {
-      if (pinnedRuleName === name) unpinRule();
-      else pinRule(name, r.handleIds);
-    });
-    $ruleList.appendChild(li);
-  }
-}
-
-function pinRule(name, handles) {
-  pinnedRuleName = name;
-  pinnedSet.clear();
-  for (const h of handles) pinnedSet.add(h);
-  for (const item of $ruleList.querySelectorAll(".rule-item")) {
-    item.classList.toggle("pinned", item.dataset.ruleName === name);
-  }
-  render();
-}
-
-function unpinRule() {
-  if (!pinnedRuleName && !pinnedSet.size) return;
-  pinnedRuleName = null;
-  pinnedSet.clear();
-  for (const item of $ruleList.querySelectorAll(".rule-item")) {
-    item.classList.remove("pinned");
-  }
-  render();
-}
-
-function setHover(handles) {
-  hoverSet.clear();
-  for (const h of handles) hoverSet.add(h);
-  render();
-}
-function clearHover() {
-  if (!hoverSet.size) return;
-  hoverSet.clear();
-  render();
-}
+// Rule checking moved to the dashboard (product-scoped). The hover/pin
+// highlight infrastructure is kept available via `hoverSet` / `pinnedSet`
+// in case other features want it; nothing populates them in this build.
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
-}
-
-// On load, restore an existing rule-check result if one was previously saved.
-async function loadRuleCheck() {
-  const res = await fetch(API.ruleCheck());
-  if (!res.ok) return;  // none saved yet — fine
-  const data = await res.json();
-  renderRulePanel(data);
-  // Don't auto-open: user opens explicitly via the button. But mark stale-able.
 }
 
 // ---- Auto-load pre-match overlay ----------------------------------------
@@ -1447,9 +1374,6 @@ async function load() {
   // Pre-match overlay was computed at preprocessing time; show it
   // automatically so user sees library coverage on arrival.
   await loadPrematch();
-  // Hydrate rule-check results into the panel so a previously-run check
-  // re-appears on reload (panel itself stays closed until user opens it).
-  loadRuleCheck();
 }
 
 load();

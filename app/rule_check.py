@@ -1,23 +1,37 @@
 """Design Rule Checking (DRC) — mock for now.
 
-The real DRC accepts a DXF path and Match JSON; this mock currently
-implements one geometric test rule:
+DRC is product-scoped: it sees every uploaded DXF in the product, keyed
+by role (SBT, BD, POD, RING). The real implementation lives elsewhere;
+this module provides a correctly-shaped mock so the UI and downstream
+integration can be developed end-to-end.
 
-    Rule1: substrate-to-first-SMD distance must exceed 5 mm.
+Input
+-----
+`check_rules(product_id, dxfs_by_role)` where `dxfs_by_role` is:
 
-Output shape — RuleChecking JSON:
+    {
+        "SBT": {"file_id": ..., "dxf_path": ..., "match_json": {...},
+                "entity_shapes": {handle: EntityShape}},
+        "BD":  {...},
+        "POD": {...},
+        "RING": {...},
+    }
+
+(roles absent from the product simply don't appear as keys.)
+
+Output — RuleChecking JSON
+--------------------------
     {
         "<ruleName>": {
             "checkRule":  str,
-            "pass":       bool,
-            "handleIds":  [str, ...],
+            "pass":        bool,
+            "handleIds":  [str, ...],  // entities for the UI to highlight
         }, ...
     }
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -27,74 +41,120 @@ if TYPE_CHECKING:
 
 
 MatchJson = dict[str, list[list[str]]]
+RoleBundle = dict[str, dict]   # {role: {match_json, entity_shapes, ...}}
 RuleResult = dict[str, dict[str, object]]
 
-# Threshold for Rule1 (mm).
+
+# Thresholds (mm)
 SUBSTRATE_TO_SMD_MIN_DIST = 5.0
 
 
-def _first_match_handles(match_json: MatchJson, class_name: str) -> list[str] | None:
+# ---- helpers --------------------------------------------------------------
+def _first_match_handles(match_json: MatchJson, class_prefix: str) -> list[str] | None:
     """First-occurrence entity handles for a class. None if no match exists."""
     for key, matches in match_json.items():
-        if key.startswith(f"{class_name}.") and matches:
+        if key.startswith(f"{class_prefix}.") and matches:
             return list(matches[0])
     return None
+
+
+def _count_for_prefix(match_json: MatchJson, class_prefix: str) -> int:
+    n = 0
+    for key, matches in match_json.items():
+        if key.startswith(f"{class_prefix}."):
+            n += len(matches)
+    return n
 
 
 def _combined_centroid(
     entity_shapes: dict[str, "EntityShape"],
     handles: list[str],
 ) -> np.ndarray | None:
-    """Mean of centroids over the given handles."""
     pts = [entity_shapes[h].centroid for h in handles if h in entity_shapes]
     if not pts:
         return None
     return np.mean(np.stack(pts), axis=0)
 
 
-def check_rules(
-    dxf_path: str | Path,                                   # noqa: ARG001
-    match_json: MatchJson,
-    entity_shapes: dict[str, "EntityShape"] | None = None,
-) -> RuleResult:
-    """Mock DRC. Replace with the real implementation when ready."""
+# ---- main entry -----------------------------------------------------------
+def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
+    """Mock product-scoped DRC. Replace with the real implementation when ready."""
     results: RuleResult = {}
 
-    # ---- Rule1: substrate-to-first-SMD distance > 5 mm -------------------
-    substrate = _first_match_handles(match_json, "substrate")
-    first_smd = _first_match_handles(match_json, "smd")
-
-    if not substrate or not first_smd:
-        passes = False
-        desc = (
-            "Substrate and first SMD must both be present; "
-            f"found substrate={'yes' if substrate else 'no'}, "
-            f"smd={'yes' if first_smd else 'no'}"
-        )
-        handle_ids = (substrate or []) + (first_smd or [])
-    elif entity_shapes is None:
-        passes = False
-        desc = "Rule1 needs entity geometry (entity_shapes not provided)"
-        handle_ids = (substrate or []) + (first_smd or [])
+    # ---- Rule1 (single-DXF, BD): substrate-to-first-SMD distance > 5 mm
+    bd = dxfs_by_role.get("BD")
+    if bd is None:
+        results["Rule1"] = {
+            "checkRule": "BD DXF required for substrate-to-SMD distance check (not uploaded)",
+            "pass": False,
+            "handleIds": [],
+        }
     else:
-        sub_c = _combined_centroid(entity_shapes, substrate)
-        smd_c = _combined_centroid(entity_shapes, first_smd)
-        if sub_c is None or smd_c is None:
-            passes = False
-            desc = "Substrate or SMD centroid could not be computed"
+        substrate = _first_match_handles(bd["match_json"], "substrate")
+        first_smd = _first_match_handles(bd["match_json"], "smd")
+        shapes = bd["entity_shapes"]
+        if not substrate or not first_smd:
+            results["Rule1"] = {
+                "checkRule": (
+                    "BD must contain at least one substrate and one SMD; "
+                    f"found substrate={'yes' if substrate else 'no'}, "
+                    f"smd={'yes' if first_smd else 'no'}"
+                ),
+                "pass": False,
+                "handleIds": (substrate or []) + (first_smd or []),
+            }
         else:
-            dist = float(np.linalg.norm(sub_c - smd_c))
-            passes = dist > SUBSTRATE_TO_SMD_MIN_DIST
-            desc = (
-                f"Substrate-to-first-SMD distance must exceed "
-                f"{SUBSTRATE_TO_SMD_MIN_DIST} mm (actual: {dist:.3f} mm)"
-            )
-        handle_ids = list(substrate) + list(first_smd)
+            sub_c = _combined_centroid(shapes, substrate)
+            smd_c = _combined_centroid(shapes, first_smd)
+            if sub_c is None or smd_c is None:
+                results["Rule1"] = {
+                    "checkRule": "BD substrate/SMD centroid could not be computed",
+                    "pass": False,
+                    "handleIds": list(substrate) + list(first_smd),
+                }
+            else:
+                dist = float(np.linalg.norm(sub_c - smd_c))
+                results["Rule1"] = {
+                    "checkRule": (
+                        f"BD: substrate-to-first-SMD distance must exceed "
+                        f"{SUBSTRATE_TO_SMD_MIN_DIST} mm (actual: {dist:.3f} mm)"
+                    ),
+                    "pass": dist > SUBSTRATE_TO_SMD_MIN_DIST,
+                    "handleIds": list(substrate) + list(first_smd),
+                }
 
-    results["Rule1"] = {
-        "checkRule": desc,
-        "pass": passes,
-        "handleIds": handle_ids,
-    }
+    # ---- Rule2 (cross-DXF SBT × POD): bga_ball count consistency
+    sbt = dxfs_by_role.get("SBT")
+    pod = dxfs_by_role.get("POD")
+    if sbt is None or pod is None:
+        results["Rule2"] = {
+            "checkRule": (
+                "SBT and POD both required for BGA-count consistency check "
+                f"(SBT={'present' if sbt else 'missing'}, "
+                f"POD={'present' if pod else 'missing'})"
+            ),
+            "pass": False,
+            "handleIds": [],
+        }
+    else:
+        sbt_bga = _count_for_prefix(sbt["match_json"], "bga_ball")
+        pod_bga = _count_for_prefix(pod["match_json"], "bga_ball")
+        sbt_handles = []
+        for key, matches in sbt["match_json"].items():
+            if key.startswith("bga_ball."):
+                for m in matches: sbt_handles.extend(m)
+        pod_handles = []
+        for key, matches in pod["match_json"].items():
+            if key.startswith("bga_ball."):
+                for m in matches: pod_handles.extend(m)
+        results["Rule2"] = {
+            "checkRule": (
+                f"SBT BGA count must equal POD BGA count "
+                f"(SBT={sbt_bga}, POD={pod_bga})"
+            ),
+            "pass": sbt_bga == pod_bga,
+            # Sample a few from each side so the panel hover stays snappy.
+            "handleIds": sbt_handles[:50] + pod_handles[:50],
+        }
 
     return results

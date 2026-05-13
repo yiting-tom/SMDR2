@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SMDR2 — Files</title>
+  <title>SMDR2 — Products</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body class="dashboard">
@@ -17,35 +17,44 @@
       <label for="library-select">Library:</label>
       <select id="library-select" aria-label="Active library"></select>
       <button id="new-library-btn" type="button" title="Create a new library">+ New library</button>
-      <span id="library-info"></span>
+      <span class="spacer"></span>
+      <button id="new-product-btn" type="button">+ New product</button>
     </section>
 
-    <section id="upload-zone" tabindex="0" aria-label="Drop DXF files here">
-      <p>Drop <code>.dxf</code> files here, or
-        <button id="pick-files-btn" type="button">choose files</button>
-        <span id="upload-target-lib"></span>
-      </p>
-      <input type="file" id="file-input" accept=".dxf" multiple hidden />
-    </section>
-
-    <section id="file-list-section">
-      <table id="file-list" aria-label="Uploaded files">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Size</th>
-            <th>Library</th>
-            <th>Status</th>
-            <th>Entities</th>
-            <th>Uploaded</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <p class="empty" id="empty-msg" hidden>No files yet — drop DXFs above to get started.</p>
+    <section id="product-list-section">
+      <div id="product-list"></div>
+      <p class="empty" id="empty-msg" hidden>No products yet — click <em>+ New product</em> to start.</p>
     </section>
   </main>
+
+  <!-- New product modal -->
+  <div id="product-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel" role="dialog" aria-label="New product">
+      <header class="modal-header">
+        <h2>New product</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body">
+        <label class="form-row">
+          <span>Name</span>
+          <input id="new-product-name" type="text" placeholder="e.g., Customer-A P/N 12345" />
+        </label>
+        <label class="form-row">
+          <span>Library (customer)</span>
+          <select id="new-product-library"></select>
+        </label>
+        <div class="form-actions">
+          <button id="new-product-create" type="button">Create</button>
+          <button type="button" data-close>Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden file picker reused per slot -->
+  <input type="file" id="file-input" accept=".dxf" hidden />
 
   <script type="module" src="/static/dashboard.js"></script>
 </body>
