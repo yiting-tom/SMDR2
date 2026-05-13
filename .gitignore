@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Project data (user uploads, generated caches, SQLite)
+data/uploads/
+data/parsed/
+data/prematch/
+data/match/
+data/rule_check/
+data/library.sqlite
+data/library.sqlite-*
+data/*.original.dxf
+
+# pytest
+.pytest_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
