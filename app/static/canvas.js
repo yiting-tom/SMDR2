@@ -163,6 +163,24 @@ const CONNECT_TOL = 0.01;            // endpoint match tolerance (world units / 
 let chainMode = false;
 let connectivityGraph = null;   // lazy: Array<Set<number>>  parallel to primitives
 
+// Measure-distance tool (AutoCAD `DIST`-style, with continuous chaining).
+// Mutually exclusive with addMode.
+//
+// measureState.picks      = list of world [x,y] anchor points; each click
+//                           appends one. picks.length >= 1 means a rubber-band
+//                           is live from picks[last] to the cursor. Frozen
+//                           segments are the pairs picks[i], picks[i+1].
+// measureState.snapHint   = last resolveSnap() result for marker rendering
+// measureState.lastCursor = world [x,y] from the most recent mousemove — kept
+//                           so a Shift key press can re-resolve ortho without
+//                           requiring mouse motion
+let measureMode = false;
+let measureState = { picks: [], snapHint: null, lastCursor: null };
+
+function measureAnchor() {
+  return measureState.picks.length ? measureState.picks[measureState.picks.length - 1] : null;
+}
+
 // Add-mode state machine. addModeClass: null = idle; else holds the class name
 // currently being staged. matchesStaged: true once S has populated matchSet for
 // the current selection (button shows ✓).
@@ -257,6 +275,53 @@ function fitToBbox(bbox) {
 function computeBBoxes() {
   primBBoxes = new Array(primitives.length);
   for (let i = 0; i < primitives.length; i++) primBBoxes[i] = bboxOf(primitives[i]);
+}
+
+// ---- circle detection (for CEN / QUA OSNAP) -----------------------------
+// DXF CIRCLE entities are flattened to closed polylines by the renderer
+// (see app/dxf.py). We re-detect them client-side so the measure tool can
+// offer center + 4 quadrant snaps for round geometry (BGA balls, fiducial
+// marks, etc.) — AutoCAD CEN + QUA modes restricted to the cardinal points.
+let primCircles = [];  // parallel to primitives: null or { cx, cy, r }
+
+const CIRCLE_MIN_VERTS = 8;
+const CIRCLE_RADIAL_TOL = 0.02;  // (rmax - rmin) / rmean must be ≤ this
+
+function detectCircle(pts) {
+  if (!pts || pts.length < CIRCLE_MIN_VERTS) return null;
+  // Closed shapes sometimes repeat the first vertex at the end; dedupe.
+  const last = pts[pts.length - 1], first = pts[0];
+  const n = (last[0] === first[0] && last[1] === first[1]) ? pts.length - 1 : pts.length;
+  if (n < CIRCLE_MIN_VERTS) return null;
+
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) { sx += pts[i][0]; sy += pts[i][1]; }
+  const cx = sx / n, cy = sy / n;
+
+  let rmin = Infinity, rmax = 0, rsum = 0;
+  for (let i = 0; i < n; i++) {
+    const r = Math.hypot(pts[i][0] - cx, pts[i][1] - cy);
+    if (r < rmin) rmin = r;
+    if (r > rmax) rmax = r;
+    rsum += r;
+  }
+  const rmean = rsum / n;
+  if (rmean < 1e-9) return null;
+  if ((rmax - rmin) / rmean > CIRCLE_RADIAL_TOL) return null;
+  return { cx, cy, r: rmean };
+}
+
+function computePrimCircles() {
+  primCircles = new Array(primitives.length).fill(null);
+  for (let i = 0; i < primitives.length; i++) {
+    const p = primitives[i];
+    if (p.decorative) continue;
+    if (p.type === "polyline" && p.closed) {
+      primCircles[i] = detectCircle(p.points);
+    } else if (p.type === "filled_polygon" && p.rings.length === 1) {
+      primCircles[i] = detectCircle(p.rings[0]);
+    }
+  }
 }
 
 // Per-handle aggregate stats — vertex count + bbox + path length — useful
@@ -447,6 +512,7 @@ function render() {
 
   // Screen-space annotations (don't scale with zoom).
   if (focusedSubRule) drawFocusedLabel();
+  if (measureMode) drawMeasureOverlay();
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
@@ -611,6 +677,170 @@ function drawFocusedLabel() {
   ctx.textBaseline = "middle";
   ctx.fillText(text, midX, y + th / 2);
   ctx.restore();
+}
+
+// ---- Measure tool overlay -----------------------------------------------
+const MEASURE_COLOR = "#ffeb3b";
+const $measureReadout = document.getElementById("measure-readout");
+
+function drawSnapMarker(snap) {
+  if (!snap || snap.kind === "free") return;
+  const [sx, sy] = worldToScreen(snap.x, snap.y);
+  const size = 6 * dpr;
+  ctx.save();
+  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  if (snap.kind === "endpoint") {
+    ctx.rect(sx - size, sy - size, size * 2, size * 2);
+  } else if (snap.kind === "midpoint") {
+    ctx.moveTo(sx,        sy - size);
+    ctx.lineTo(sx + size, sy + size);
+    ctx.lineTo(sx - size, sy + size);
+    ctx.closePath();
+  } else if (snap.kind === "center") {
+    ctx.arc(sx, sy, size, 0, Math.PI * 2);
+    // Tiny cross-hair inside the circle so it reads as "center" not "circle vertex".
+    ctx.moveTo(sx - size * 0.5, sy); ctx.lineTo(sx + size * 0.5, sy);
+    ctx.moveTo(sx, sy - size * 0.5); ctx.lineTo(sx, sy + size * 0.5);
+  } else if (snap.kind === "quadrant") {
+    ctx.moveTo(sx,        sy - size);
+    ctx.lineTo(sx + size, sy);
+    ctx.lineTo(sx,        sy + size);
+    ctx.lineTo(sx - size, sy);
+    ctx.closePath();
+  } else if (snap.kind === "nearest") {
+    ctx.moveTo(sx - size, sy - size); ctx.lineTo(sx + size, sy + size);
+    ctx.moveTo(sx + size, sy - size); ctx.lineTo(sx - size, sy + size);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMeasureSegment(a, b, dashed) {
+  const [sx1, sy1] = worldToScreen(a[0], a[1]);
+  const [sx2, sy2] = worldToScreen(b[0], b[1]);
+  ctx.save();
+  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.lineWidth = 1.5 * dpr;
+  if (dashed) ctx.setLineDash([6 * dpr, 4 * dpr]);
+  ctx.beginPath();
+  ctx.moveTo(sx1, sy1);
+  ctx.lineTo(sx2, sy2);
+  ctx.stroke();
+  if (dashed) ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// Midpoint-of-segment label. Sits perpendicular-offset from the line so it
+// doesn't overlap the rubber-band; mimics the look of drawFocusedLabel.
+function drawSegmentLabel(a, b, text) {
+  const [sax, say] = worldToScreen(a[0], a[1]);
+  const [sbx, sby] = worldToScreen(b[0], b[1]);
+  const sdx = sbx - sax, sdy = sby - say;
+  const slen = Math.hypot(sdx, sdy);
+  if (slen < 2) return;
+  const mx = (sax + sbx) / 2;
+  const my = (say + sby) / 2;
+  // Perpendicular unit (rotate the segment 90° CCW in screen space).
+  const px = -sdy / slen, py = sdx / slen;
+  const offset = 10 * dpr;
+  const cx = mx + px * offset;
+  const cy = my + py * offset;
+
+  ctx.save();
+  ctx.font = `${12 * dpr}px ui-monospace, monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const m = ctx.measureText(text);
+  const padX = 6 * dpr, padY = 3 * dpr;
+  const tw = m.width + padX * 2;
+  const th = 14 * dpr + padY * 2;
+  ctx.fillStyle = "rgba(0,0,0,0.82)";
+  ctx.fillRect(cx - tw / 2, cy - th / 2, tw, th);
+  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeRect(cx - tw / 2, cy - th / 2, tw, th);
+  ctx.fillStyle = MEASURE_COLOR;
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
+}
+
+function drawPickDot(pt) {
+  const [sx, sy] = worldToScreen(pt[0], pt[1]);
+  ctx.save();
+  ctx.fillStyle = MEASURE_COLOR;
+  ctx.beginPath();
+  ctx.arc(sx, sy, 4 * dpr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawMeasureOverlay() {
+  const { picks, snapHint } = measureState;
+  // Frozen segments between consecutive picks.
+  for (let i = 1; i < picks.length; i++) {
+    drawMeasureSegment(picks[i - 1], picks[i], false);
+  }
+  // Endpoint dots on every pick.
+  for (const p of picks) drawPickDot(p);
+  // Live rubber-band from the last pick to the snap-resolved cursor.
+  const anchor = measureAnchor();
+  if (anchor && snapHint) {
+    drawMeasureSegment(anchor, [snapHint.x, snapHint.y], true);
+  }
+  if (snapHint) drawSnapMarker(snapHint);
+
+  // Midpoint label per segment. Frozen segments show their distance; the
+  // live segment additionally appends Σ once the chain has ≥ 2 picks.
+  let frozenTotal = 0;
+  for (let i = 1; i < picks.length; i++) {
+    const a = picks[i - 1], b = picks[i];
+    const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    frozenTotal += d;
+    drawSegmentLabel(a, b, fmtCoord(d));
+  }
+  if (anchor && snapHint) {
+    const b = [snapHint.x, snapHint.y];
+    const d = Math.hypot(b[0] - anchor[0], b[1] - anchor[1]);
+    let label = fmtCoord(d);
+    if (picks.length >= 2) {
+      label = `${fmtCoord(d)} · Σ=${fmtCoord(frozenTotal + d)}`;
+    }
+    drawSegmentLabel(anchor, b, label);
+  }
+
+  updateMeasureReadout();
+}
+
+function fmtCoord(n) {
+  // 3 decimal places, strip trailing zeros and lone trailing dot.
+  return n.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function updateMeasureReadout() {
+  if (!$measureReadout) return;
+  const { snapHint } = measureState;
+  const anchor = measureAnchor();
+  if (!anchor || !snapHint) { $measureReadout.hidden = true; return; }
+
+  // d and Σ live on the per-segment canvas labels. The HTML readout near
+  // the cursor only carries Δx / Δy, which are awkward to express on a
+  // single midpoint label and useful for verifying axis-aligned picks.
+  const dx = snapHint.x - anchor[0];
+  const dy = snapHint.y - anchor[1];
+  $measureReadout.hidden = false;
+  $measureReadout.innerHTML =
+    `<span class="m-dx">Δx = ${fmtCoord(dx)}</span>` +
+    `<span class="m-dy">Δy = ${fmtCoord(dy)}</span>`;
+
+  const [sx, sy] = worldToScreen(snapHint.x, snapHint.y);
+  const rect = $canvas.getBoundingClientRect();
+  const mainRect = $canvas.parentElement.getBoundingClientRect();
+  const offX = rect.left - mainRect.left;
+  const offY = rect.top - mainRect.top;
+  $measureReadout.style.left = `${offX + sx / dpr + 12}px`;
+  $measureReadout.style.top  = `${offY + sy / dpr + 12}px`;
 }
 
 // ---- Rule check sidebar -------------------------------------------------
@@ -871,6 +1101,137 @@ function pickIndexAt(wx, wy) {
   return -1;
 }
 
+// OSNAP for the measure-distance tool. Priority within the same pickbox tol
+// used by pickIndexAt: endpoint > midpoint > nearest-on-edge > free cursor.
+// Endpoints include polyline vertices and POINT primitives; midpoints are
+// per-segment; nearest reuses closestPointOnSegment (already defined above).
+function resolveSnap(wx, wy) {
+  const tol = (PICKBOX_CSS_PX * dpr) / view.zoom;
+  const tol2 = tol * tol;
+  let bestEnd = null,  bestEndD2  = tol2;
+  let bestMid = null,  bestMidD2  = tol2;
+  let bestCen = null,  bestCenD2  = tol2;
+  let bestQua = null,  bestQuaD2  = tol2;
+  let bestNear = null, bestNearD2 = tol2;
+
+  for (let i = 0; i < primitives.length; i++) {
+    const p = primitives[i];
+    if (p.decorative) continue;
+    const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
+    if (wx < bxmin - tol || wx > bxmax + tol || wy < bymin - tol || wy > bymax + tol) continue;
+
+    // Circle-detected primitives contribute CEN (center) + QUA (top/right/
+    // bottom/left) + nearest-on-perimeter, and skip per-vertex/midpoint
+    // enumeration — their polyline vertices are arc-flattening artefacts.
+    const circle = primCircles[i];
+    if (circle) {
+      const { cx, cy, r } = circle;
+      {
+        const dx = wx - cx, dy = wy - cy;
+        const d2 = dx*dx + dy*dy;
+        if (d2 <= bestCenD2) { bestCenD2 = d2; bestCen = [cx, cy]; }
+      }
+      const quads = [[cx + r, cy], [cx - r, cy], [cx, cy + r], [cx, cy - r]];
+      for (const [qx, qy] of quads) {
+        const dx = wx - qx, dy = wy - qy;
+        const d2 = dx*dx + dy*dy;
+        if (d2 <= bestQuaD2) { bestQuaD2 = d2; bestQua = [qx, qy]; }
+      }
+      const dxc = wx - cx, dyc = wy - cy;
+      const dC = Math.hypot(dxc, dyc);
+      if (dC > 1e-9) {
+        const nx = cx + (dxc / dC) * r;
+        const ny = cy + (dyc / dC) * r;
+        const ex = wx - nx, ey = wy - ny;
+        const d2 = ex*ex + ey*ey;
+        if (d2 <= bestNearD2) { bestNearD2 = d2; bestNear = [nx, ny]; }
+      }
+      continue;
+    }
+
+    const verts = [];      // [[x, y], ...]
+    const segs = [];       // [[ax, ay, bx, by], ...]
+    switch (p.type) {
+      case "line":
+        verts.push(p.start, p.end);
+        segs.push([p.start[0], p.start[1], p.end[0], p.end[1]]);
+        break;
+      case "polyline": {
+        const pts = p.points;
+        for (const v of pts) verts.push(v);
+        for (let j = 1; j < pts.length; j++) {
+          segs.push([pts[j-1][0], pts[j-1][1], pts[j][0], pts[j][1]]);
+        }
+        if (p.closed && pts.length > 2) {
+          const a = pts[pts.length - 1], b = pts[0];
+          segs.push([a[0], a[1], b[0], b[1]]);
+        }
+        break;
+      }
+      case "filled_polygon":
+        for (const ring of p.rings) {
+          for (const v of ring) verts.push(v);
+          for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) {
+            segs.push([ring[k][0], ring[k][1], ring[j][0], ring[j][1]]);
+          }
+        }
+        break;
+      case "point":
+        verts.push(p.pos);
+        break;
+    }
+
+    for (const [vx, vy] of verts) {
+      const dx = wx - vx, dy = wy - vy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestEndD2) { bestEndD2 = d2; bestEnd = [vx, vy]; }
+    }
+    for (const [ax, ay, bx, by] of segs) {
+      const mx = (ax + bx) / 2, my = (ay + by) / 2;
+      const dx = wx - mx, dy = wy - my;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestMidD2) { bestMidD2 = d2; bestMid = [mx, my]; }
+    }
+    for (const [ax, ay, bx, by] of segs) {
+      const foot = closestPointOnSegment([wx, wy], [ax, ay], [bx, by]);
+      const dx = wx - foot[0], dy = wy - foot[1];
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestNearD2) { bestNearD2 = d2; bestNear = foot; }
+    }
+  }
+
+  // Priority: endpoint → midpoint → center → quadrant → nearest → free
+  if (bestEnd)  return { x: bestEnd[0],  y: bestEnd[1],  kind: "endpoint" };
+  if (bestMid)  return { x: bestMid[0],  y: bestMid[1],  kind: "midpoint" };
+  if (bestCen)  return { x: bestCen[0],  y: bestCen[1],  kind: "center" };
+  if (bestQua)  return { x: bestQua[0],  y: bestQua[1],  kind: "quadrant" };
+  if (bestNear) return { x: bestNear[0], y: bestNear[1], kind: "nearest" };
+  return { x: wx, y: wy, kind: "free" };
+}
+
+// Ortho-constrain a candidate measure point against the locked first point
+// when Shift is held. Mirrors AutoCAD's Shift=Ortho in DIST: lock the
+// off-axis coordinate to the first point. OSNAP still runs — the *on-axis*
+// coordinate is taken from the snap target (so "horizontal" lock pulls to
+// a vertex's X while keeping Y = first.y), and the snap marker is drawn at
+// the projected position with the original snap kind so the user can see
+// which OSNAP fired. When no OSNAP fires, we fall back to the raw cursor's
+// on-axis coordinate and a "free" marker.
+function applyOrtho(wx, wy, shiftKey) {
+  const anchor = measureAnchor();
+  if (!shiftKey || !anchor) return null;
+  const [fx, fy] = anchor;
+  const snap = resolveSnap(wx, wy);
+  const useSnap = snap.kind !== "free";
+  // Choose the axis from the raw cursor delta — keeps lock direction
+  // stable while the cursor moves *toward* a snap target.
+  const dx = wx - fx, dy = wy - fy;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return { x: useSnap ? snap.x : wx, y: fy, kind: useSnap ? snap.kind : "free" };
+  }
+  return { x: fx, y: useSnap ? snap.y : wy, kind: useSnap ? snap.kind : "free" };
+}
+
 // ---- connectivity graph (for Chain mode) --------------------------------
 function buildConnectivity() {
   // Two primitives are connected if one's endpoint lies within CONNECT_TOL
@@ -1102,7 +1463,12 @@ function updateStatus() {
     $handle.classList.add("empty");
   }
 
-  if (addModeClass) {
+  if (measureMode) {
+    const n = measureState.picks.length;
+    $modeHint.textContent = n === 0
+      ? "MEASURE · pick first point"
+      : `MEASURE · pick next point · ${n} pt${n === 1 ? "" : "s"} (Shift = ortho, Esc to clear)`;
+  } else if (addModeClass) {
     if (matchesStaged) {
       $modeHint.textContent = `ADD ${addModeClass} · press Enter to commit, Esc to cancel`;
     } else if (selection.size) {
@@ -1129,8 +1495,19 @@ $canvas.addEventListener("mousedown", (e) => {
     };
     $canvas.classList.add("panning");
   } else if (e.button === 0) {
-    // Left: click_pending — becomes box-drag if mouse moves past threshold.
     const [wx, wy] = eventToWorld(e);
+    if (measureMode) {
+      // Measure click: snap, then append to picks[]. Each click extends the
+      // chain — picks[i],picks[i+1] are frozen segments, picks[last] anchors
+      // the live rubber-band to the cursor.
+      const snap = applyOrtho(wx, wy, e.shiftKey) ?? resolveSnap(wx, wy);
+      measureState.picks.push([snap.x, snap.y]);
+      measureState.snapHint = snap;
+      updateStatus();
+      render();
+      return;
+    }
+    // Left: click_pending — becomes box-drag if mouse moves past threshold.
     drag = {
       kind: "click_pending",
       startClient: { x: e.clientX, y: e.clientY },
@@ -1143,6 +1520,13 @@ $canvas.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   const [wx, wy] = eventToWorld(e);
   $coords.textContent = `${wx.toFixed(3)}, ${wy.toFixed(3)}`;
+
+  if (measureMode && !drag) {
+    measureState.lastCursor = [wx, wy];
+    measureState.snapHint = applyOrtho(wx, wy, e.shiftKey) ?? resolveSnap(wx, wy);
+    render();
+    return;
+  }
 
   if (!drag) return;
   if (drag.kind === "pan") {
@@ -1261,6 +1645,7 @@ function renderClassToolbar() {
 }
 
 function enterAddMode(className) {
+  if (measureMode) return;  // mutually exclusive with measure mode
   if (addModeClass === className) {
     // toggle off
     exitAddMode();
@@ -1658,10 +2043,17 @@ window.addEventListener("keydown", (e) => {
   // Ignore when typing in an input (none right now, but defensive).
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-  // Esc cascade: cancel active box drag → clear scan-all overlay →
-  // exit add-mode → clear selection.
+  // Esc cascade: cancel active box drag → clear active measurement (stay in
+  // measure mode) → clear scan-all overlay → exit add-mode → clear selection.
   if (e.key === "Escape") {
     if (drag && drag.kind === "box") { drag = null; render(); return; }
+    if (measureMode && measureState.picks.length) {
+      measureState.picks = [];
+      if ($measureReadout) $measureReadout.hidden = true;
+      updateStatus();
+      render();
+      return;
+    }
     if (scanAllByHandle) { clearScanAll(); return; }
     if (addModeClass) { exitAddMode(); return; }
     clearSelection();
@@ -1675,11 +2067,20 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // Hotkeys → enter add mode for that class. Don't fire while typing.
+  // D = toggle measure-distance tool (AutoCAD `DIST`). No-op during add-mode.
+  if ((e.key === "d" || e.key === "D") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (!addModeClass) toggleMeasureMode();
+    e.preventDefault();
+    return;
+  }
+
+  // Hotkeys → enter add mode for that class. Don't fire while typing or
+  // while measure mode is active (measure mode owns the keyboard).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
     const key = e.key.toLowerCase();
     const idx = HOTKEYS.indexOf(key);
     if (idx !== -1 && idx < classes.length) {
+      if (measureMode) { e.preventDefault(); return; }
       enterAddMode(classes[idx].name);
       e.preventDefault();
       return;
@@ -1712,6 +2113,54 @@ $chainBtn.addEventListener("click", () => {
   if (chainMode) ensureConnectivity();  // build eagerly so first click feels instant
 });
 
+// ---- measure tool toggle -------------------------------------------------
+const $measureBtn = document.getElementById("measure-btn");
+
+function enterMeasureMode() {
+  if (addModeClass) return false;        // blocked while staging a template
+  if (measureMode) return true;
+  measureMode = true;
+  if ($measureBtn) $measureBtn.classList.add("active");
+  updateStatus();
+  render();
+  return true;
+}
+
+function exitMeasureMode() {
+  measureMode = false;
+  measureState = { picks: [], snapHint: null, lastCursor: null };
+  if ($measureBtn) $measureBtn.classList.remove("active");
+  if ($measureReadout) $measureReadout.hidden = true;
+  updateStatus();
+  render();
+}
+
+function toggleMeasureMode() {
+  if (measureMode) exitMeasureMode();
+  else enterMeasureMode();
+}
+
+if ($measureBtn) $measureBtn.addEventListener("click", toggleMeasureMode);
+
+// Re-resolve the rubber-band when Shift is pressed/released without mouse
+// movement, so ortho lock engages/disengages on key state alone.
+function reresolveMeasureSnap(shiftKey) {
+  if (!measureMode || !measureState.lastCursor) return;
+  const [wx, wy] = measureState.lastCursor;
+  measureState.snapHint = applyOrtho(wx, wy, shiftKey) ?? resolveSnap(wx, wy);
+  render();
+}
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Shift" && measureMode && measureAnchor()) {
+    reresolveMeasureSnap(true);
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === "Shift" && measureMode && measureAnchor()) {
+    reresolveMeasureSnap(false);
+  }
+});
+
 // ---- bootstrap -----------------------------------------------------------
 async function load() {
   resize();
@@ -1731,6 +2180,7 @@ async function load() {
 
   const tBox0 = performance.now();
   computeBBoxes();
+  computePrimCircles();
   const tBox = (performance.now() - tBox0).toFixed(0);
 
   const t1 = performance.now();

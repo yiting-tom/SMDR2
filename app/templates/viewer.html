@@ -14,6 +14,7 @@
     <span id="role-switcher"></span>
     <select id="library-switcher" title="Library this file uses (set by its product)"></select>
     <button id="chain-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
+    <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">Measure</button>
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
     <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>
@@ -27,6 +28,7 @@
   <nav id="class-toolbar" aria-label="Object classes"></nav>
   <main>
     <canvas id="dxf-canvas"></canvas>
+    <div id="measure-readout" class="measure-readout" hidden></div>
     <aside id="rule-sidebar" hidden>
       <header>
         <h3>Rule Check</h3>

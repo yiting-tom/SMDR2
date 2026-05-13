@@ -427,6 +427,27 @@ canvas#dxf-canvas {
 }
 canvas#dxf-canvas.panning { cursor: grabbing; }
 
+/* ---- Measure tool readout --------------------------------------------- */
+.measure-readout {
+  position: absolute;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  background: rgba(0, 0, 0, 0.82);
+  color: #ffeb3b;
+  border: 1px solid #ffeb3b;
+  border-radius: 3px;
+  padding: 0.25rem 0.5rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  pointer-events: none;
+  z-index: 6;
+  white-space: nowrap;
+}
+.measure-readout[hidden] { display: none; }
+.measure-readout .m-dx,
+.measure-readout .m-dy { color: #c0cad6; font-size: 0.74rem; }
+
 /* ---- Dashboard --------------------------------------------------------- */
 body.dashboard main.dashboard-main {
   padding: 1rem 1.5rem;
