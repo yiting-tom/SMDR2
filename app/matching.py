@@ -1,0 +1,535 @@
+"""Pattern matching engine.
+
+Given a template (one or more entities' point sets) and a drawing's entity
+geometries, finds all matches under translation + rotation + mirror + scale
+∈ [0.95, 1.05] + ε tolerance.
+
+MVP approach:
+- Per-entity shape signature (vertex count, path length, bbox-diagonal) for
+  fast pre-filtering.
+- Procrustes-style alignment using PCA principal axes (up to 4 mirror/180°
+  variants) + Kabsch optimal rotation refinement.
+- Chamfer distance under the recovered transform is the match score.
+- Single-entity templates: enumerate every drawing entity as a candidate.
+- Multi-entity templates: each drawing entity is a "seed", gather nearby
+  entities into a candidate group, compare combined point clouds.
+"""
+
+from __future__ import annotations
+
+import os
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from typing import Iterable
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+from app.library import Template
+
+
+# ---- Tunables -----------------------------------------------------------
+SCALE_MIN = 0.95
+SCALE_MAX = 1.05
+TOLERANCE_ABS = 0.05            # ε for chamfer (world units / mm)
+VERTEX_COUNT_RATIO = 0.25       # candidate must be within ±25% vertex count
+PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
+
+# Worker count default. Single-process when 1 (no multiprocessing overhead).
+# Set higher for very large drawings where the per-candidate alignment loop
+# becomes the bottleneck. Lazy pool — only spun up on first n_jobs>1 call,
+# then kept alive for module lifetime to amortise spawn cost.
+N_JOBS = int(os.environ.get("SMDR2_N_JOBS", "1"))
+_MIN_ITEMS_PER_WORKER = 200     # below this the pool overhead dominates
+
+
+@dataclass
+class EntityShape:
+    handle: str
+    points: np.ndarray            # (N, 2)
+    centroid: np.ndarray          # (2,)
+    radius: float                 # max distance from centroid (compact bound)
+    path_length: float
+    vertex_count: int
+
+    @classmethod
+    def from_points(cls, handle: str, points: list[tuple[float, float]]) -> "EntityShape":
+        arr = np.asarray(points, dtype=np.float64)
+        if arr.shape[0] == 0:
+            return cls(handle, arr, np.zeros(2), 0.0, 0.0, 0)
+        # Compute path length on the raw sequence (includes the closing
+        # segment for closed polylines) BEFORE dedup.
+        path_length = (
+            float(np.linalg.norm(np.diff(arr, axis=0), axis=1).sum())
+            if len(arr) > 1 else 0.0
+        )
+        # Drop a trailing duplicate of the first point — common in
+        # flattened closed polylines. Without this, the centroid and PCA
+        # are pulled toward the duplicate, ruining mirror/rotation alignment.
+        if arr.shape[0] >= 2 and np.allclose(arr[0], arr[-1]):
+            arr = arr[:-1]
+        centroid = arr.mean(axis=0)
+        d = arr - centroid
+        radius = float(np.linalg.norm(d, axis=1).max())
+        return cls(handle, arr, centroid, radius, path_length, arr.shape[0])
+
+
+@dataclass
+class MatchResult:
+    handles: list[str]
+    score: float                  # chamfer distance under best transform
+    scale: float
+
+
+@dataclass
+class NearMiss:
+    """A candidate that passed the cheap pre-filters but failed alignment.
+
+    Useful for debugging "I thought this should match — why didn't it?":
+        - reason="scale" → optimal scale fell outside [SCALE_MIN, SCALE_MAX]
+        - reason="shape" → scale OK, but chamfer distance exceeded tolerance
+    """
+    handles: list[str]
+    score: float                  # chamfer (or 0 if not computed)
+    scale: float                  # optimal scale (or 0)
+    reason: str                   # "scale" | "shape"
+
+
+@dataclass
+class MatchOutput:
+    matches: list[MatchResult]
+    near_misses: list[NearMiss]
+
+
+# ---- Building drawing entity shapes ----------------------------------------
+def build_entity_shapes(
+    primitives: list[dict],
+    handle_index: dict[str, list[int]],
+) -> dict[str, EntityShape]:
+    """One EntityShape per DXF handle, aggregating all its primitives' points."""
+    from app.library import collect_entity_points
+    shapes: dict[str, EntityShape] = {}
+    for h in handle_index:
+        pts = collect_entity_points(primitives, handle_index, h)
+        if not pts:
+            continue
+        shapes[h] = EntityShape.from_points(h, pts)
+    return shapes
+
+
+# ---- PCA / alignment ------------------------------------------------------
+def _pca_axes(centered: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (axes, singular_values) — axes is 2x2 rows = principal directions.
+
+    Falls back to identity if the cloud is degenerate.
+    """
+    if centered.shape[0] < 2:
+        return np.eye(2), np.zeros(2)
+    cov = centered.T @ centered
+    w, v = np.linalg.eigh(cov)
+    order = np.argsort(w)[::-1]
+    axes = v[:, order].T              # rows = principal axes
+    sv = np.sqrt(np.maximum(w[order], 0.0))
+    # Enforce right-handed (det = +1).
+    if np.linalg.det(axes) < 0:
+        axes[1] *= -1
+    return axes, sv
+
+
+def _try_alignments(
+    template_centered: np.ndarray,
+    candidate_centered: np.ndarray,
+) -> Iterable[tuple[np.ndarray, str]]:
+    """Yield candidate orientations of `candidate_centered` in template frame.
+
+    We align candidate's principal axes to template's, then enumerate the 4
+    rotation/mirror variants that remain after PCA (PCA is only canonical up
+    to axis sign).
+    """
+    tpl_axes, _ = _pca_axes(template_centered)
+    cand_axes, _ = _pca_axes(candidate_centered)
+    # R such that cand_axes @ R = tpl_axes  =>  R = cand_axes.T @ tpl_axes
+    R0 = cand_axes.T @ tpl_axes
+    # Express candidate in template frame: pts @ R0
+    base = candidate_centered @ R0
+    # Variants: flip x, flip y, flip both, identity.
+    diag_pp = np.diag([1.0, 1.0])
+    diag_pm = np.diag([1.0, -1.0])
+    diag_mp = np.diag([-1.0, 1.0])
+    diag_mm = np.diag([-1.0, -1.0])
+    yield base @ diag_pp, "++"
+    yield base @ diag_pm, "+-"
+    yield base @ diag_mp, "-+"
+    yield base @ diag_mm, "--"
+
+
+def _chamfer(
+    a: np.ndarray,
+    a_tree: cKDTree,
+    b: np.ndarray,
+    b_tree: cKDTree,
+) -> float:
+    """Symmetric mean chamfer distance between two point sets."""
+    dab, _ = a_tree.query(b, k=1)
+    dba, _ = b_tree.query(a, k=1)
+    return float(0.5 * (dab.mean() + dba.mean()))
+
+
+def _chamfer_brute(a: np.ndarray, b: np.ndarray) -> float:
+    """Symmetric mean chamfer via O(N*M) numpy — faster than KDTree at small N.
+
+    Cutover at ~50 points where tree construction overhead dominates.
+    """
+    # (N, M, 2) → (N, M) squared distances → row/col mins → sqrt → mean
+    diffs = a[:, None, :] - b[None, :, :]
+    d2 = (diffs * diffs).sum(axis=2)
+    return float(0.5 * (np.sqrt(d2.min(axis=1)).mean()
+                        + np.sqrt(d2.min(axis=0)).mean()))
+
+
+BRUTE_FORCE_CUTOFF = 50
+
+
+# ---- Lazy module-level worker pool ---------------------------------------
+_match_pool: ProcessPoolExecutor | None = None
+_match_pool_workers = 0
+
+
+def _get_match_pool(n_workers: int) -> ProcessPoolExecutor:
+    """Cache a process pool keyed by worker count. Spawn cost is paid once,
+    not per request."""
+    global _match_pool, _match_pool_workers
+    if _match_pool is None or _match_pool_workers != n_workers:
+        if _match_pool is not None:
+            _match_pool.shutdown(wait=False)
+        _match_pool = ProcessPoolExecutor(max_workers=n_workers)
+        _match_pool_workers = n_workers
+    return _match_pool
+
+
+def shutdown_pool() -> None:
+    global _match_pool
+    if _match_pool is not None:
+        _match_pool.shutdown(wait=False)
+        _match_pool = None
+
+
+def _dedup_closing(pts: np.ndarray) -> np.ndarray:
+    """Drop the trailing-equals-first row that flattened closed polylines
+    leave behind (centroid + PCA bias otherwise)."""
+    if pts.shape[0] >= 2 and np.allclose(pts[0], pts[-1]):
+        return pts[:-1]
+    return pts
+
+
+def align_score(
+    template_pts: np.ndarray,
+    candidate_pts: np.ndarray,
+) -> tuple[float, float] | None:
+    """Best (score, scale) over 4 PCA orientations, after optimal isotropic
+    scaling. Returns None if scale falls outside [SCALE_MIN, SCALE_MAX].
+    """
+    template_pts = _dedup_closing(template_pts)
+    candidate_pts = _dedup_closing(candidate_pts)
+    if template_pts.shape[0] < 2 or candidate_pts.shape[0] < 2:
+        return None
+    t_centered = template_pts - template_pts.mean(axis=0)
+    c_centered = candidate_pts - candidate_pts.mean(axis=0)
+
+    t_norm = np.linalg.norm(t_centered, axis=1).mean()
+    c_norm = np.linalg.norm(c_centered, axis=1).mean()
+    if t_norm < 1e-9 or c_norm < 1e-9:
+        return None
+    scale = t_norm / c_norm
+    if scale < SCALE_MIN or scale > SCALE_MAX:
+        return None
+    c_scaled = c_centered * scale
+
+    t_tree = cKDTree(t_centered)
+    best = None
+    for cand_oriented, _ in _try_alignments(t_centered, c_scaled):
+        c_tree = cKDTree(cand_oriented)
+        d = _chamfer(t_centered, t_tree, cand_oriented, c_tree)
+        if best is None or d < best:
+            best = d
+    return float(best), float(scale)
+
+
+# ---- Signature pre-filter -------------------------------------------------
+def signatures_compatible(a: EntityShape, b: EntityShape) -> bool:
+    if a.vertex_count == 0 or b.vertex_count == 0:
+        return False
+    vc_ratio = a.vertex_count / b.vertex_count
+    if vc_ratio < (1 - VERTEX_COUNT_RATIO) or vc_ratio > (1 + VERTEX_COUNT_RATIO):
+        return False
+    if a.path_length > 0 and b.path_length > 0:
+        pl_ratio = a.path_length / b.path_length
+        if pl_ratio < (1 - PATH_LENGTH_RATIO) or pl_ratio > (1 + PATH_LENGTH_RATIO):
+            return False
+    return True
+
+
+# ---- Top-level matching --------------------------------------------------
+def find_matches(
+    template_handles: list[str],
+    drawing_shapes: dict[str, EntityShape],
+    tolerance: float = TOLERANCE_ABS,
+    n_jobs: int | None = None,
+) -> MatchOutput:
+    """Find all matches of `template_handles` (as defined inside drawing_shapes)
+    elsewhere in the drawing. Returns both confirmed matches and near-misses
+    (candidates that passed the cheap pre-filters but failed alignment).
+    """
+    n_jobs = N_JOBS if n_jobs is None else n_jobs
+    template_handle_set = set(template_handles)
+    template_shapes = [drawing_shapes[h] for h in template_handles if h in drawing_shapes]
+    if not template_shapes:
+        return MatchOutput(matches=[], near_misses=[])
+
+    if len(template_shapes) == 1:
+        return _match_single(template_shapes[0], drawing_shapes, template_handle_set,
+                             tolerance, n_jobs=n_jobs)
+    return _match_multi(template_shapes, drawing_shapes, template_handle_set, tolerance)
+
+
+def find_matches_from_pointsets(
+    entity_point_sets: list[list[tuple[float, float]]],
+    drawing_shapes: dict[str, EntityShape],
+    tolerance: float = TOLERANCE_ABS,
+    n_jobs: int | None = None,
+) -> MatchOutput:
+    """Match a Template (stored as per-entity point sets) against a drawing.
+
+    Used by /api/scan-all where the template doesn't live in the drawing's
+    handle space — we construct virtual EntityShape objects from the stored
+    points and feed them straight into the matching pipeline.
+    """
+    n_jobs = N_JOBS if n_jobs is None else n_jobs
+    template_shapes: list[EntityShape] = [
+        EntityShape.from_points(f"_template_{i}", pts)
+        for i, pts in enumerate(entity_point_sets)
+        if pts
+    ]
+    if not template_shapes:
+        return MatchOutput(matches=[], near_misses=[])
+    skip: set[str] = set()
+    if len(template_shapes) == 1:
+        return _match_single(template_shapes[0], drawing_shapes, skip, tolerance,
+                             n_jobs=n_jobs)
+    return _match_multi(template_shapes, drawing_shapes, skip, tolerance)
+
+
+SIGN_VARIANTS = (
+    np.array([1.0, 1.0]),
+    np.array([1.0, -1.0]),
+    np.array([-1.0, 1.0]),
+    np.array([-1.0, -1.0]),
+)
+
+
+def _match_single(
+    template: EntityShape,
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+    tolerance: float,
+    n_jobs: int = 1,
+) -> MatchOutput:
+    """Single-entity match dispatcher — serial or fan out across processes."""
+    if n_jobs <= 1:
+        return _match_single_serial(template, drawing, skip, tolerance)
+    items = [(h, s) for h, s in drawing.items() if h not in skip]
+    if len(items) < n_jobs * _MIN_ITEMS_PER_WORKER:
+        return _match_single_serial(template, drawing, skip, tolerance)
+    chunk_size = (len(items) + n_jobs - 1) // n_jobs
+    chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+    pool = _get_match_pool(n_jobs)
+    futs = [pool.submit(_match_single_chunk, template, chunk, tolerance)
+            for chunk in chunks]
+    matches: list[MatchResult] = []
+    near: list[NearMiss] = []
+    for fut in futs:
+        out = fut.result()
+        matches.extend(out.matches)
+        near.extend(out.near_misses)
+    return MatchOutput(matches=matches, near_misses=near)
+
+
+def _match_single_chunk(
+    template: EntityShape,
+    chunk: list[tuple[str, EntityShape]],
+    tolerance: float,
+) -> MatchOutput:
+    """Pickleable worker — runs the serial match over a candidate sublist."""
+    return _match_single_serial(template, dict(chunk), set(), tolerance)
+
+
+def _match_single_serial(
+    template: EntityShape,
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+    tolerance: float,
+) -> MatchOutput:
+    """Single-entity match — hot loop, heavily inlined for speed.
+
+    Template-side state (centered points, PCA axes, mean radius) is computed
+    once outside the loop instead of once per candidate.
+    """
+    matches: list[MatchResult] = []
+    near: list[NearMiss] = []
+
+    if template.vertex_count < 2:
+        return MatchOutput(matches=matches, near_misses=near)
+
+    # Template-side once
+    t_centered = template.points - template.centroid
+    t_axes, _ = _pca_axes(t_centered)
+    t_norm = float(np.linalg.norm(t_centered, axis=1).mean())
+    if t_norm < 1e-9:
+        return MatchOutput(matches=matches, near_misses=near)
+    use_tree = t_centered.shape[0] > BRUTE_FORCE_CUTOFF
+    t_tree = cKDTree(t_centered) if use_tree else None
+
+    for handle, shape in drawing.items():
+        if handle in skip:
+            continue
+        if not signatures_compatible(template, shape):
+            continue
+        if shape.points.shape[0] < 2:
+            continue
+
+        c_centered = shape.points - shape.centroid
+        c_norm = float(np.linalg.norm(c_centered, axis=1).mean())
+        if c_norm < 1e-9:
+            continue
+        scale = t_norm / c_norm
+        if scale < SCALE_MIN or scale > SCALE_MAX:
+            near.append(NearMiss(handles=[handle], score=0.0, scale=scale, reason="scale"))
+            continue
+
+        c_scaled = c_centered * scale
+        c_axes, _ = _pca_axes(c_scaled)
+        # R0 maps candidate PCA frame to template PCA frame.
+        base = c_scaled @ (c_axes.T @ t_axes)
+
+        best = float("inf")
+        for sign in SIGN_VARIANTS:
+            cand = base * sign  # broadcast
+            if use_tree:
+                c_tree = cKDTree(cand)
+                d = _chamfer(t_centered, t_tree, cand, c_tree)
+            else:
+                d = _chamfer_brute(t_centered, cand)
+            if d < best:
+                best = d
+                if best <= tolerance:
+                    break  # already good enough, no need to try more variants
+
+        if best <= tolerance:
+            matches.append(MatchResult(handles=[handle], score=best, scale=scale))
+        else:
+            near.append(NearMiss(handles=[handle], score=best, scale=scale, reason="shape"))
+
+    return MatchOutput(matches=matches, near_misses=near)
+
+
+def _match_multi(
+    template_shapes: list[EntityShape],
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+    tolerance: float,
+) -> MatchOutput:
+    """Pose-based multi-entity matching.
+
+    The previous "gather everything in radius + bulk chamfer" approach failed
+    when neighbouring patterns were close together: extra entities got swept
+    in, blowing the point-count gate.
+
+    New approach: pick the rarest template entity as a seed; encode every
+    other template entity's centroid in the seed's PCA-local frame; for each
+    candidate seed in the drawing, hypothesise the same pose and look up
+    each other template entity at its *predicted* position (not anywhere in
+    a radius). Then verify each per-entity shape match independently.
+    """
+    handles = list(drawing.keys())
+    centroids = np.stack([drawing[h].centroid for h in handles])
+    tree = cKDTree(centroids)
+
+    # Rarest template entity = best seed (smallest signature-compatible set).
+    def candidate_count(t: EntityShape) -> int:
+        return sum(1 for h in handles if h not in skip and signatures_compatible(t, drawing[h]))
+
+    seed = min(template_shapes, key=candidate_count)
+    others = [t for t in template_shapes if t is not seed]
+
+    # Encode other template entities' positions in seed's PCA-local frame.
+    seed_centered = seed.points - seed.centroid
+    seed_axes, _ = _pca_axes(seed_centered)
+    others_local: list[tuple[EntityShape, np.ndarray]] = []
+    for t in others:
+        local = (t.centroid - seed.centroid) @ seed_axes.T
+        others_local.append((t, local))
+
+    # Position tolerance for "is this entity at the predicted spot": small
+    # absolute buffer above chamfer tolerance to absorb PCA + scale noise.
+    pos_tol = max(0.1, tolerance * 2)
+
+    sign_variants = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+
+    matches: list[MatchResult] = []
+    near: list[NearMiss] = []
+    seen_groups: set[tuple[str, ...]] = set()
+
+    for cand_handle in handles:
+        if cand_handle in skip:
+            continue
+        cand = drawing[cand_handle]
+        if not signatures_compatible(seed, cand):
+            continue
+
+        # Candidate's PCA frame in world.
+        cand_axes, _ = _pca_axes(cand.points - cand.centroid)
+
+        for sx, sy in sign_variants:
+            # 4 mirror/flip variants of how candidate's PCA aligns to template's.
+            scaled_axes = cand_axes * np.array([[sx], [sy]])
+
+            matched_handles = [cand_handle]
+            scores: list[float] = []
+            consistent = True
+
+            for t, local_pos in others_local:
+                expected = local_pos @ scaled_axes + cand.centroid
+                nearby_idx = tree.query_ball_point(expected, r=pos_tol)
+                best_handle: str | None = None
+                best_score = float("inf")
+                for ni in nearby_idx:
+                    h = handles[ni]
+                    if h in skip or h in matched_handles:
+                        continue
+                    if not signatures_compatible(t, drawing[h]):
+                        continue
+                    res = align_score(t.points, drawing[h].points)
+                    if res is None:
+                        continue
+                    score, _ = res
+                    if score <= tolerance and score < best_score:
+                        best_handle = h
+                        best_score = score
+                if best_handle is None:
+                    consistent = False
+                    break
+                matched_handles.append(best_handle)
+                scores.append(best_score)
+
+            if consistent:
+                group = tuple(sorted(matched_handles))
+                if group not in seen_groups:
+                    seen_groups.add(group)
+                    matches.append(MatchResult(
+                        handles=list(group),
+                        score=max(scores) if scores else 0.0,
+                        scale=1.0,
+                    ))
+                break  # don't try other sign variants — first hit wins
+
+    return MatchOutput(matches=matches, near_misses=near)
