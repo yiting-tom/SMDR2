@@ -450,53 +450,99 @@ function render() {
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
-// Collects every vertex of an entity's flattened primitives in world coords.
-function collectHandlesVertices(handles) {
-  const out = [];
-  if (!handles || !handles.length) return out;
+// Collects edges (segments) for the given handle group. A point is emitted
+// as a degenerate segment whose endpoints coincide.
+function collectHandlesSegments(handles) {
+  const segs = [];
+  if (!handles || !handles.length) return segs;
   const wanted = new Set(handles);
   for (const p of primitives) {
     if (!wanted.has(p.handle)) continue;
     switch (p.type) {
       case "line":
-        out.push(p.start, p.end);
+        segs.push([p.start, p.end]);
         break;
-      case "polyline":
-        for (const pt of p.points) out.push(pt);
+      case "polyline": {
+        const pts = p.points;
+        for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1], pts[i]]);
+        // Add the closing edge if the polyline is closed and the points list
+        // doesn't already include the closing duplicate vertex.
+        if (p.closed && pts.length > 2) {
+          const a = pts[pts.length - 1], b = pts[0];
+          if (a[0] !== b[0] || a[1] !== b[1]) segs.push([a, b]);
+        }
         break;
+      }
       case "filled_polygon":
-        for (const ring of p.rings) for (const pt of ring) out.push(pt);
+        for (const ring of p.rings) {
+          if (ring.length < 2) continue;
+          for (let i = 1; i < ring.length; i++) segs.push([ring[i - 1], ring[i]]);
+          const a = ring[ring.length - 1], b = ring[0];
+          if (a[0] !== b[0] || a[1] !== b[1]) segs.push([a, b]);
+        }
         break;
       case "point":
-        out.push(p.pos);
+        segs.push([p.pos, p.pos]);
         break;
     }
   }
-  return out;
+  return segs;
 }
 
-// Shortest-distance line between two handle groups. Returns [fromPt, toPt]
-// in world coords — the vertex pair with the minimum euclidean distance
-// across the cross-product. Good enough as a visual: for the small handle
-// groups produced by rule check (one entity per side), the all-pairs
-// distance computation is trivially fast.
+// Closest point on segment [a, b] to point p, in world coords.
+function closestPointOnSegment(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return [a[0], a[1]];
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  return [a[0] + t * dx, a[1] + t * dy];
+}
+
+// True shortest segment between two handle groups: for every vertex of
+// one shape, find its closest point on every edge of the other (and vice
+// versa); the global minimum is the answer. Captures the perpendicular-
+// foot case that pure vertex-to-vertex misses (e.g., two parallel SMD
+// edges where the nearest pair sits in the middle of both edges, not at
+// either's corner).
 function shortestSegmentBetween(handlesA, handlesB) {
-  const ptsA = collectHandlesVertices(handlesA);
-  const ptsB = collectHandlesVertices(handlesB);
-  if (!ptsA.length || !ptsB.length) return null;
-  let best = Infinity, bestA = ptsA[0], bestB = ptsB[0];
-  for (const a of ptsA) {
-    for (const b of ptsB) {
-      const dx = a[0] - b[0], dy = a[1] - b[1];
-      const d2 = dx * dx + dy * dy;
-      if (d2 < best) {
-        best = d2;
-        bestA = a;
-        bestB = b;
+  const segsA = collectHandlesSegments(handlesA);
+  const segsB = collectHandlesSegments(handlesB);
+  if (!segsA.length || !segsB.length) return null;
+
+  let best = Infinity, bestA = null, bestB = null;
+
+  // Vertices of A vs edges of B.
+  const seenA = new Set();
+  for (const [u, v] of segsA) {
+    for (const p of [u, v]) {
+      const key = `${p[0]},${p[1]}`;
+      if (seenA.has(key)) continue;
+      seenA.add(key);
+      for (const [q1, q2] of segsB) {
+        const foot = closestPointOnSegment(p, q1, q2);
+        const dx = p[0] - foot[0], dy = p[1] - foot[1];
+        const d2 = dx * dx + dy * dy;
+        if (d2 < best) { best = d2; bestA = p; bestB = foot; }
       }
     }
   }
-  return [bestA, bestB];
+  // Vertices of B vs edges of A.
+  const seenB = new Set();
+  for (const [u, v] of segsB) {
+    for (const p of [u, v]) {
+      const key = `${p[0]},${p[1]}`;
+      if (seenB.has(key)) continue;
+      seenB.add(key);
+      for (const [q1, q2] of segsA) {
+        const foot = closestPointOnSegment(p, q1, q2);
+        const dx = p[0] - foot[0], dy = p[1] - foot[1];
+        const d2 = dx * dx + dy * dy;
+        if (d2 < best) { best = d2; bestA = foot; bestB = p; }
+      }
+    }
+  }
+  return bestA && bestB ? [bestA, bestB] : null;
 }
 
 function drawFocusedSubRule(hairline) {
