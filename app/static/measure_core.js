@@ -76,7 +76,7 @@ export function detectCircle(pts, opts = {}) {
 //   primBBoxes    — parallel array of [xmin, ymin, xmax, ymax] tight bboxes
 //   primCircles   — parallel array of null | { cx, cy, r } (see detectCircle)
 //   tol           — pickbox tolerance in world units
-export function resolveSnap({ wx, wy, primitives, primBBoxes, primCircles, tol }) {
+export function resolveSnap({ wx, wy, primitives, primBBoxes, primCircles, tol, isHidden }) {
   const tol2 = tol * tol;
   let bestEnd = null,  bestEndD2  = tol2;
   let bestMid = null,  bestMidD2  = tol2;
@@ -87,6 +87,7 @@ export function resolveSnap({ wx, wy, primitives, primBBoxes, primCircles, tol }
   for (let i = 0; i < primitives.length; i++) {
     const p = primitives[i];
     if (p.decorative) continue;
+    if (isHidden && isHidden(p)) continue;
     const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
     if (wx < bxmin - tol || wx > bxmax + tol || wy < bymin - tol || wy > bymax + tol) continue;
 

@@ -1,16 +1,19 @@
 """DXF parsing and flattening.
 
-Two responsibilities:
+Responsibilities:
 1. `flatten_for_render(path)`: turn a DXF into JSON-serialisable drawing
    primitives (line / polyline / filled_polygon / point). ezdxf's Frontend
    handles OCS, INSERT expansion, bulge, text-to-paths, etc. Curves are
    flattened to polylines for trivial canvas rendering.
-2. (Later) `extract_entities(path)`: structured entity export for the
-   matching engine — preserves CIRCLE/ARC/LINE primitives.
+2. `group_primitives_by_layer(prims)` / `render_layer_svg(...)`: emit
+   per-layer SVG thumbnails for the layer-discovery phase.
+3. `filter_primitives(prims, layers)`: drop everything not on the user's
+   chosen layer subset.
 """
 
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -222,3 +225,168 @@ def _normalize_color(color: str) -> str:
     if isinstance(color, str) and color.startswith("#") and len(color) == 9:
         return color[:7]
     return color
+
+
+# ---- Layer discovery / filtering ----------------------------------------
+
+# Filename-unsafe characters (Windows + POSIX union). We URL-encode anything
+# outside [A-Za-z0-9._-] to keep the on-disk filename portable while letting
+# the manifest carry the original layer name verbatim.
+def sanitize_layer_name(name: str) -> str:
+    """Turn a DXF layer name into a filesystem-safe filename stem."""
+    safe = urllib.parse.quote(name, safe="")
+    # Defensive: a totally-empty layer name (rare) gets a placeholder so
+    # we never produce a zero-length filename.
+    return safe or "_unnamed"
+
+
+def group_primitives_by_layer(
+    primitives: list[dict[str, Any]],
+) -> dict[str, list[int]]:
+    """Return `{layer_name: [primitive_index, ...]}` covering every prim.
+    Primitives without an explicit `layer` are bucketed under `"0"` (the
+    AutoCAD default)."""
+    by_layer: dict[str, list[int]] = {}
+    for i, p in enumerate(primitives):
+        name = str(p.get("layer") or "0")
+        by_layer.setdefault(name, []).append(i)
+    return by_layer
+
+
+def filter_primitives(
+    primitives: list[dict[str, Any]],
+    layers: Iterable[str],
+) -> list[dict[str, Any]]:
+    """Drop primitives whose `layer` is not in `layers`. Decorative
+    primitives are filtered alongside on the same rule."""
+    keep = {str(l) for l in layers}
+    return [p for p in primitives if str(p.get("layer") or "0") in keep]
+
+
+# Caps tuned to keep per-layer SVGs around 100 KB for thumbnails. Dense
+# layers (e.g., a 24k-segment pad grid) get evenly subsampled — the user
+# only needs to recognise the layer, not measure it.
+MAX_PRIMS_PER_THUMB = 600
+MAX_VERTICES_PER_POLYLINE = 24
+
+
+def render_layer_svg(
+    primitives: list[dict[str, Any]],
+    layer_indices: list[int],
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    skip_decorative: bool = True,
+    max_prims: int = MAX_PRIMS_PER_THUMB,
+    background: str = "#212830",
+) -> str:
+    """Render a compact SVG preview of one layer's primitives.
+
+    All thumbnails for a given file share the same `viewBox` (the file-wide
+    bbox) so the user can compare layers in a consistent frame. The SVG
+    embeds the file's background color as a backdrop and draws each
+    primitive in its own color — matching what the user sees in the
+    canvas viewer. Dense layers are evenly subsampled.
+    """
+    if bbox is None:
+        # Degenerate file: emit an empty 1×1 viewport so consumers always
+        # get a parseable SVG.
+        bbox = (0.0, 0.0, 1.0, 1.0)
+    xmin, ymin, xmax, ymax = bbox
+    width = max(xmax - xmin, 1e-9)
+    height = max(ymax - ymin, 1e-9)
+    # Stroke width tuned to the file bbox so the preview reads at any zoom
+    # without becoming a single fat blob on tiny layers or a hair-thin
+    # outline on huge ones. 0.25% of the diagonal feels right empirically.
+    stroke_w = max(width, height) * 0.0025
+
+    # Subsample evenly if there are too many primitives. Keeps the visual
+    # distribution recognisable while bounding SVG size.
+    visible = [
+        i for i in layer_indices
+        if not (skip_decorative and primitives[i].get("decorative"))
+    ]
+    if len(visible) > max_prims:
+        stride = len(visible) / max_prims
+        visible = [visible[int(k * stride)] for k in range(max_prims)]
+
+    bg = _safe_color(background)
+    parts: list[str] = []
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="{_fmt(xmin)} {_fmt(ymin)} {_fmt(width)} {_fmt(height)}" '
+        f'preserveAspectRatio="xMidYMid meet">'
+    )
+    # Solid backdrop in the file's own background color so each thumbnail
+    # reads the same way the canvas viewer would render the layer.
+    parts.append(
+        f'<rect x="{_fmt(xmin)}" y="{_fmt(ymin)}" '
+        f'width="{_fmt(width)}" height="{_fmt(height)}" fill="{bg}"/>'
+    )
+    # SVG y-axis points down; DXF world y-axis points up. Mirror around the
+    # bbox vertical center so the thumbnail matches the canvas viewer.
+    parts.append(
+        f'<g transform="translate(0,{_fmt(ymin + ymax)}) scale(1,-1)" '
+        f'fill="none" stroke-width="{_fmt(stroke_w)}" stroke-linecap="round" '
+        f'stroke-linejoin="round">'
+    )
+    for idx in visible:
+        parts.append(_prim_to_svg(primitives[idx]))
+    parts.append("</g></svg>")
+    return "".join(parts)
+
+
+def _decimate_pts(pts: list[list[float]], cap: int) -> list[list[float]]:
+    if len(pts) <= cap:
+        return pts
+    stride = len(pts) / cap
+    out = [pts[int(k * stride)] for k in range(cap)]
+    # Always keep the last vertex so closed shapes stay closed-looking.
+    if out[-1] is not pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def _prim_to_svg(p: dict[str, Any]) -> str:
+    color = _safe_color(p.get("color"))
+    t = p.get("type")
+    if t == "line":
+        sx, sy = p["start"]
+        ex, ey = p["end"]
+        return (
+            f'<line x1="{_fmt(sx)}" y1="{_fmt(sy)}" '
+            f'x2="{_fmt(ex)}" y2="{_fmt(ey)}" stroke="{color}"/>'
+        )
+    if t == "polyline":
+        decimated = _decimate_pts(p["points"], MAX_VERTICES_PER_POLYLINE)
+        pts = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in decimated)
+        tag = "polygon" if p.get("closed") else "polyline"
+        return f'<{tag} points="{pts}" stroke="{color}"/>'
+    if t == "filled_polygon":
+        # Multiple rings: render each as its own polygon so even-odd rules
+        # aren't required for a thumbnail.
+        out: list[str] = []
+        for ring in p.get("rings", []):
+            decimated = _decimate_pts(ring, MAX_VERTICES_PER_POLYLINE)
+            pts = " ".join(f"{_fmt(x)},{_fmt(y)}" for x, y in decimated)
+            out.append(
+                f'<polygon points="{pts}" stroke="{color}" '
+                f'fill="{color}" fill-opacity="0.5"/>'
+            )
+        return "".join(out)
+    if t == "point":
+        x, y = p["pos"]
+        return f'<circle cx="{_fmt(x)}" cy="{_fmt(y)}" r="0" stroke="{color}"/>'
+    return ""
+
+
+def _fmt(v: float) -> str:
+    """Compact float repr for SVG attributes (drops trailing zeros)."""
+    if v == int(v):
+        return str(int(v))
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def _safe_color(c: Any) -> str:
+    if isinstance(c, str) and c.startswith("#") and len(c) in (7, 9):
+        return c[:7]
+    return "#000000"

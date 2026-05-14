@@ -23,6 +23,7 @@ import {
   resolveSnap as _resolveSnapCore,
   applyOrtho as _applyOrthoCore,
 } from "./measure_core.js";
+import { openLayerModal } from "./layer_modal.js";
 
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
@@ -35,6 +36,36 @@ const $libraryBtn = document.getElementById("library-btn");
 const $libraryModal = document.getElementById("library-modal");
 const $libraryBody = document.getElementById("library-body");
 const $librarySummary = document.getElementById("library-summary");
+const $layersBtn = document.getElementById("layers-btn");
+const $visibilityBtn = document.getElementById("visibility-btn");
+const $visibilityPanel = document.getElementById("visibility-panel");
+const $visibilityList = document.getElementById("visibility-list");
+const $visibilityClose = document.getElementById("visibility-close");
+const $visibilityAll = document.getElementById("visibility-all");
+const $visibilityInvert = document.getElementById("visibility-invert");
+
+// Live layer-visibility state. Independent of the DB-backed `selected_layers`
+// (which gates Phase 2 / matching). This Set just hides layers from the
+// canvas + pick/snap/select; nothing is sent to the server.
+const hiddenLayers = new Set();
+const VIS_STORAGE_KEY = `smdr2.hiddenLayers.${document.body.dataset.fileId}`;
+
+function layerOf(p) { return p.layer || "0"; }
+function isLayerVisible(p) { return !hiddenLayers.has(layerOf(p)); }
+
+function loadHiddenLayersFromSession() {
+  try {
+    const raw = sessionStorage.getItem(VIS_STORAGE_KEY);
+    if (!raw) return;
+    for (const n of JSON.parse(raw)) hiddenLayers.add(String(n));
+  } catch { /* ignore */ }
+}
+
+function persistHiddenLayers() {
+  try {
+    sessionStorage.setItem(VIS_STORAGE_KEY, JSON.stringify([...hiddenLayers]));
+  } catch { /* ignore */ }
+}
 const $productContext = document.getElementById("product-context");
 const $roleSwitcher = document.getElementById("role-switcher");
 
@@ -430,11 +461,15 @@ function render() {
 
   const hairline = (1 / view.zoom) * dpr;
 
-  for (const p of primitives) drawPrimitive(p, { lineWidth: hairline });
+  for (const p of primitives) {
+    if (!isLayerVisible(p)) continue;
+    drawPrimitive(p, { lineWidth: hairline });
+  }
 
   if (scanAllByHandle) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
     for (const p of primitives) {
+      if (!isLayerVisible(p)) continue;
       const cls = scanAllByHandle.get(p.handle);
       if (!cls) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle) || nearMissSet.has(p.handle)) continue;
@@ -445,6 +480,7 @@ function render() {
   if (nearMissSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
     for (const p of primitives) {
+      if (!isLayerVisible(p)) continue;
       if (nearMissSet.has(p.handle) && !matchSet.has(p.handle) && !selection.has(p.handle)) {
         drawPrimitive(p, { stroke: NEARMISS_COLOR, fill: NEARMISS_COLOR, lineWidth: hw });
       }
@@ -453,6 +489,7 @@ function render() {
   if (selection.size || matchSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
     for (const p of primitives) {
+      if (!isLayerVisible(p)) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle)) {
         drawPrimitive(p, { stroke: HIGHLIGHT_COLOR, fill: HIGHLIGHT_COLOR, lineWidth: hw });
       }
@@ -461,6 +498,7 @@ function render() {
   if (hoverSet.size || pinnedSet.size) {
     const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1);
     for (const p of primitives) {
+      if (!isLayerVisible(p)) continue;
       if (hoverSet.has(p.handle) || pinnedSet.has(p.handle)) {
         drawPrimitive(p, { stroke: HOVER_COLOR, fill: HOVER_COLOR, lineWidth: hw });
       }
@@ -1067,6 +1105,7 @@ function pickIndexAt(wx, wy) {
   // First-hit linear scan, prefer last-drawn (top) on tie by iterating in reverse.
   for (let i = primitives.length - 1; i >= 0; i--) {
     if (primitives[i].decorative) continue;
+    if (!isLayerVisible(primitives[i])) continue;
     const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
     if (wx < bxmin - tol || wx > bxmax + tol || wy < bymin - tol || wy > bymax + tol) continue;
     if (primHitTest(primitives[i], wx, wy, tol)) return i;
@@ -1080,7 +1119,10 @@ function pickIndexAt(wx, wy) {
 // The pure implementations are unit-tested in tests/measure_core.test.mjs.
 function resolveSnap(wx, wy) {
   const tol = (PICKBOX_CSS_PX * dpr) / view.zoom;
-  return _resolveSnapCore({ wx, wy, primitives, primBBoxes, primCircles, tol });
+  return _resolveSnapCore({
+    wx, wy, primitives, primBBoxes, primCircles, tol,
+    isHidden: (p) => !isLayerVisible(p),
+  });
 }
 
 function applyOrtho(wx, wy, shiftKey) {
@@ -1114,6 +1156,7 @@ function buildConnectivity() {
   for (let i = 0; i < primitives.length; i++) {
     const p = primitives[i];
     if (p.decorative) continue;
+    if (!isLayerVisible(p)) continue;
     if (p.type === "line") {
       addEndpoint(i, p.start[0], p.start[1]);
       addEndpoint(i, p.end[0], p.end[1]);
@@ -1246,6 +1289,7 @@ function selectByBox(x1, y1, x2, y2, mode, additive) {
   if (!additive) selection.clear();
   for (let i = 0; i < primitives.length; i++) {
     if (primitives[i].decorative) continue;
+    if (!isLayerVisible(primitives[i])) continue;
     const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
     let hit = false;
     if (mode === "window") {
@@ -1671,6 +1715,44 @@ async function saveMatchJson() {
 }
 $saveMatchBtn.addEventListener("click", saveMatchJson);
 
+// ---- Layers modal -------------------------------------------------------
+// Opens the shared layer-selection modal. If the file has no manifest yet
+// (legacy, pre-feature), `triggerDiscovery` re-runs Phase 1 first. On
+// confirm we poll the file's status until it returns to ready_to_match,
+// then reload so the canvas re-fetches the newly-filtered primitives.
+async function openLayersModal() {
+  const hasManifest = await (async () => {
+    const probe = await fetch(`/api/files/${FILE_ID}/layers`);
+    return probe.ok;
+  })();
+  const fileName = document.body.dataset.fileName || "";
+  const result = await openLayerModal({
+    fileId: FILE_ID,
+    fileName,
+    triggerDiscovery: !hasManifest,
+    onConfirm: async () => {
+      if ($status) $status.textContent = "re-preprocessing with new layer set…";
+    },
+  });
+  if (!result.confirmed) return;
+  // Wait for Phase 2 to complete, then reload the page so the canvas
+  // re-fetches primitives, prematch, etc.
+  for (let i = 0; i < 200; i++) {
+    const r = await fetch(API.fileInfo());
+    if (r.ok) {
+      const f = await r.json();
+      if (f.status === "ready_to_match") break;
+      if (f.status === "error") {
+        if ($status) $status.textContent = `error: ${f.error || "preprocess failed"}`;
+        return;
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  location.reload();
+}
+$layersBtn.addEventListener("click", openLayersModal);
+
 // ---- Library modal ------------------------------------------------------
 $libraryBtn.addEventListener("click", openLibrary);
 $libraryModal.addEventListener("click", (e) => {
@@ -2022,6 +2104,102 @@ window.addEventListener("keyup", (e) => {
   }
 });
 
+// ---- layer-visibility panel ---------------------------------------------
+// Live, session-only filter that hides primitives from render / pick /
+// select / snap / chain. Independent of the persisted `selected_layers`
+// that gates Phase 2 matching.
+
+// Distinct layer names sorted alphabetically — derived from the loaded
+// primitives, including the implicit "0" bucket for primitives without an
+// explicit layer.
+let availableLayers = [];
+
+function collectAvailableLayers() {
+  const counts = new Map();
+  for (const p of primitives) {
+    const name = layerOf(p);
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  availableLayers = [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  // Drop any stale hidden-layer names that are no longer in the file
+  // (post Phase-2 re-run can change the layer set).
+  const known = new Set(availableLayers.map(l => l.name));
+  for (const n of [...hiddenLayers]) {
+    if (!known.has(n)) hiddenLayers.delete(n);
+  }
+}
+
+function renderVisibilityPanel() {
+  $visibilityList.innerHTML = "";
+  for (const layer of availableLayers) {
+    const hidden = hiddenLayers.has(layer.name);
+    const row = document.createElement("label");
+    row.className = "vis-row" + (hidden ? " hidden" : "");
+    row.innerHTML =
+      `<button class="vis-eye" type="button" aria-pressed="${!hidden}" ` +
+        `title="${hidden ? "Show" : "Hide"} layer">` +
+        `${hidden ? "○" : "●"}</button>` +
+      `<span class="vis-name" title="${escAttr(layer.name)}">${escText(layer.name)}</span>` +
+      `<span class="vis-count">${layer.count}</span>`;
+    row.querySelector(".vis-eye").addEventListener("click", (e) => {
+      e.preventDefault();
+      toggleLayerVisibility(layer.name);
+    });
+    $visibilityList.appendChild(row);
+  }
+}
+
+function escText(s) {
+  return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+}
+function escAttr(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function toggleLayerVisibility(name) {
+  if (hiddenLayers.has(name)) hiddenLayers.delete(name);
+  else hiddenLayers.add(name);
+  persistHiddenLayers();
+  // Hidden layers change the connectivity graph — invalidate the lazy cache.
+  connectivityGraph = null;
+  renderVisibilityPanel();
+  render();
+}
+
+function showAllLayers() {
+  if (!hiddenLayers.size) return;
+  hiddenLayers.clear();
+  persistHiddenLayers();
+  connectivityGraph = null;
+  renderVisibilityPanel();
+  render();
+}
+
+function invertLayerVisibility() {
+  const next = new Set();
+  for (const layer of availableLayers) {
+    if (!hiddenLayers.has(layer.name)) next.add(layer.name);
+  }
+  hiddenLayers.clear();
+  for (const n of next) hiddenLayers.add(n);
+  persistHiddenLayers();
+  connectivityGraph = null;
+  renderVisibilityPanel();
+  render();
+}
+
+$visibilityBtn.addEventListener("click", () => {
+  $visibilityPanel.hidden = !$visibilityPanel.hidden;
+  if (!$visibilityPanel.hidden) renderVisibilityPanel();
+});
+$visibilityClose.addEventListener("click", () => { $visibilityPanel.hidden = true; });
+$visibilityAll.addEventListener("click", showAllLayers);
+$visibilityInvert.addEventListener("click", invertLayerVisibility);
+
 // ---- bootstrap -----------------------------------------------------------
 async function load() {
   resize();
@@ -2043,6 +2221,10 @@ async function load() {
   computeBBoxes();
   computePrimCircles();
   const tBox = (performance.now() - tBox0).toFixed(0);
+
+  loadHiddenLayersFromSession();
+  collectAvailableLayers();
+  renderVisibilityPanel();
 
   const t1 = performance.now();
   render();

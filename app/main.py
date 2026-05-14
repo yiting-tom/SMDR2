@@ -32,7 +32,14 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from app import jobs
-from app.files import FILE_STORE, FileRecord, PREPROCESSING, READY
+from app.files import (
+    AWAITING_LAYERS,
+    DISCOVERING_LAYERS,
+    FILE_STORE,
+    FileRecord,
+    PREPROCESSING,
+    READY,
+)
 from app.library import (
     DEFAULT_LIBRARY_ID,
     LIBRARIES,
@@ -50,6 +57,8 @@ from app.products import PRODUCT_STORE, VALID_ROLES, Product
 from app.rule_check import check_rules
 from app.storage import (
     DATA_DIR,
+    layer_manifest_path,
+    layer_preview_svg_path,
     match_path,
     parsed_path,
     prematch_path,
@@ -132,12 +141,15 @@ def _ensure_test_dxf_registered() -> None:
     dst = upload_path(fid)
     if not dst.exists():
         shutil.copy2(TEST_DXF, dst)
-    if (rec is None
-            or rec.status != READY
-            or not parsed_path(fid).exists()
-            or not prematch_path(fid).exists()):
-        FILE_STORE.update_status(fid, PREPROCESSING)
-        jobs.submit_preprocess(fid, library_id=rec.library_id if rec else DEFAULT_LIBRARY_ID)
+    # If the parsed cache + prematch are already good, leave it alone.
+    if (rec is not None
+            and rec.status == READY
+            and parsed_path(fid).exists()
+            and prematch_path(fid).exists()):
+        return
+    # Otherwise restart from Phase 1 — discover layers, wait for user.
+    FILE_STORE.update_status(fid, DISCOVERING_LAYERS)
+    jobs.submit_discover_layers(fid)
 
 
 @asynccontextmanager
@@ -284,21 +296,26 @@ async def upload_product_file(
             fid, file.filename, len(content),
             library_id=product.library_id,
             product_id=product_id, dxf_role=dxf_role,
+            initial_status=DISCOVERING_LAYERS,
         )
     else:
+        # Re-uploading into an existing slot: bytes may be identical, but
+        # treat this as a fresh discovery pass either way — the user may be
+        # swapping in a new file and the prior layer selection no longer
+        # applies. Wiping selected_layers forces Phase 1 to re-run.
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
                 "UPDATE files SET product_id = ?, dxf_role = ?, library_id = ?, "
-                "status = ?, match_saved = 0 WHERE id = ?",
-                (product_id, dxf_role, product.library_id, PREPROCESSING, fid),
+                "status = ?, match_saved = 0, selected_layers = NULL WHERE id = ?",
+                (product_id, dxf_role, product.library_id, DISCOVERING_LAYERS, fid),
             )
-    job_id = jobs.submit_preprocess(fid, library_id=product.library_id)
+    job_id = jobs.submit_discover_layers(fid)
     return {
         "file_id": fid,
         "product_id": product_id,
         "dxf_role": dxf_role,
         "library_id": product.library_id,
-        "status": PREPROCESSING,
+        "status": DISCOVERING_LAYERS,
         "job_id": job_id,
     }
 
@@ -310,7 +327,8 @@ class FilePatchRequest(BaseModel):
 @app.patch("/api/files/{file_id}")
 async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
     """Reassign a file to a different library. Triggers re-preprocessing
-    so the pre-match overlay reflects the new library's templates."""
+    so the pre-match overlay reflects the new library's templates. The
+    user's prior `selected_layers` (if any) is reused — no re-prompt."""
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found")
@@ -320,7 +338,11 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
         return {"file_id": file_id, "library_id": req.library_id, "unchanged": True}
     FILE_STORE.update_library(file_id, req.library_id)
     FILE_STORE.update_status(file_id, PREPROCESSING)
-    job_id = jobs.submit_preprocess(file_id, library_id=req.library_id)
+    job_id = jobs.submit_preprocess(
+        file_id,
+        library_id=req.library_id,
+        selected_layers=rec.selected_layers,
+    )
     return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
 
 
@@ -343,6 +365,105 @@ async def get_job(job_id: str) -> dict:
     if j is None:
         raise HTTPException(status_code=404, detail="job not found")
     return j
+
+
+# ---- Layer selection (Phase 1 -> Phase 2 gate) --------------------------
+def _read_layer_manifest(file_id: str) -> dict | None:
+    mp = layer_manifest_path(file_id)
+    if not mp.exists():
+        return None
+    with open(mp) as f:
+        return json.load(f)
+
+
+@app.get("/api/files/{file_id}/layers")
+async def get_file_layers(file_id: str) -> dict:
+    """Manifest + current selection for a file. 404 if Phase 1 hasn't
+    finished yet (no manifest on disk)."""
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    manifest = _read_layer_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layer manifest not available")
+    return {
+        "file_id": file_id,
+        "manifest": manifest,
+        "selected_layers": rec.selected_layers,
+        "status": rec.status,
+    }
+
+
+class LayersConfirmRequest(BaseModel):
+    layers: list[str]
+
+
+@app.post("/api/files/{file_id}/layers")
+async def confirm_layers(file_id: str, req: LayersConfirmRequest) -> dict:
+    """Persist the user's chosen layer subset and kick off Phase 2."""
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    if not req.layers:
+        raise HTTPException(status_code=400, detail="at least one layer required")
+    manifest = _read_layer_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layer manifest not available")
+    known = {layer["name"] for layer in manifest["layers"]}
+    unknown = [name for name in req.layers if name not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown layers for this file: {unknown[:5]}",
+        )
+    # Dedupe + preserve manifest order so the persisted list is stable.
+    chosen_set = set(req.layers)
+    ordered = [layer["name"] for layer in manifest["layers"] if layer["name"] in chosen_set]
+    FILE_STORE.update_selected_layers(file_id, ordered)
+    FILE_STORE.update_status(file_id, PREPROCESSING)
+    job_id = jobs.submit_preprocess(
+        file_id,
+        library_id=rec.library_id,
+        selected_layers=ordered,
+    )
+    return {
+        "file_id": file_id,
+        "selected_layers": ordered,
+        "status": PREPROCESSING,
+        "job_id": job_id,
+    }
+
+
+@app.get("/api/files/{file_id}/layer-preview/{safe_name}.svg")
+async def get_layer_preview_svg(file_id: str, safe_name: str):
+    """Serve one layer's SVG thumbnail. 404 when Phase 1 hasn't completed
+    or the requested layer isn't in the file's manifest."""
+    from fastapi.responses import FileResponse
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    manifest = _read_layer_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layer manifest not available")
+    valid = {layer["safe_name"] for layer in manifest["layers"]}
+    if safe_name not in valid:
+        raise HTTPException(status_code=404, detail="unknown layer for this file")
+    path = layer_preview_svg_path(file_id, safe_name)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="preview SVG missing on disk")
+    return FileResponse(path, media_type="image/svg+xml")
+
+
+@app.post("/api/files/{file_id}/discover-layers")
+async def trigger_discover_layers(file_id: str) -> dict:
+    """Re-run Phase 1 for a legacy or library-swapped file (e.g. user
+    clicked 'Edit layers' on a ready file that pre-dates the feature)."""
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    FILE_STORE.update_status(file_id, DISCOVERING_LAYERS)
+    job_id = jobs.submit_discover_layers(file_id)
+    return {"file_id": file_id, "status": DISCOVERING_LAYERS, "job_id": job_id}
 
 
 # ---- Library CRUD -------------------------------------------------------

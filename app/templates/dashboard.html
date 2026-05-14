@@ -67,6 +67,25 @@
     </div>
   </div>
 
+  <!-- Layer selection modal (auto-opens when a file reaches awaiting_layers) -->
+  <div id="layer-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Pick layers">
+      <header class="modal-header">
+        <h2 data-layer-title>Pick layers to include</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div data-layer-body class="layer-modal-body"></div>
+      <footer class="modal-footer">
+        <button type="button" data-layer-all class="link-btn">Select all</button>
+        <button type="button" data-layer-none class="link-btn">Select none</button>
+        <span class="spacer"></span>
+        <button type="button" data-layer-confirm class="primary">Use selected</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Hidden file picker reused per slot -->
   <input type="file" id="file-input" accept=".dxf" hidden />
 

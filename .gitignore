@@ -15,6 +15,7 @@ data/parsed/
 data/prematch/
 data/match/
 data/rule_check/
+data/layer_preview/
 data/library.sqlite
 data/library.sqlite-*
 data/*.original.dxf

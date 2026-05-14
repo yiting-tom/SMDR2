@@ -2,6 +2,8 @@
 // product-scoped and only available once every uploaded file has had its
 // Match JSON saved.
 
+import { openLayerModal } from "./layer_modal.js";
+
 const ROLES = ["SBT", "BD", "POD", "RING"];
 
 const $list = document.getElementById("product-list");
@@ -188,21 +190,45 @@ function slotCell(product, role) {
   }
 
   const statusColor =
-    f.status === "ready_to_match" ? "#69f0ae" :
-    f.status === "preprocessing" ? "#ffb84d" :
-    f.status === "error"         ? "#ff5252" : "#9aa5b1";
+    f.status === "ready_to_match"     ? "#69f0ae" :
+    f.status === "preprocessing"      ? "#ffb84d" :
+    f.status === "discovering_layers" ? "#ffb84d" :
+    f.status === "awaiting_layers"    ? "#ffd54f" :
+    f.status === "error"              ? "#ff5252" : "#9aa5b1";
+  const statusLabel =
+    f.status === "discovering_layers" ? "scanning layers…" :
+    f.status === "awaiting_layers"    ? "pick layers" :
+    f.status;
   const matchBadge = f.match_saved
     ? `<span style="color:#69f0ae;font-size:0.78rem;">✓ matched</span>`
     : `<span style="color:#9aa5b1;font-size:0.78rem;">not matched</span>`;
 
   cell.innerHTML +=
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
-    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${f.status}</span></span>`;
+    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
 
   const actions = document.createElement("div");
   actions.className = "slot-actions";
-  if (f.status === "ready_to_match") {
+  if (f.status === "awaiting_layers") {
+    const pickBtn = document.createElement("button");
+    pickBtn.className = "primary action-btn";
+    pickBtn.type = "button";
+    pickBtn.textContent = "Pick layers";
+    pickBtn.addEventListener("click", () => promptLayerSelection(f));
+    actions.appendChild(pickBtn);
+  } else if (f.status === "ready_to_match") {
     actions.innerHTML = `<a class="open-link" href="/viewer/${f.id}">Open →</a>`;
+  }
+  // "Layers" button available any time the file has a manifest (i.e.
+  // after discovery has run at least once).
+  if (f.status !== "discovering_layers" && f.status !== "error") {
+    const layersBtn = document.createElement("button");
+    layersBtn.className = "replace-btn";
+    layersBtn.type = "button";
+    layersBtn.textContent = "Layers";
+    layersBtn.title = "Edit which layers feed the matcher";
+    layersBtn.addEventListener("click", () => editLayers(f));
+    actions.appendChild(layersBtn);
   }
   const replace = document.createElement("button");
   replace.className = "replace-btn";
@@ -334,13 +360,52 @@ function showRuleResults(product, data) {
   $ruleResultsModal.hidden = false;
 }
 
+// ---- layer-selection prompts --------------------------------------------
+// The modal is user-driven only — never auto-popped. A file sitting in
+// `awaiting_layers` shows a "Pick layers" call-to-action on its slot;
+// clicking it (or the "Layers" button on a post-Phase-1 file) is the
+// only way to open the modal.
+async function promptLayerSelection(file) {
+  const result = await openLayerModal({
+    fileId: file.id,
+    fileName: file.name,
+    onConfirm: async () => {
+      $status.textContent = `Phase 2 running on ${file.name}…`;
+    },
+  });
+  if (result.confirmed) await refresh();
+  startPollingIfBusy();
+}
+
+async function editLayers(file) {
+  // Manual re-open. If the file has no manifest (legacy), kick off
+  // discovery first.
+  const hasManifest = file.status !== "error";  // ready/preprocessing imply manifest exists
+  const result = await openLayerModal({
+    fileId: file.id,
+    fileName: file.name,
+    triggerDiscovery: !hasManifest || file.status === "preprocessing",
+    onConfirm: async () => {
+      $status.textContent = `Re-preprocessing ${file.name} with new layer set…`;
+    },
+  });
+  if (result.confirmed) {
+    await refresh();
+    startPollingIfBusy();
+  }
+}
+
 // ---- polling -------------------------------------------------------------
 function startPollingIfBusy() {
   if (pollTimer) return;
   const tick = async () => {
     await refresh();
     const busy = products.some(p =>
-      Object.values(p.files_by_role).some(f => f && (f.status === "preprocessing" || f.status === "checking_rules"))
+      Object.values(p.files_by_role).some(f => f && (
+        f.status === "preprocessing"
+        || f.status === "discovering_layers"
+        || f.status === "checking_rules"
+      ))
     );
     if (busy) {
       pollTimer = setTimeout(tick, 1500);

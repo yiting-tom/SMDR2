@@ -18,6 +18,8 @@
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
     <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>
+    <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Visibility</button>
+    <button id="layers-btn" type="button" title="Pick which DXF layers feed render / match / rule-check">Layers</button>
     <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">Rules</button>
     <span id="status">loading…</span>
     <span class="spacer"></span>
@@ -29,6 +31,19 @@
   <main>
     <canvas id="dxf-canvas"></canvas>
     <div id="measure-readout" class="measure-readout" hidden></div>
+    <aside id="visibility-panel" class="floating-panel" hidden>
+      <header>
+        <h3>Layer visibility</h3>
+        <span class="hint">live · session only</span>
+        <span class="spacer"></span>
+        <button type="button" id="visibility-close" title="Close">×</button>
+      </header>
+      <div id="visibility-list" class="visibility-list"></div>
+      <footer>
+        <button type="button" id="visibility-all" class="link-btn">Show all</button>
+        <button type="button" id="visibility-invert" class="link-btn">Invert</button>
+      </footer>
+    </aside>
     <aside id="rule-sidebar" hidden>
       <header>
         <h3>Rule Check</h3>
@@ -49,6 +64,25 @@
         <button type="button" class="modal-close" data-close>×</button>
       </header>
       <div id="library-body"></div>
+    </div>
+  </div>
+
+  <!-- Layer selection modal: same markup as the dashboard, shared module. -->
+  <div id="layer-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Pick layers">
+      <header class="modal-header">
+        <h2 data-layer-title>Pick layers to include</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div data-layer-body class="layer-modal-body"></div>
+      <footer class="modal-footer">
+        <button type="button" data-layer-all class="link-btn">Select all</button>
+        <button type="button" data-layer-none class="link-btn">Select none</button>
+        <span class="spacer"></span>
+        <button type="button" data-layer-confirm class="primary">Use selected</button>
+      </footer>
     </div>
   </div>
   <script type="module" src="/static/canvas.js"></script>

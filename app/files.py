@@ -1,8 +1,8 @@
 """DXF file metadata store, persisted alongside the template library.
 
 Each uploaded DXF has a row tracking its lifecycle:
-    queued → parsing → done   (happy path)
-                    → error   (failed)
+    discovering_layers → awaiting_layers → preprocessing → ready_to_match
+                                                       → error
 
 The actual DXF bytes and the parsed JSON live on disk under data/uploads/ and
 data/parsed/ respectively (see `app.storage`). This module only manages the
@@ -11,6 +11,7 @@ SQLite-backed metadata.
 
 from __future__ import annotations
 
+import json as _json
 import sqlite3
 import threading
 import time
@@ -20,15 +21,26 @@ from pathlib import Path
 from app.storage import DB_PATH
 
 # Lifecycle states. The visible-to-user pipeline is:
-#   preprocessing → ready_to_match → checking_rules → report
+#   discovering_layers → awaiting_layers → preprocessing → ready_to_match
+#                                                     → checking_rules → report
 # (error short-circuits from anywhere.)
+DISCOVERING_LAYERS = "discovering_layers"
+AWAITING_LAYERS = "awaiting_layers"
 PREPROCESSING = "preprocessing"
 READY = "ready_to_match"
 CHECKING = "checking_rules"
 REPORT = "report"
 ERROR = "error"
 
-ALL_STATUSES = (PREPROCESSING, READY, CHECKING, REPORT, ERROR)
+ALL_STATUSES = (
+    DISCOVERING_LAYERS,
+    AWAITING_LAYERS,
+    PREPROCESSING,
+    READY,
+    CHECKING,
+    REPORT,
+    ERROR,
+)
 
 
 FILES_SCHEMA = """
@@ -49,7 +61,8 @@ CREATE TABLE IF NOT EXISTS files (
     library_id      TEXT NOT NULL DEFAULT 'default',
     product_id      TEXT,
     dxf_role        TEXT,
-    match_saved     INTEGER NOT NULL DEFAULT 0
+    match_saved     INTEGER NOT NULL DEFAULT 0,
+    selected_layers TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -73,6 +86,9 @@ class FileRecord:
     primitive_count: int | None = None
     bbox: tuple[float, float, float, float] | None = None
     background: str | None = None
+    # User-chosen layer subset, persisted between phase 1 and phase 2 and
+    # reused on re-preprocess. None = legacy (treat as "all layers").
+    selected_layers: list[str] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +106,10 @@ class FileRecord:
             "primitive_count": self.primitive_count,
             "bbox": list(self.bbox) if self.bbox else None,
             "background": self.background,
+            "selected_layers": (
+                list(self.selected_layers)
+                if self.selected_layers is not None else None
+            ),
         }
 
 
@@ -135,6 +155,8 @@ class FileStore:
                 self.conn.execute(
                     "ALTER TABLE files ADD COLUMN match_saved INTEGER NOT NULL DEFAULT 0"
                 )
+            if "selected_layers" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN selected_layers TEXT")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -154,10 +176,11 @@ class FileStore:
         library_id: str = "default",
         product_id: str | None = None,
         dxf_role: str | None = None,
+        initial_status: str = PREPROCESSING,
     ) -> FileRecord:
         rec = FileRecord(
             id=file_id, name=name, size=size,
-            uploaded_at=time.time(), status=PREPROCESSING,
+            uploaded_at=time.time(), status=initial_status,
             library_id=library_id,
             product_id=product_id, dxf_role=dxf_role,
         )
@@ -176,6 +199,20 @@ class FileStore:
             self.conn.execute(
                 "UPDATE files SET library_id = ? WHERE id = ?",
                 (library_id, file_id),
+            )
+
+    def update_selected_layers(self, file_id: str, layers: list[str]) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET selected_layers = ? WHERE id = ?",
+                (_json.dumps(list(layers)), file_id),
+            )
+
+    def clear_selected_layers(self, file_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET selected_layers = NULL WHERE id = ?",
+                (file_id,),
             )
 
     def set_match_saved(self, file_id: str, value: bool = True) -> None:
@@ -243,6 +280,15 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
     def _get(col, default=None):
         try: return row[col]
         except (IndexError, KeyError): return default
+    raw_layers = _get("selected_layers")
+    selected_layers: list[str] | None = None
+    if raw_layers:
+        try:
+            parsed = _json.loads(raw_layers)
+            if isinstance(parsed, list):
+                selected_layers = [str(x) for x in parsed]
+        except (ValueError, TypeError):
+            selected_layers = None
     return FileRecord(
         id=row["id"],
         name=row["name"],
@@ -258,6 +304,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         primitive_count=row["primitive_count"],
         bbox=bbox,
         background=row["background"],
+        selected_layers=selected_layers,
     )
 
 
