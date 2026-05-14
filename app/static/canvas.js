@@ -17,6 +17,13 @@
 //   endpoints (within CONNECT_TOL). Affects single-click only — box-select
 //   stays as is.
 
+import {
+  closestPointOnSegment,
+  detectCircle,
+  resolveSnap as _resolveSnapCore,
+  applyOrtho as _applyOrthoCore,
+} from "./measure_core.js";
+
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
 const $coords = document.getElementById("cursor-coords");
@@ -279,37 +286,10 @@ function computeBBoxes() {
 
 // ---- circle detection (for CEN / QUA OSNAP) -----------------------------
 // DXF CIRCLE entities are flattened to closed polylines by the renderer
-// (see app/dxf.py). We re-detect them client-side so the measure tool can
-// offer center + 4 quadrant snaps for round geometry (BGA balls, fiducial
-// marks, etc.) — AutoCAD CEN + QUA modes restricted to the cardinal points.
+// (see app/dxf.py). We re-detect them client-side via `detectCircle` from
+// `measure_core.js` so the measure tool can offer center + 4 cardinal
+// quadrant snaps for round geometry (BGA balls, fiducial marks, etc.).
 let primCircles = [];  // parallel to primitives: null or { cx, cy, r }
-
-const CIRCLE_MIN_VERTS = 8;
-const CIRCLE_RADIAL_TOL = 0.02;  // (rmax - rmin) / rmean must be ≤ this
-
-function detectCircle(pts) {
-  if (!pts || pts.length < CIRCLE_MIN_VERTS) return null;
-  // Closed shapes sometimes repeat the first vertex at the end; dedupe.
-  const last = pts[pts.length - 1], first = pts[0];
-  const n = (last[0] === first[0] && last[1] === first[1]) ? pts.length - 1 : pts.length;
-  if (n < CIRCLE_MIN_VERTS) return null;
-
-  let sx = 0, sy = 0;
-  for (let i = 0; i < n; i++) { sx += pts[i][0]; sy += pts[i][1]; }
-  const cx = sx / n, cy = sy / n;
-
-  let rmin = Infinity, rmax = 0, rsum = 0;
-  for (let i = 0; i < n; i++) {
-    const r = Math.hypot(pts[i][0] - cx, pts[i][1] - cy);
-    if (r < rmin) rmin = r;
-    if (r > rmax) rmax = r;
-    rsum += r;
-  }
-  const rmean = rsum / n;
-  if (rmean < 1e-9) return null;
-  if ((rmax - rmin) / rmean > CIRCLE_RADIAL_TOL) return null;
-  return { cx, cy, r: rmean };
-}
 
 function computePrimCircles() {
   primCircles = new Array(primitives.length).fill(null);
@@ -555,15 +535,8 @@ function collectHandlesSegments(handles) {
   return segs;
 }
 
-// Closest point on segment [a, b] to point p, in world coords.
-function closestPointOnSegment(p, a, b) {
-  const dx = b[0] - a[0], dy = b[1] - a[1];
-  const len2 = dx * dx + dy * dy;
-  if (len2 === 0) return [a[0], a[1]];
-  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
-  if (t < 0) t = 0; else if (t > 1) t = 1;
-  return [a[0] + t * dx, a[1] + t * dy];
-}
+// Note: closestPointOnSegment (used here and by resolveSnap below) is
+// imported from measure_core.js so it stays pure / unit-testable.
 
 // True shortest segment between two handle groups: for every vertex of
 // one shape, find its closest point on every edge of the other (and vice
@@ -1101,135 +1074,23 @@ function pickIndexAt(wx, wy) {
   return -1;
 }
 
-// OSNAP for the measure-distance tool. Priority within the same pickbox tol
-// used by pickIndexAt: endpoint > midpoint > nearest-on-edge > free cursor.
-// Endpoints include polyline vertices and POINT primitives; midpoints are
-// per-segment; nearest reuses closestPointOnSegment (already defined above).
+// Thin wrappers over the pure core in measure_core.js. They bind the
+// canvas's mutable world-state (primitives, bboxes, circles, zoom/dpr) so
+// the call site doesn't have to thread state through every invocation.
+// The pure implementations are unit-tested in tests/measure_core.test.mjs.
 function resolveSnap(wx, wy) {
   const tol = (PICKBOX_CSS_PX * dpr) / view.zoom;
-  const tol2 = tol * tol;
-  let bestEnd = null,  bestEndD2  = tol2;
-  let bestMid = null,  bestMidD2  = tol2;
-  let bestCen = null,  bestCenD2  = tol2;
-  let bestQua = null,  bestQuaD2  = tol2;
-  let bestNear = null, bestNearD2 = tol2;
-
-  for (let i = 0; i < primitives.length; i++) {
-    const p = primitives[i];
-    if (p.decorative) continue;
-    const [bxmin, bymin, bxmax, bymax] = primBBoxes[i];
-    if (wx < bxmin - tol || wx > bxmax + tol || wy < bymin - tol || wy > bymax + tol) continue;
-
-    // Circle-detected primitives contribute CEN (center) + QUA (top/right/
-    // bottom/left) + nearest-on-perimeter, and skip per-vertex/midpoint
-    // enumeration — their polyline vertices are arc-flattening artefacts.
-    const circle = primCircles[i];
-    if (circle) {
-      const { cx, cy, r } = circle;
-      {
-        const dx = wx - cx, dy = wy - cy;
-        const d2 = dx*dx + dy*dy;
-        if (d2 <= bestCenD2) { bestCenD2 = d2; bestCen = [cx, cy]; }
-      }
-      const quads = [[cx + r, cy], [cx - r, cy], [cx, cy + r], [cx, cy - r]];
-      for (const [qx, qy] of quads) {
-        const dx = wx - qx, dy = wy - qy;
-        const d2 = dx*dx + dy*dy;
-        if (d2 <= bestQuaD2) { bestQuaD2 = d2; bestQua = [qx, qy]; }
-      }
-      const dxc = wx - cx, dyc = wy - cy;
-      const dC = Math.hypot(dxc, dyc);
-      if (dC > 1e-9) {
-        const nx = cx + (dxc / dC) * r;
-        const ny = cy + (dyc / dC) * r;
-        const ex = wx - nx, ey = wy - ny;
-        const d2 = ex*ex + ey*ey;
-        if (d2 <= bestNearD2) { bestNearD2 = d2; bestNear = [nx, ny]; }
-      }
-      continue;
-    }
-
-    const verts = [];      // [[x, y], ...]
-    const segs = [];       // [[ax, ay, bx, by], ...]
-    switch (p.type) {
-      case "line":
-        verts.push(p.start, p.end);
-        segs.push([p.start[0], p.start[1], p.end[0], p.end[1]]);
-        break;
-      case "polyline": {
-        const pts = p.points;
-        for (const v of pts) verts.push(v);
-        for (let j = 1; j < pts.length; j++) {
-          segs.push([pts[j-1][0], pts[j-1][1], pts[j][0], pts[j][1]]);
-        }
-        if (p.closed && pts.length > 2) {
-          const a = pts[pts.length - 1], b = pts[0];
-          segs.push([a[0], a[1], b[0], b[1]]);
-        }
-        break;
-      }
-      case "filled_polygon":
-        for (const ring of p.rings) {
-          for (const v of ring) verts.push(v);
-          for (let j = 0, k = ring.length - 1; j < ring.length; k = j++) {
-            segs.push([ring[k][0], ring[k][1], ring[j][0], ring[j][1]]);
-          }
-        }
-        break;
-      case "point":
-        verts.push(p.pos);
-        break;
-    }
-
-    for (const [vx, vy] of verts) {
-      const dx = wx - vx, dy = wy - vy;
-      const d2 = dx * dx + dy * dy;
-      if (d2 <= bestEndD2) { bestEndD2 = d2; bestEnd = [vx, vy]; }
-    }
-    for (const [ax, ay, bx, by] of segs) {
-      const mx = (ax + bx) / 2, my = (ay + by) / 2;
-      const dx = wx - mx, dy = wy - my;
-      const d2 = dx * dx + dy * dy;
-      if (d2 <= bestMidD2) { bestMidD2 = d2; bestMid = [mx, my]; }
-    }
-    for (const [ax, ay, bx, by] of segs) {
-      const foot = closestPointOnSegment([wx, wy], [ax, ay], [bx, by]);
-      const dx = wx - foot[0], dy = wy - foot[1];
-      const d2 = dx * dx + dy * dy;
-      if (d2 <= bestNearD2) { bestNearD2 = d2; bestNear = foot; }
-    }
-  }
-
-  // Priority: endpoint → midpoint → center → quadrant → nearest → free
-  if (bestEnd)  return { x: bestEnd[0],  y: bestEnd[1],  kind: "endpoint" };
-  if (bestMid)  return { x: bestMid[0],  y: bestMid[1],  kind: "midpoint" };
-  if (bestCen)  return { x: bestCen[0],  y: bestCen[1],  kind: "center" };
-  if (bestQua)  return { x: bestQua[0],  y: bestQua[1],  kind: "quadrant" };
-  if (bestNear) return { x: bestNear[0], y: bestNear[1], kind: "nearest" };
-  return { x: wx, y: wy, kind: "free" };
+  return _resolveSnapCore({ wx, wy, primitives, primBBoxes, primCircles, tol });
 }
 
-// Ortho-constrain a candidate measure point against the locked first point
-// when Shift is held. Mirrors AutoCAD's Shift=Ortho in DIST: lock the
-// off-axis coordinate to the first point. OSNAP still runs — the *on-axis*
-// coordinate is taken from the snap target (so "horizontal" lock pulls to
-// a vertex's X while keeping Y = first.y), and the snap marker is drawn at
-// the projected position with the original snap kind so the user can see
-// which OSNAP fired. When no OSNAP fires, we fall back to the raw cursor's
-// on-axis coordinate and a "free" marker.
 function applyOrtho(wx, wy, shiftKey) {
-  const anchor = measureAnchor();
-  if (!shiftKey || !anchor) return null;
-  const [fx, fy] = anchor;
-  const snap = resolveSnap(wx, wy);
-  const useSnap = snap.kind !== "free";
-  // Choose the axis from the raw cursor delta — keeps lock direction
-  // stable while the cursor moves *toward* a snap target.
-  const dx = wx - fx, dy = wy - fy;
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    return { x: useSnap ? snap.x : wx, y: fy, kind: useSnap ? snap.kind : "free" };
-  }
-  return { x: fx, y: useSnap ? snap.y : wy, kind: useSnap ? snap.kind : "free" };
+  return _applyOrthoCore({
+    wx,
+    wy,
+    anchor: measureAnchor(),
+    shiftKey,
+    resolveSnapFn: resolveSnap,
+  });
 }
 
 // ---- connectivity graph (for Chain mode) --------------------------------

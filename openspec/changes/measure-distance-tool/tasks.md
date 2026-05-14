@@ -4,7 +4,7 @@
 - [x] 1.2 Walk `line`, `polyline`, `point`, and `filled_polygon` primitives (skip `decorative`) to enumerate vertex and segment-midpoint candidates with bbox cull.
 - [x] 1.3 Implement priority order: endpoint within tol → midpoint within tol → perpendicular foot on segment within tol → free `(wx, wy)`.
 - [x] 1.4 Factor a small `closestPointOnSegment` helper next to `distPointToSegmentSq` and reuse it for the nearest case. *(Reused the existing `closestPointOnSegment(p, a, b)` at canvas.js:493 — no duplicate added.)*
-- [ ] 1.5 Unit-style smoke test in the browser console: snap to a known polyline endpoint, midpoint, and edge of a fixture file.
+- [x] 1.5 Unit tests for the pure helpers. *(Done as a refactor: pure functions moved to `app/static/measure_core.js`; `tests/measure_core.test.mjs` runs 27 `node:test` assertions, wrapped in `tests/test_measure_core_node.py` so `pytest` covers both sides.)*
 
 ## 2. Mode state and pointer gating
 
