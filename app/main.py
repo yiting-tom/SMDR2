@@ -55,6 +55,7 @@ from app.matching import (
 )
 from app.products import PRODUCT_STORE, VALID_ROLES, Product
 from app.rule_check import check_rules
+from app.side_regions import normalise_rect, split_matches_by_side
 from app.storage import (
     DATA_DIR,
     layer_manifest_path,
@@ -324,6 +325,21 @@ class FilePatchRequest(BaseModel):
     library_id: str
 
 
+class RectModel(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class SideRegionsRequest(BaseModel):
+    # Both fields are always sent; null means "clear that side". The frontend
+    # mirrors local state so a partial update sends the current rect for the
+    # untouched side.
+    frontside_rect: RectModel | None = None
+    bottomside_rect: RectModel | None = None
+
+
 @app.patch("/api/files/{file_id}")
 async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
     """Reassign a file to a different library. Triggers re-preprocessing
@@ -344,6 +360,39 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
         selected_layers=rec.selected_layers,
     )
     return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
+
+
+@app.patch("/api/files/{file_id}/side-regions")
+async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
+    """Persist this file's frontside / bottomside rectangles.
+
+    Invalidates `data/match/{file_id}.json` (rule-checker input)
+    because the saved match keys are no longer in sync with the new
+    side labels. Resets `match_saved` so the engineer re-runs Save Match
+    after redrawing regions.
+    """
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    front = normalise_rect(req.frontside_rect.model_dump()) if req.frontside_rect else None
+    bottom = normalise_rect(req.bottomside_rect.model_dump()) if req.bottomside_rect else None
+    FILE_STORE.update_side_regions(file_id, front, bottom)
+
+    # Invalidate the saved match JSON — its keys are stale w.r.t. the new
+    # rectangles. The user has to re-run Save Match to regenerate.
+    mp = match_path(file_id)
+    try:
+        mp.unlink()
+    except FileNotFoundError:
+        pass
+    FILE_STORE.set_match_saved(file_id, False)
+
+    return {
+        "file_id": file_id,
+        "frontside_rect": front,
+        "bottomside_rect": bottom,
+        "match_saved": False,
+    }
 
 
 @app.get("/api/files")
@@ -695,11 +744,22 @@ async def save_match_json(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     out: dict[str, list[list[str]]] = {}
     total_matches = 0
+    side_counts = {"frontside": 0, "bottomside": 0, "unassigned": 0}
     for cls_name in lib.classes:
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
             result = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
-            key = f"{cls_name}.{idx}"
-            out[key] = [list(m.handles) for m in result.matches]
+            base_key = f"{cls_name}.{idx}"
+            # Split this template's instances by their side label so a single
+            # smd.0 template can contribute to both frontside.smd.0 and
+            # bottomside.smd.0 in the same file.
+            grouped, cnts = split_matches_by_side(
+                base_key, result.matches, shapes,
+                rec.frontside_rect, rec.bottomside_rect,
+            )
+            for k, v in grouped.items():
+                out.setdefault(k, []).extend(v)
+            for k, n in cnts.items():
+                side_counts[k] += n
             total_matches += len(result.matches)
     dst = match_path(file_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -712,6 +772,7 @@ async def save_match_json(file_id: str) -> dict:
         "library_id": rec.library_id,
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
+        "side_counts": side_counts,
         "saved_to": str(dst.relative_to(DATA_DIR.parent)),
         "match_saved": True,
     }

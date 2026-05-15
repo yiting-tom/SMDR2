@@ -62,3 +62,63 @@ def test_to_dict_round_trip(tmp_db):
     d = fs.get("k").to_dict()
     assert d["status"] == READY
     assert d["bbox"] == [0, 1, 2, 3]
+
+
+def test_side_regions_persist_and_round_trip(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("r1", "n.dxf", 5)
+    fs.update_side_regions(
+        "r1",
+        {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0},
+        {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0},
+    )
+    rec = fs.get("r1")
+    assert rec.frontside_rect == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    assert rec.bottomside_rect == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+    d = rec.to_dict()
+    assert d["frontside_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    assert d["bottomside_rect"] == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+
+
+def test_side_regions_clear_one_independently(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("r2", "n.dxf", 5)
+    fs.update_side_regions(
+        "r2",
+        {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+        {"x0": 5, "y0": 5, "x1": 6, "y1": 6},
+    )
+    # Pass None for frontside, keep bottomside.
+    fs.update_side_regions("r2", None, {"x0": 5, "y0": 5, "x1": 6, "y1": 6})
+    rec = fs.get("r2")
+    assert rec.frontside_rect is None
+    assert rec.bottomside_rect == {"x0": 5.0, "y0": 5.0, "x1": 6.0, "y1": 6.0}
+
+
+def test_clear_side_regions_unsets_both(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("r3", "n.dxf", 5)
+    fs.update_side_regions(
+        "r3",
+        {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+        {"x0": 5, "y0": 5, "x1": 6, "y1": 6},
+    )
+    fs.clear_side_regions("r3")
+    rec = fs.get("r3")
+    assert rec.frontside_rect is None
+    assert rec.bottomside_rect is None
+
+
+def test_library_swap_preserves_side_regions(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("r4", "n.dxf", 5, library_id="A")
+    fs.update_side_regions(
+        "r4",
+        {"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        None,
+    )
+    fs.update_library("r4", "B")
+    rec = fs.get("r4")
+    assert rec.library_id == "B"
+    assert rec.frontside_rect == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
+    assert rec.bottomside_rect is None

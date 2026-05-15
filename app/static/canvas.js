@@ -86,6 +86,7 @@ const API = {
   scanAll:       () => `/api/files/${FILE_ID}/scan-all`,
   prematch:      () => `/api/files/${FILE_ID}/prematch`,
   matchJson:     () => `/api/files/${FILE_ID}/match-json`,
+  sideRegions:   () => `/api/files/${FILE_ID}/side-regions`,
   // Classes/templates are file-scoped via the ?file_id= query — the server
   // resolves to the file's library.
   classes:       () => `/api/classes?file_id=${FILE_ID}`,
@@ -107,6 +108,9 @@ async function loadFileInfo() {
   if (!fileRes.ok || !libsRes.ok) return;
   const file = await fileRes.json();
   currentFileInfo = file;
+  // Restore persisted side rectangles so the overlay is visible on load.
+  sideRects.frontside = file.frontside_rect ?? null;
+  sideRects.bottomside = file.bottomside_rect ?? null;
   const libs = (await libsRes.json()).libraries;
   $librarySwitcher.innerHTML = "";
   for (const lib of libs) {
@@ -218,6 +222,32 @@ let measureState = { picks: [], snapHint: null, lastCursor: null };
 function measureAnchor() {
   return measureState.picks.length ? measureState.picks[measureState.picks.length - 1] : null;
 }
+
+// Mark-side-regions mode. The user paints two axis-aligned, world-space
+// rectangles — frontside first, then bottomside — that tag each match
+// instance with a "frontside." / "bottomside." key prefix at save-match
+// time. Persisted per-file on the server.
+//
+//   sideRects.frontside / .bottomside : {x0,y0,x1,y1} | null  (world)
+//   markMode                          : null | "frontside" | "bottomside"
+//   markQueue                         : remaining sides to capture this session
+//   markDrag                          : { startWorld, currentWorld } | null
+const sideRects = { frontside: null, bottomside: null };
+let markMode = null;
+let markQueue = [];
+let markDrag = null;
+
+const SIDE_STYLES = {
+  frontside: {
+    fill:   "rgba(124, 231, 194, 0.08)",
+    stroke: "rgba(124, 231, 194, 0.85)",
+  },
+  bottomside: {
+    fill:   "rgba(231, 160, 124, 0.08)",
+    stroke: "rgba(231, 160, 124, 0.85)",
+  },
+};
+const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags are treated as a slip
 
 // Add-mode state machine. addModeClass: null = idle; else holds the class name
 // currently being staged. matchesStaged: true once S has populated matchSet for
@@ -465,6 +495,10 @@ function render() {
     if (!isLayerVisible(p)) continue;
     drawPrimitive(p, { lineWidth: hairline });
   }
+
+  // Persistent side-region overlay — drawn beneath highlights so it never
+  // hides selection / match / scan-all feedback.
+  drawSideRegionsOverlay(hairline);
 
   if (scanAllByHandle) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
@@ -1368,7 +1402,9 @@ function updateStatus() {
     $handle.classList.add("empty");
   }
 
-  if (measureMode) {
+  if (markMode) {
+    $modeHint.textContent = `MARK ${markMode} · drag a rectangle (Esc to cancel)`;
+  } else if (measureMode) {
     const n = measureState.picks.length;
     $modeHint.textContent = n === 0
       ? "MEASURE · pick first point"
@@ -1401,6 +1437,13 @@ $canvas.addEventListener("mousedown", (e) => {
     $canvas.classList.add("panning");
   } else if (e.button === 0) {
     const [wx, wy] = eventToWorld(e);
+    if (markMode) {
+      // Mark-mode owns the canvas: left-press starts a one-shot rectangle
+      // capture for the current side. No selection, no pickbox.
+      markDrag = { startWorld: [wx, wy], currentWorld: [wx, wy] };
+      render();
+      return;
+    }
     if (measureMode) {
       // Measure click: snap, then append to picks[]. Each click extends the
       // chain — picks[i],picks[i+1] are frozen segments, picks[last] anchors
@@ -1425,6 +1468,12 @@ $canvas.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   const [wx, wy] = eventToWorld(e);
   $coords.textContent = `${wx.toFixed(3)}, ${wy.toFixed(3)}`;
+
+  if (markMode && markDrag) {
+    markDrag.currentWorld = [wx, wy];
+    render();
+    return;
+  }
 
   if (measureMode && !drag) {
     measureState.lastCursor = [wx, wy];
@@ -1470,6 +1519,30 @@ window.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", (e) => {
+  if (markMode && markDrag) {
+    const [x1, y1] = markDrag.startWorld;
+    const [x2, y2] = markDrag.currentWorld;
+    const x0 = Math.min(x1, x2), xMax = Math.max(x1, x2);
+    const y0 = Math.min(y1, y2), yMax = Math.max(y1, y2);
+    const area = (xMax - x0) * (yMax - y0);
+    if (area < MARK_MIN_AREA) {
+      // Treat as a slip — drop the drag and stay on the same side.
+      markDrag = null;
+      render();
+      return;
+    }
+    sideRects[markMode] = { x0, y0, x1: xMax, y1: yMax };
+    markDrag = null;
+    const captured = markMode;
+    advanceMarkAfterCapture();
+    // Persist after every captured rectangle so a partial session (e.g. only
+    // frontside redraw) still saves.
+    patchSideRegions().then(() => {
+      // No-op on success; failure already surfaces via setBaseStatus.
+      void captured;
+    });
+    return;
+  }
   if (!drag) return;
   if (drag.kind === "pan") {
     $canvas.classList.remove("panning");
@@ -1987,7 +2060,8 @@ window.addEventListener("keydown", (e) => {
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
   // Esc cascade: cancel active box drag → clear active measurement (stay in
-  // measure mode) → clear scan-all overlay → exit add-mode → clear selection.
+  // measure mode) → cancel mark-mode drag / exit mark mode → clear scan-all
+  // overlay → exit add-mode → clear selection.
   if (e.key === "Escape") {
     if (drag && drag.kind === "box") { drag = null; render(); return; }
     if (measureMode && measureState.picks.length) {
@@ -1995,6 +2069,11 @@ window.addEventListener("keydown", (e) => {
       if ($measureReadout) $measureReadout.hidden = true;
       updateStatus();
       render();
+      return;
+    }
+    if (markMode) {
+      if (markDrag) { markDrag = null; render(); return; }
+      exitMarkMode();
       return;
     }
     if (scanAllByHandle) { clearScanAll(); return; }
@@ -2017,13 +2096,22 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  // R = toggle mark-side-regions mode. Takes precedence over the class
+  // hotkey for "r" so the user can rely on the muscle memory. No-op while
+  // add-mode or measure-mode owns the canvas.
+  if ((e.key === "r" || e.key === "R") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (!addModeClass && !measureMode) toggleMarkMode();
+    e.preventDefault();
+    return;
+  }
+
   // Hotkeys → enter add mode for that class. Don't fire while typing or
   // while measure mode is active (measure mode owns the keyboard).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
     const key = e.key.toLowerCase();
     const idx = HOTKEYS.indexOf(key);
     if (idx !== -1 && idx < classes.length) {
-      if (measureMode) { e.preventDefault(); return; }
+      if (measureMode || markMode) { e.preventDefault(); return; }
       enterAddMode(classes[idx].name);
       e.preventDefault();
       return;
@@ -2103,6 +2191,139 @@ window.addEventListener("keyup", (e) => {
     reresolveMeasureSnap(false);
   }
 });
+
+// ---- mark side regions tool ---------------------------------------------
+const $sidesBtn = document.getElementById("sides-btn");
+const $sidesMenu = document.getElementById("sides-menu");
+
+function drawSideRegionsOverlay(hairline) {
+  for (const side of ["frontside", "bottomside"]) {
+    const r = sideRects[side];
+    if (!r) continue;
+    const style = SIDE_STYLES[side];
+    const x = r.x0, y = r.y0;
+    const w = r.x1 - r.x0, h = r.y1 - r.y0;
+    ctx.fillStyle = style.fill;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = hairline * 1.5;
+    ctx.strokeRect(x, y, w, h);
+  }
+  // In-progress mark-mode drag — same style as the side we're currently
+  // capturing so the user sees the live preview in the right color.
+  if (markMode && markDrag && markDrag.currentWorld) {
+    const [x1, y1] = markDrag.startWorld;
+    const [x2, y2] = markDrag.currentWorld;
+    const style = SIDE_STYLES[markMode];
+    const x = Math.min(x1, x2), y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+    ctx.fillStyle = style.fill;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = hairline * 1.5;
+    ctx.setLineDash([6 * hairline, 4 * hairline]);
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
+  }
+}
+
+function enterMarkMode(queue) {
+  if (addModeClass || measureMode) return false;
+  markQueue = queue.slice();
+  markMode = markQueue.shift() ?? null;
+  if (!markMode) { exitMarkMode(); return false; }
+  if ($sidesBtn) $sidesBtn.classList.add("active");
+  markDrag = null;
+  updateStatus();
+  render();
+  return true;
+}
+
+function exitMarkMode() {
+  markMode = null;
+  markQueue = [];
+  markDrag = null;
+  if ($sidesBtn) $sidesBtn.classList.remove("active");
+  updateStatus();
+  render();
+}
+
+function toggleMarkMode() {
+  if (markMode) { exitMarkMode(); return; }
+  enterMarkMode(["frontside", "bottomside"]);
+}
+
+async function patchSideRegions() {
+  const body = {
+    frontside_rect: sideRects.frontside,
+    bottomside_rect: sideRects.bottomside,
+  };
+  try {
+    const res = await fetch(API.sideRegions(), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      setBaseStatus(`save sides failed: ${res.status}`);
+      return false;
+    }
+    // The server clears match_saved on any region edit — refresh local copy
+    // so the dashboard / save-match button reflects the new state.
+    if (currentFileInfo) currentFileInfo.match_saved = false;
+    return true;
+  } catch (e) {
+    console.error(e);
+    setBaseStatus(`save sides error: ${e.message}`);
+    return false;
+  }
+}
+
+function advanceMarkAfterCapture() {
+  // Move to the next side in the queue, or exit mark mode if done.
+  markMode = markQueue.shift() ?? null;
+  if (!markMode) exitMarkMode();
+  else { updateStatus(); render(); }
+}
+
+if ($sidesBtn) {
+  $sidesBtn.addEventListener("click", toggleMarkMode);
+  // Right-click → small dropdown of redraw/clear options.
+  $sidesBtn.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (!$sidesMenu) return;
+    const rect = $sidesBtn.getBoundingClientRect();
+    $sidesMenu.style.left = `${rect.left}px`;
+    $sidesMenu.style.top = `${rect.bottom + 4}px`;
+    $sidesMenu.hidden = false;
+  });
+}
+
+if ($sidesMenu) {
+  $sidesMenu.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-sides-action]");
+    if (!btn) return;
+    $sidesMenu.hidden = true;
+    const action = btn.dataset.sidesAction;
+    if (action === "both") {
+      enterMarkMode(["frontside", "bottomside"]);
+    } else if (action === "frontside" || action === "bottomside") {
+      enterMarkMode([action]);
+    } else if (action === "clear") {
+      sideRects.frontside = null;
+      sideRects.bottomside = null;
+      await patchSideRegions();
+      render();
+    }
+  });
+  // Click anywhere else dismisses the menu.
+  window.addEventListener("mousedown", (e) => {
+    if ($sidesMenu.hidden) return;
+    if (!$sidesMenu.contains(e.target) && e.target !== $sidesBtn) {
+      $sidesMenu.hidden = true;
+    }
+  });
+}
 
 // ---- layer-visibility panel ---------------------------------------------
 // Live, session-only filter that hides primitives from render / pick /

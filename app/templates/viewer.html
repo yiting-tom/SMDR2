@@ -15,6 +15,13 @@
     <select id="library-switcher" title="Library this file uses (set by its product)"></select>
     <button id="chain-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
     <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">Measure</button>
+    <button id="sides-btn" type="button" title="Mark frontside / bottomside regions · left-click to draw both, right-click for options (hotkey: R)">Sides</button>
+    <div id="sides-menu" class="popup-menu" hidden>
+      <button type="button" data-sides-action="both">Redraw both</button>
+      <button type="button" data-sides-action="frontside">Redraw frontside only</button>
+      <button type="button" data-sides-action="bottomside">Redraw bottomside only</button>
+      <button type="button" data-sides-action="clear">Clear both</button>
+    </div>
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
     <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>

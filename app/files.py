@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS files (
     product_id      TEXT,
     dxf_role        TEXT,
     match_saved     INTEGER NOT NULL DEFAULT 0,
-    selected_layers TEXT
+    selected_layers TEXT,
+    frontside_rect  TEXT,
+    bottomside_rect TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -89,6 +91,10 @@ class FileRecord:
     # User-chosen layer subset, persisted between phase 1 and phase 2 and
     # reused on re-preprocess. None = legacy (treat as "all layers").
     selected_layers: list[str] | None = None
+    # Per-file frontside/bottomside rectangles, world coords, axis-aligned,
+    # normalised so x0<=x1, y0<=y1. None = side not marked.
+    frontside_rect: dict | None = None
+    bottomside_rect: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +116,8 @@ class FileRecord:
                 list(self.selected_layers)
                 if self.selected_layers is not None else None
             ),
+            "frontside_rect": dict(self.frontside_rect) if self.frontside_rect else None,
+            "bottomside_rect": dict(self.bottomside_rect) if self.bottomside_rect else None,
         }
 
 
@@ -157,6 +165,10 @@ class FileStore:
                 )
             if "selected_layers" not in cols:
                 self.conn.execute("ALTER TABLE files ADD COLUMN selected_layers TEXT")
+            if "frontside_rect" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN frontside_rect TEXT")
+            if "bottomside_rect" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN bottomside_rect TEXT")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -212,6 +224,27 @@ class FileStore:
         with self.lock, self.conn:
             self.conn.execute(
                 "UPDATE files SET selected_layers = NULL WHERE id = ?",
+                (file_id,),
+            )
+
+    def update_side_regions(
+        self,
+        file_id: str,
+        frontside_rect: dict | None,
+        bottomside_rect: dict | None,
+    ) -> None:
+        front = _json.dumps(frontside_rect) if frontside_rect else None
+        bottom = _json.dumps(bottomside_rect) if bottomside_rect else None
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET frontside_rect = ?, bottomside_rect = ? WHERE id = ?",
+                (front, bottom, file_id),
+            )
+
+    def clear_side_regions(self, file_id: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET frontside_rect = NULL, bottomside_rect = NULL WHERE id = ?",
                 (file_id,),
             )
 
@@ -289,6 +322,28 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
                 selected_layers = [str(x) for x in parsed]
         except (ValueError, TypeError):
             selected_layers = None
+
+    def _decode_rect(raw: object) -> dict | None:
+        if not raw:
+            return None
+        try:
+            parsed = _json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        try:
+            return {
+                "x0": float(parsed["x0"]),
+                "y0": float(parsed["y0"]),
+                "x1": float(parsed["x1"]),
+                "y1": float(parsed["y1"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    frontside_rect = _decode_rect(_get("frontside_rect"))
+    bottomside_rect = _decode_rect(_get("bottomside_rect"))
     return FileRecord(
         id=row["id"],
         name=row["name"],
@@ -305,6 +360,8 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         bbox=bbox,
         background=row["background"],
         selected_layers=selected_layers,
+        frontside_rect=frontside_rect,
+        bottomside_rect=bottomside_rect,
     )
 
 
