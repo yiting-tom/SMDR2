@@ -135,6 +135,9 @@ header #mode-hint {
   flex-direction: column;
   min-width: 180px;
 }
+/* Class selectors beat the UA `[hidden] { display: none }` rule, so make the
+   hidden state explicit at higher specificity. */
+.popup-menu[hidden] { display: none; }
 .popup-menu button {
   background: transparent;
   color: #e8eef5;
