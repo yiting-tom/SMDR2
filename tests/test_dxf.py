@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.dxf import flatten_for_render
+from app.dxf import BASE_TOLERANCE, choose_flatten_tolerance, flatten_for_render
 from app.library import build_handle_index, collect_entity_points
 from app.matching import build_entity_shapes
 
@@ -190,3 +190,96 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     assert line.dxf.handle in idx
     for ent in (txt, mtxt, hatch):
         assert ent.dxf.handle not in idx
+
+
+# ---- adaptive flatten tolerance ------------------------------------------
+
+def _make_scaled_dxf(tmp_path, scale: float, name: str):
+    """Build a DXF with one LINE (bbox driver) and one ELLIPSE at a given
+    coordinate scale. Returns the file path."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    # LINE drives the bbox: 30 × 30 units (so diagonal ≈ 30·√2 ≈ 42.4).
+    msp.add_line((0, 0), (30 * scale, 30 * scale))
+    # ELLIPSE roughly mid-page — its curve is the thing flattened.
+    msp.add_ellipse(
+        center=(15 * scale, 15 * scale),
+        major_axis=(5 * scale, 0),
+        ratio=0.5,
+    )
+    p = tmp_path / name
+    doc.saveas(str(p))
+    return p
+
+
+def test_choose_flatten_tolerance_pure_helper():
+    # Floor: tiny diagonals don't drop below the base.
+    assert choose_flatten_tolerance(0.0001) == BASE_TOLERANCE
+    assert choose_flatten_tolerance(100) == BASE_TOLERANCE  # 100 × 1e-5 = 0.001 < base
+    # Above the floor: scales linearly with diagonal.
+    assert choose_flatten_tolerance(100_000) == 1.0  # 100_000 × 1e-5 = 1.0
+    # Defensive on bad input.
+    assert choose_flatten_tolerance(-5) == BASE_TOLERANCE
+    assert choose_flatten_tolerance(float("nan")) == BASE_TOLERANCE
+
+
+def test_flatten_tolerance_uses_base_for_normal_scale(tmp_path):
+    """A DXF with packaging-scale bbox (~ tens of mm) keeps the floor
+    tolerance. Verifies no behaviour change on the normal case."""
+    path = _make_scaled_dxf(tmp_path, scale=1.0, name="normal.dxf")
+    out = flatten_for_render(str(path))
+    assert out.flatten_tolerance == BASE_TOLERANCE
+
+
+def test_flatten_tolerance_relaxes_for_oversized_scale(tmp_path):
+    """Same DXF blown up 1000× (the INSUNITS-bug scenario) — tolerance
+    scales with the new diagonal and the ELLIPSE produces a comparable
+    number of vertices (within 2×) instead of exploding by ~32×."""
+    normal_path = _make_scaled_dxf(tmp_path, scale=1.0, name="normal.dxf")
+    huge_path = _make_scaled_dxf(tmp_path, scale=1000.0, name="huge.dxf")
+
+    out_normal = flatten_for_render(str(normal_path))
+    out_huge = flatten_for_render(str(huge_path))
+
+    assert out_normal.flatten_tolerance == BASE_TOLERANCE
+    # 30×30 box, 1000× scale → diagonal = 30·√2·1000 ≈ 42_426 → tol ≈ 0.4243.
+    assert out_huge.flatten_tolerance > BASE_TOLERANCE
+    assert 0.3 < out_huge.flatten_tolerance < 0.6
+
+    def ellipse_verts(out):
+        # The single ELLIPSE in our fixture; ezdxf emits a full ellipse via
+        # draw_path as a closed polyline (radial variance too high for our
+        # circle detector since ratio=0.5).
+        for p in out.primitives:
+            if p.get("decorative"):
+                continue
+            if p["type"] == "polyline":
+                return len(p["points"])
+        raise AssertionError("no polyline (ellipse) primitive found")
+
+    n_normal = ellipse_verts(out_normal)
+    n_huge = ellipse_verts(out_huge)
+    # Vertex count for arc flattening scales with √(r/ε). With r at 1000×
+    # and ε at √D×const ≈ 42× (the diagonal grew 1000×), the ratio r/ε
+    # tightens ~24×, giving ~5× vertex growth. Without adaptive tolerance
+    # the same file would explode ~32×. Bound at 8× confirms we're in the
+    # adaptive regime, not the catastrophic one.
+    assert n_normal <= n_huge <= n_normal * 8, \
+        f"ellipse vertex count drift: normal={n_normal} huge={n_huge}"
+
+
+def test_flatten_tolerance_falls_back_when_extents_unavailable(tmp_path):
+    """An empty modelspace has no extents → tolerance falls back to base
+    and flatten still completes cleanly."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    # Nothing added to msp.
+    path = tmp_path / "empty.dxf"
+    doc.saveas(str(path))
+
+    out = flatten_for_render(str(path))
+    assert out.flatten_tolerance == BASE_TOLERANCE
+    assert out.primitives == []
