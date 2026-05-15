@@ -67,6 +67,11 @@ class RenderOutput:
     # so many vertices?"). Default keeps callers that construct it manually
     # working.
     flatten_tolerance: float = BASE_TOLERANCE
+    # Raw `$INSUNITS` header value from the source DXF (0 = unitless,
+    # 1 = inch, 2 = foot, 4 = mm, 5 = cm, 6 = m, …). Persisted to the file
+    # record and fed into the dashboard's unit-scale-warning heuristic.
+    # None when the header is missing or unparseable.
+    insunits: int | None = None
 
 
 def choose_flatten_tolerance(diagonal: float) -> float:
@@ -293,7 +298,23 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
         bbox=backend.bbox,
         background=backend.background,
         flatten_tolerance=tol,
+        insunits=_read_insunits(doc),
     )
+
+
+def _read_insunits(doc) -> int | None:
+    """Pull `$INSUNITS` from the DXF header. Returns None when missing or
+    unparseable so callers can downstream-default without try/except."""
+    try:
+        raw = doc.header.get("$INSUNITS")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---- helpers ---------------------------------------------------------------

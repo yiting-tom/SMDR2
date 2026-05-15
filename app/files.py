@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS files (
     match_saved     INTEGER NOT NULL DEFAULT 0,
     selected_layers TEXT,
     frontside_rect  TEXT,
-    bottomside_rect TEXT
+    bottomside_rect TEXT,
+    insunits        INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -95,8 +96,13 @@ class FileRecord:
     # normalised so x0<=x1, y0<=y1. None = side not marked.
     frontside_rect: dict | None = None
     bottomside_rect: dict | None = None
+    # Raw `$INSUNITS` header value from the source DXF (None for legacy
+    # rows uploaded before this column existed; re-preprocess to populate).
+    # 0 = unitless, 1 = inch, 2 = foot, 4 = mm, 5 = cm, 6 = m, …
+    insunits: int | None = None
 
     def to_dict(self) -> dict:
+        kind, detail = compute_unit_scale_warning(self.insunits, self.bbox)
         return {
             "id": self.id,
             "name": self.name,
@@ -118,7 +124,43 @@ class FileRecord:
             ),
             "frontside_rect": dict(self.frontside_rect) if self.frontside_rect else None,
             "bottomside_rect": dict(self.bottomside_rect) if self.bottomside_rect else None,
+            "insunits": self.insunits,
+            "unit_scale_warning": kind,
+            "unit_scale_warning_detail": detail if kind else None,
         }
+
+
+# Unit-scale heuristic. Returns (kind, detail) — kind is None when the
+# file looks fine. Pure function for testability and so the dashboard
+# can render directly off the dict without re-implementing the rule.
+# Thresholds (drawing units):
+#   ≤ 100         — small enough that "unitless" is academic
+#   100..1000     — plausible packaging range
+#   > 1000        — suspect for a packaging file
+def compute_unit_scale_warning(
+    insunits: int | None,
+    bbox: tuple[float, float, float, float] | None,
+) -> tuple[str | None, str]:
+    if not bbox:
+        return None, ""
+    xmin, ymin, xmax, ymax = bbox
+    dx = float(xmax) - float(xmin)
+    dy = float(ymax) - float(ymin)
+    if dx <= 0 and dy <= 0:
+        return None, ""
+    import math as _math
+    diagonal = _math.hypot(max(dx, 0.0), max(dy, 0.0))
+    iu = "None" if insunits is None else str(insunits)
+    base = f"INSUNITS={iu}, diagonal={diagonal:.1f}"
+    declared = insunits in (4, 5, 6)  # mm / cm / m
+    if diagonal > 1000:
+        return "suspect_scale", f"{base} — bbox is huge for a packaging design, likely a 1000×-style scale issue"
+    if insunits == 0:
+        if diagonal > 100:
+            return "suspect_scale", f"{base} — declared unitless and bbox is large; treat as suspect"
+        return "unitless", f"{base} — DXF is declared unitless ($INSUNITS=0)"
+    # diagonal ≤ 1000, declared unit (or unknown) → no warning.
+    return None, ""
 
 
 class FileStore:
@@ -169,6 +211,8 @@ class FileStore:
                 self.conn.execute("ALTER TABLE files ADD COLUMN frontside_rect TEXT")
             if "bottomside_rect" not in cols:
                 self.conn.execute("ALTER TABLE files ADD COLUMN bottomside_rect TEXT")
+            if "insunits" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN insunits INTEGER")
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -276,14 +320,15 @@ class FileStore:
         primitive_count: int,
         bbox: tuple[float, float, float, float],
         background: str,
+        insunits: int | None = None,
     ) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 "UPDATE files SET status = ?, parsed_at = ?, primitive_count = ?, "
                 "bbox_xmin = ?, bbox_ymin = ?, bbox_xmax = ?, bbox_ymax = ?, "
-                "background = ?, error = NULL WHERE id = ?",
+                "background = ?, insunits = ?, error = NULL WHERE id = ?",
                 (READY, time.time(), primitive_count,
-                 bbox[0], bbox[1], bbox[2], bbox[3], background, file_id),
+                 bbox[0], bbox[1], bbox[2], bbox[3], background, insunits, file_id),
             )
 
     # ---- reads ------------------------------------------------------------
@@ -362,6 +407,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         selected_layers=selected_layers,
         frontside_rect=frontside_rect,
         bottomside_rect=bottomside_rect,
+        insunits=_get("insunits"),
     )
 
 

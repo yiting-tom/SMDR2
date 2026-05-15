@@ -270,6 +270,29 @@ def test_flatten_tolerance_relaxes_for_oversized_scale(tmp_path):
         f"ellipse vertex count drift: normal={n_normal} huge={n_huge}"
 
 
+def test_render_output_carries_insunits(tmp_path):
+    """`$INSUNITS` from the DXF header must round-trip onto RenderOutput so
+    the preprocess worker can persist it."""
+    import ezdxf
+
+    # Explicit mm (INSUNITS = 4).
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4
+    doc.modelspace().add_line((0, 0), (10, 10))
+    p = tmp_path / "mm.dxf"
+    doc.saveas(str(p))
+    assert flatten_for_render(str(p)).insunits == 4
+
+    # Unitless (INSUNITS = 0). ezdxf's new() defaults to 0 already; verify
+    # we see exactly that, not None.
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 0
+    doc.modelspace().add_line((0, 0), (10, 10))
+    p = tmp_path / "unitless.dxf"
+    doc.saveas(str(p))
+    assert flatten_for_render(str(p)).insunits == 0
+
+
 def test_flatten_tolerance_falls_back_when_extents_unavailable(tmp_path):
     """An empty modelspace has no extents → tolerance falls back to base
     and flatten still completes cleanly."""

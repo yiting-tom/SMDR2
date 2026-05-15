@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from app.files import ERROR, FileStore, PREPROCESSING, READY
+import pytest
+
+from app.files import (
+    ERROR,
+    FileStore,
+    PREPROCESSING,
+    READY,
+    compute_unit_scale_warning,
+)
 
 
 def test_register_and_get(tmp_db):
@@ -19,12 +27,59 @@ def test_update_parsed_moves_to_ready(tmp_db):
     fs = FileStore(tmp_db)
     fs.register("abc", "a.dxf", 1)
     fs.update_parsed("abc", primitive_count=42,
-                      bbox=(0.0, 0.0, 10.0, 10.0), background="#fff")
+                      bbox=(0.0, 0.0, 10.0, 10.0), background="#fff",
+                      insunits=4)
     rec = fs.get("abc")
     assert rec.status == READY
     assert rec.primitive_count == 42
     assert rec.bbox == (0.0, 0.0, 10.0, 10.0)
     assert rec.background == "#fff"
+    assert rec.insunits == 4
+
+
+def test_update_parsed_omits_insunits(tmp_db):
+    """`insunits` is optional — legacy callers (and unit tests in other
+    files that haven't been updated) must still work; the column is set
+    to NULL."""
+    fs = FileStore(tmp_db)
+    fs.register("legacy", "l.dxf", 1)
+    fs.update_parsed("legacy", primitive_count=1,
+                      bbox=(0.0, 0.0, 1.0, 1.0), background="#000")
+    rec = fs.get("legacy")
+    assert rec.insunits is None
+    # Legacy record → to_dict reports no warning (NULL insunits + tiny bbox).
+    d = rec.to_dict()
+    assert d["unit_scale_warning"] is None
+
+
+@pytest.mark.parametrize("insunits,bbox,expected_kind", [
+    # No bbox yet → no warning regardless.
+    (4,    None,                          None),
+    # Tiny bboxes are always fine.
+    (0,    (0, 0, 50, 50),                "unitless"),     # diagonal ~70 > 100? actually ~70.7 < 100 → mild
+    # Wait — 50x50 diagonal = sqrt(5000) ≈ 70.7. Below 100. So this case:
+    # insunits=0, diagonal<100 → "unitless" kind. Keep parametrization
+    # mapped to the diagonal-aware table.
+    # Normal packaging file: mm, diagonal 300 → no warning.
+    (4,    (0, 0, 200, 200),              None),           # diagonal ~283
+    # Declared mm but bbox enormous → suspect.
+    (4,    (0, 0, 30_000, 30_000),        "suspect_scale"),
+    # Unitless, mid-large diagonal → suspect.
+    (0,    (0, 0, 500, 500),              "suspect_scale"),  # diagonal ~707 > 100
+    # Unitless, tiny bbox → mild "unitless".
+    (0,    (0, 0, 30, 30),                "unitless"),       # diagonal ~42 < 100
+    # Legacy NULL insunits, large bbox → suspect.
+    (None, (0, 0, 30_000, 30_000),        "suspect_scale"),
+    # Legacy NULL insunits, mid bbox → no warning (we don't speculate).
+    (None, (0, 0, 200, 200),              None),
+])
+def test_unit_scale_warning_heuristic(insunits, bbox, expected_kind):
+    kind, detail = compute_unit_scale_warning(insunits, bbox)
+    assert kind == expected_kind
+    if kind:
+        # Detail should mention both the raw INSUNITS value and the diagonal.
+        assert "INSUNITS" in detail
+        assert "diagonal" in detail
 
 
 def test_update_status_error(tmp_db):
