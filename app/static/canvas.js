@@ -239,12 +239,16 @@ let markDrag = null;
 
 const SIDE_STYLES = {
   frontside: {
-    fill:   "rgba(124, 231, 194, 0.08)",
+    fill:   "rgba(124, 231, 194, 0.035)",
     stroke: "rgba(124, 231, 194, 0.85)",
+    label:  "top view",
+    labelColor: "rgba(124, 231, 194, 0.95)",
   },
   bottomside: {
-    fill:   "rgba(231, 160, 124, 0.08)",
+    fill:   "rgba(231, 160, 124, 0.035)",
     stroke: "rgba(231, 160, 124, 0.85)",
+    label:  "bottom view",
+    labelColor: "rgba(231, 160, 124, 0.95)",
   },
 };
 const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags are treated as a slip
@@ -563,6 +567,7 @@ function render() {
   ctx.restore();
 
   // Screen-space annotations (don't scale with zoom).
+  drawSideRegionLabels();
   if (focusedSubRule) drawFocusedLabel();
   if (measureMode) drawMeasureOverlay();
 }
@@ -2225,6 +2230,65 @@ function drawSideRegionsOverlay(hairline) {
     ctx.strokeRect(x, y, w, h);
     ctx.setLineDash([]);
   }
+}
+
+// Screen-space labels for the persistent side rectangles. Drawn after the
+// world-space ctx.restore() so text stays upright and a constant size.
+function drawSideRegionLabels() {
+  ctx.save();
+  ctx.font = `${12 * dpr}px ui-sans-serif, system-ui, sans-serif`;
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "center";
+  for (const side of ["frontside", "bottomside"]) {
+    const r = sideRects[side];
+    if (!r) continue;
+    const style = SIDE_STYLES[side];
+    // Top-center of the rectangle, in world coords r has y up so the "top"
+    // edge is y1; lift the label a few screen px above it.
+    const [sx, syTop] = worldToScreen((r.x0 + r.x1) / 2, r.y1);
+    const padX = 8 * dpr, padY = 4 * dpr, gap = 6 * dpr;
+    const m = ctx.measureText(style.label);
+    const textW = m.width;
+    const textH = 12 * dpr;
+    const bgX = sx - textW / 2 - padX;
+    const bgY = syTop - gap - textH - padY * 2;
+    const bgW = textW + padX * 2;
+    const bgH = textH + padY * 2;
+    ctx.fillStyle = "rgba(10, 14, 22, 0.75)";
+    ctx.fillRect(bgX, bgY, bgW, bgH);
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = 1 * dpr;
+    ctx.strokeRect(bgX, bgY, bgW, bgH);
+    ctx.fillStyle = style.labelColor;
+    ctx.fillText(style.label, sx, bgY + bgH - padY);
+  }
+  // In-progress drag: label follows the live rectangle so the user sees
+  // which side they're painting before they release.
+  if (markMode && markDrag && markDrag.currentWorld) {
+    const [x1, y1] = markDrag.startWorld;
+    const [x2, y2] = markDrag.currentWorld;
+    const style = SIDE_STYLES[markMode];
+    const cx = (x1 + x2) / 2, topY = Math.max(y1, y2);
+    const [sx, syTop] = worldToScreen(cx, topY);
+    const padX = 8 * dpr, padY = 4 * dpr, gap = 6 * dpr;
+    const m = ctx.measureText(style.label);
+    const textW = m.width;
+    const textH = 12 * dpr;
+    const bgX = sx - textW / 2 - padX;
+    const bgY = syTop - gap - textH - padY * 2;
+    const bgW = textW + padX * 2;
+    const bgH = textH + padY * 2;
+    ctx.fillStyle = "rgba(10, 14, 22, 0.75)";
+    ctx.fillRect(bgX, bgY, bgW, bgH);
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = 1 * dpr;
+    ctx.setLineDash([4 * dpr, 3 * dpr]);
+    ctx.strokeRect(bgX, bgY, bgW, bgH);
+    ctx.setLineDash([]);
+    ctx.fillStyle = style.labelColor;
+    ctx.fillText(style.label, sx, bgY + bgH - padY);
+  }
+  ctx.restore();
 }
 
 function enterMarkMode(queue) {
