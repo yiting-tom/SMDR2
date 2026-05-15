@@ -16,7 +16,93 @@ def test_flatten_produces_primitives(test_dxf_path):
     # Every primitive should carry its source DXF handle.
     for p in out.primitives:
         assert "handle" in p
-        assert p["type"] in {"line", "polyline", "filled_polygon", "point"}
+        assert p["type"] in {"line", "polyline", "filled_polygon", "point", "circle"}
+
+
+def test_circle_entity_emits_circle_primitive(tmp_path):
+    """A DXF CIRCLE entity must be emitted as a `circle` primitive carrying
+    `center` + `r`, not as a flattened closed polyline."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    circle = msp.add_circle(center=(3.0, 4.0), radius=0.15)
+    dxf_path = tmp_path / "circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == circle.dxf.handle]
+    assert prims_for_handle, "expected at least one primitive for the CIRCLE"
+    # Exactly one circle primitive; no polyline fallback for the same handle.
+    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
+    polyline_prims = [p for p in prims_for_handle if p["type"] == "polyline"]
+    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
+    assert not polyline_prims, "CIRCLE must not flatten to a polyline"
+    cp = circle_prims[0]
+    cx, cy = cp["center"]
+    assert abs(cx - 3.0) < 1e-3 and abs(cy - 4.0) < 1e-3
+    assert abs(cp["r"] - 0.15) / 0.15 < 0.01  # within 1 %
+
+
+def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
+    """A `circle` primitive must feed the matcher a deterministic, evenly-
+    spaced point cloud whose radius matches the source CIRCLE. Same DXF →
+    same cloud, run after run (matcher fingerprints stay stable)."""
+    import math as _math
+
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    circle = msp.add_circle(center=(1.0, -2.0), radius=0.5)
+    dxf_path = tmp_path / "one_circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    idx = build_handle_index(out.primitives)
+    pts_a = collect_entity_points(out.primitives, idx, circle.dxf.handle)
+    pts_b = collect_entity_points(out.primitives, idx, circle.dxf.handle)
+
+    # Deterministic across calls.
+    assert pts_a == pts_b
+    # 8 ≤ N ≤ 64.
+    assert 8 <= len(pts_a) <= 64
+    # Every point sits on the circle within 1 %.
+    for x, y in pts_a:
+        r = _math.hypot(x - 1.0, y - (-2.0))
+        assert abs(r - 0.5) / 0.5 < 0.01
+
+
+def test_non_circular_closed_polyline_stays_polyline(tmp_path):
+    """An 8-vertex closed POLYLINE that is NOT a circular approximation must
+    remain a polyline — guards against the circle detector eating real
+    octagonal pads / fiducial outlines."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    # A clearly non-circular octagon (alternating long/short radial distances).
+    pts = [
+        (0.0, 0.0),
+        (3.0, 0.0),
+        (3.5, 0.5),
+        (3.5, 2.0),
+        (3.0, 2.5),
+        (0.0, 2.5),
+        (-0.5, 2.0),
+        (-0.5, 0.5),
+    ]
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "octagon.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle
+    types = {p["type"] for p in prims_for_handle}
+    assert "circle" not in types, "non-circular polyline must not collapse to a circle"
+    assert "polyline" in types
 
 
 def test_handle_index_groups_correctly(test_dxf_path):

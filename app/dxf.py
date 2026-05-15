@@ -13,6 +13,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import math
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,12 @@ from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d
 # Max deviation (drawing units) when flattening curves to polylines.
 # Smaller = more vertices, smoother arcs. 0.01 is fine for typical mm-scale CAD.
 CURVE_FLATTENING_DISTANCE = 0.01
+
+# Circle-detection thresholds. Kept in lockstep with the client-side
+# `detectCircle` in app/static/measure_core.js so server emit and client
+# OSNAP/QUA snap agree on what counts as a circle.
+CIRCLE_MIN_VERTS = 8
+CIRCLE_RADIAL_TOL = 0.02
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
@@ -125,6 +132,22 @@ class JSONBackend(BackendInterface):
             points = _flatten_path(sub)
             if len(points) < 2:
                 continue
+            # Closed curve sub-paths (CIRCLE, 360° ARC, etc.) that the radial
+            # test recognises are emitted as a `circle` primitive instead of
+            # a many-vertex closed polyline — saves ~30× on memory / bandwidth
+            # for BGA-ball-heavy packaging DXFs and lets the canvas draw via
+            # ctx.arc + sub-pixel LOD batching. `has_curves` gates against
+            # collapsing pure-LINE polylines that happen to approximate a
+            # circle (an N-gon SMD pad with N ≥ 8 must keep its corners).
+            if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
+                circle = _detect_circle_subpath(points)
+                if circle is not None:
+                    cx, cy = circle["center"]
+                    r = circle["r"]
+                    self._track_point(cx - r, cy - r)
+                    self._track_point(cx + r, cy + r)
+                    self._append({"type": "circle", **circle, **_props(properties)})
+                    continue
             self._track_points(points)
             self._append(
                 {
@@ -208,6 +231,44 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
 # ---- helpers ---------------------------------------------------------------
 def _flatten_path(sub: NumpyPath2d) -> list[list[float]]:
     return [[float(v.x), float(v.y)] for v in sub.flattening(CURVE_FLATTENING_DISTANCE)]
+
+
+def _detect_circle_subpath(points: list[list[float]]) -> dict[str, Any] | None:
+    """Return `{"center": [cx, cy], "r": float}` when `points` describe a
+    circle within tolerance, else None. Predicate matches the client-side
+    `detectCircle` so server emit and client OSNAP agree. Caller is expected
+    to gate this on `sub.is_closed and sub.has_curves` to avoid collapsing
+    real polylines whose vertex layout happens to be near-circular."""
+    if len(points) < CIRCLE_MIN_VERTS:
+        return None
+    first, last = points[0], points[-1]
+    n = len(points) - 1 if first[0] == last[0] and first[1] == last[1] else len(points)
+    if n < CIRCLE_MIN_VERTS:
+        return None
+    sx = sy = 0.0
+    for i in range(n):
+        sx += points[i][0]
+        sy += points[i][1]
+    cx = sx / n
+    cy = sy / n
+    rmin = float("inf")
+    rmax = 0.0
+    rsum = 0.0
+    for i in range(n):
+        dx = points[i][0] - cx
+        dy = points[i][1] - cy
+        r = math.hypot(dx, dy)
+        if r < rmin:
+            rmin = r
+        if r > rmax:
+            rmax = r
+        rsum += r
+    rmean = rsum / n
+    if rmean < 1e-9:
+        return None
+    if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
+        return None
+    return {"center": [cx, cy], "r": rmean}
 
 
 def _props(p: BackendProperties) -> dict[str, Any]:

@@ -17,6 +17,7 @@ Persistence:
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 import time
@@ -473,4 +474,15 @@ def collect_entity_points(primitives: list[dict], handle_index: dict[str, list[i
                     pts.append(tuple(v))
         elif t == "point":
             pts.append(tuple(p["pos"]))
+        elif t == "circle":
+            # Synthesize a deterministic, evenly-spaced point cloud so the
+            # matcher sees something equivalent to the pre-change flattened
+            # polyline. Density tracks CURVE_FLATTENING_DISTANCE so existing
+            # fingerprints stay stable; the 64-cap protects giant fiducials.
+            cx, cy = p["center"]
+            r = float(p["r"])
+            n = max(8, min(64, round(2.0 * math.pi * r / 0.01)))
+            for i in range(n):
+                a = 2.0 * math.pi * i / n
+                pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
     return pts
