@@ -637,6 +637,12 @@ body.dashboard main.dashboard-main {
 .product-card .slot .slot-status {
   font-size: 0.74rem;
 }
+.warn-badge {
+  color: #ffb84d;
+  margin-left: 0.5em;
+  font-size: 0.78rem;
+  cursor: help;
+}
 .product-card .slot .slot-actions {
   display: flex;
   gap: 0.4rem;

@@ -265,6 +265,13 @@ const HIGHLIGHT_COLOR = "#00ffff";
 const NEARMISS_COLOR = "#ff8800";
 const HOVER_COLOR = "#ffeb3b";  // ephemeral (rule-check hover)
 const HIGHLIGHT_WIDTH_MULT = 2.5;
+// Below this on-screen radius a circle gets collapsed into a 1×1 dot in a
+// per-color batched Path2D fill — cheaper by orders of magnitude than
+// stroking N tiny arcs. The number is a UX call: at 3 px a BGA ball reads
+// as a "filled dot" rather than its outline, but in dense packaging arrays
+// that's already what the eye sees, and the pan FPS gain at mid-zoom is
+// massive. Bump back down to ~1 px if visual fidelity becomes a concern.
+const DOT_THRESHOLD_CSS_PX = 3.0;
 
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
 // dark background and for mutual distinguishability.
@@ -361,7 +368,10 @@ function computePrimCircles() {
   for (let i = 0; i < primitives.length; i++) {
     const p = primitives[i];
     if (p.decorative) continue;
-    if (p.type === "polyline" && p.closed) {
+    if (p.type === "circle") {
+      // Backend already emitted us a circle — no detection needed.
+      primCircles[i] = { cx: p.center[0], cy: p.center[1], r: p.r };
+    } else if (p.type === "polyline" && p.closed) {
       primCircles[i] = detectCircle(p.points);
     } else if (p.type === "filled_polygon" && p.rings.length === 1) {
       primCircles[i] = detectCircle(p.rings[0]);
@@ -437,6 +447,7 @@ function bboxOf(p) {
     case "polyline":       for (const [x, y] of p.points) acc(x, y); break;
     case "filled_polygon": for (const r of p.rings) for (const [x, y] of r) acc(x, y); break;
     case "point":          acc(p.pos[0], p.pos[1]); break;
+    case "circle":         acc(p.center[0] - p.r, p.center[1] - p.r); acc(p.center[0] + p.r, p.center[1] + p.r); break;
   }
   return [xmin, ymin, xmax, ymax];
 }
@@ -475,6 +486,11 @@ function drawPrimitive(p, opts) {
       ctx.arc(p.pos[0], p.pos[1], lineWidth * 1.5, 0, Math.PI * 2);
       ctx.fillStyle = fill ?? p.color; ctx.fill();
       break;
+    case "circle":
+      ctx.beginPath();
+      ctx.arc(p.center[0], p.center[1], p.r, 0, Math.PI * 2);
+      ctx.strokeStyle = stroke ?? p.color; ctx.lineWidth = lineWidth; ctx.stroke();
+      break;
   }
 }
 
@@ -486,6 +502,7 @@ function worldToScreen(x, y) {
 }
 
 function render() {
+  const t0 = performance.now();
   ctx.fillStyle = background;
   ctx.fillRect(0, 0, $canvas.width, $canvas.height);
   ctx.save();
@@ -495,9 +512,56 @@ function render() {
 
   const hairline = (1 / view.zoom) * dpr;
 
-  for (const p of primitives) {
+  // Visible-world rect (with a small margin so a stroke that peeks in
+  // doesn't get clipped). Used to cull both the main pass and every
+  // highlight pass against the precomputed `primBBoxes`.
+  const halfW = $canvas.width  / (2 * view.zoom);
+  const halfH = $canvas.height / (2 * view.zoom);
+  const cullMargin = hairline * HIGHLIGHT_WIDTH_MULT;
+  const vx0 = view.cx - halfW - cullMargin, vx1 = view.cx + halfW + cullMargin;
+  const vy0 = view.cy - halfH - cullMargin, vy1 = view.cy + halfH + cullMargin;
+  const bboxInView = (b) => !(b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1);
+
+  // Dot threshold in world units: at this radius (or below) a circle is
+  // sub-pixel and gets collapsed into a batched dot at flush time.
+  const dotR = (DOT_THRESHOLD_CSS_PX * dpr) / view.zoom;
+  // color → flat Float32 array of (x, y) world positions for batched dots.
+  const dotBuckets = new Map();
+
+  let drawn = 0, culled = 0, dot = 0;
+  for (let i = 0; i < primitives.length; i++) {
+    const p = primitives[i];
     if (!isLayerVisible(p)) continue;
+    if (!bboxInView(primBBoxes[i])) { culled++; continue; }
+    if (p.type === "circle" && p.r < dotR) {
+      let bucket = dotBuckets.get(p.color);
+      if (!bucket) { bucket = []; dotBuckets.set(p.color, bucket); }
+      bucket.push(p.center[0], p.center[1]);
+      dot++;
+      continue;
+    }
     drawPrimitive(p, { lineWidth: hairline });
+    drawn++;
+  }
+  // Flush each color bucket as a single Path2D of device-pixel rects. We
+  // step out of the world transform into device-pixel space so each dot is
+  // a crisp 1×1 fill regardless of zoom / DPR — and one fill per color is
+  // far cheaper than N separate fillRects for the same N.
+  if (dotBuckets.size) {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
+    for (const [color, xs] of dotBuckets) {
+      const path = new Path2D();
+      for (let k = 0; k < xs.length; k += 2) {
+        const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
+        const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
+        path.rect(sx | 0, sy | 0, 1, 1);
+      }
+      ctx.fillStyle = color;
+      ctx.fill(path);
+    }
+    ctx.restore();
   }
 
   // Persistent side-region overlay — drawn beneath highlights so it never
@@ -506,8 +570,10 @@ function render() {
 
   if (scanAllByHandle) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
-    for (const p of primitives) {
+    for (let i = 0; i < primitives.length; i++) {
+      const p = primitives[i];
       if (!isLayerVisible(p)) continue;
+      if (!bboxInView(primBBoxes[i])) continue;
       const cls = scanAllByHandle.get(p.handle);
       if (!cls) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle) || nearMissSet.has(p.handle)) continue;
@@ -517,8 +583,10 @@ function render() {
   }
   if (nearMissSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
-    for (const p of primitives) {
+    for (let i = 0; i < primitives.length; i++) {
+      const p = primitives[i];
       if (!isLayerVisible(p)) continue;
+      if (!bboxInView(primBBoxes[i])) continue;
       if (nearMissSet.has(p.handle) && !matchSet.has(p.handle) && !selection.has(p.handle)) {
         drawPrimitive(p, { stroke: NEARMISS_COLOR, fill: NEARMISS_COLOR, lineWidth: hw });
       }
@@ -526,8 +594,10 @@ function render() {
   }
   if (selection.size || matchSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
-    for (const p of primitives) {
+    for (let i = 0; i < primitives.length; i++) {
+      const p = primitives[i];
       if (!isLayerVisible(p)) continue;
+      if (!bboxInView(primBBoxes[i])) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle)) {
         drawPrimitive(p, { stroke: HIGHLIGHT_COLOR, fill: HIGHLIGHT_COLOR, lineWidth: hw });
       }
@@ -535,8 +605,10 @@ function render() {
   }
   if (hoverSet.size || pinnedSet.size) {
     const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1);
-    for (const p of primitives) {
+    for (let i = 0; i < primitives.length; i++) {
+      const p = primitives[i];
       if (!isLayerVisible(p)) continue;
+      if (!bboxInView(primBBoxes[i])) continue;
       if (hoverSet.has(p.handle) || pinnedSet.has(p.handle)) {
         drawPrimitive(p, { stroke: HOVER_COLOR, fill: HOVER_COLOR, lineWidth: hw });
       }
@@ -570,6 +642,12 @@ function render() {
   drawSideRegionLabels();
   if (focusedSubRule) drawFocusedLabel();
   if (measureMode) drawMeasureOverlay();
+
+  // Expose per-frame counters for the status line and ad-hoc DevTools
+  // probing — drawn / culled / dot let us verify the cull + LOD wins on
+  // BGA-heavy files (see data/test_3layers.dxf in tasks.md).
+  const ms = performance.now() - t0;
+  window.__renderStats = { drawn, culled, dot, ms };
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
@@ -607,6 +685,22 @@ function collectHandlesSegments(handles) {
       case "point":
         segs.push([p.pos, p.pos]);
         break;
+      case "circle": {
+        // Sample the ring into 32 tangent segments so the shortest-segment
+        // search treats the circle as its discretised polygon (faithful to
+        // the pre-change closed-polyline emit, accurate enough for the
+        // rule-check annotation line).
+        const cx = p.center[0], cy = p.center[1], r = p.r;
+        const N = 32;
+        let px = cx + r, py = cy;
+        for (let k = 1; k <= N; k++) {
+          const a = (2 * Math.PI * k) / N;
+          const nx = cx + r * Math.cos(a), ny = cy + r * Math.sin(a);
+          segs.push([[px, py], [nx, ny]]);
+          px = nx; py = ny;
+        }
+        break;
+      }
     }
   }
   return segs;
@@ -1134,6 +1228,11 @@ function primHitTest(p, wx, wy, tol) {
       const dx = wx - p.pos[0], dy = wy - p.pos[1];
       return dx * dx + dy * dy <= tol2;
     }
+    case "circle": {
+      const dx = wx - p.center[0], dy = wy - p.center[1];
+      const d = Math.hypot(dx, dy);
+      return Math.abs(d - p.r) <= tol;
+    }
   }
   return false;
 }
@@ -1316,6 +1415,15 @@ function primCrossesRect(p, xmin, ymin, xmax, ymax) {
     }
     case "point":
       return pointInRect(p.pos[0], p.pos[1], xmin, ymin, xmax, ymax);
+    case "circle": {
+      // Circle-vs-rect: closest point on rect to (cx,cy); intersect if within r.
+      // Covers both ring-crosses-rect and rect-inside-disk.
+      const cx = p.center[0], cy = p.center[1], r = p.r;
+      const qx = cx < xmin ? xmin : (cx > xmax ? xmax : cx);
+      const qy = cy < ymin ? ymin : (cy > ymax ? ymax : cy);
+      const dx = cx - qx, dy = cy - qy;
+      return dx * dx + dy * dy <= r * r;
+    }
   }
   return false;
 }
@@ -2515,8 +2623,9 @@ async function load() {
   render();
   const tRender = (performance.now() - t1).toFixed(0);
 
+  const rs = window.__renderStats || { drawn: 0, culled: 0, dot: 0 };
   setBaseStatus(
-    `${data.count.toLocaleString()} primitives · fetch ${tFetch}ms · bbox ${tBox}ms · render ${tRender}ms`
+    `${data.count.toLocaleString()} primitives · fetch ${tFetch}ms · bbox ${tBox}ms · render ${tRender}ms · drawn ${rs.drawn.toLocaleString()} culled ${rs.culled.toLocaleString()} dot ${rs.dot.toLocaleString()}`
   );
 
   // Pre-match overlay was computed at preprocessing time; show it

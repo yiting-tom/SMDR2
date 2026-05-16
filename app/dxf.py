@@ -13,12 +13,15 @@ Responsibilities:
 
 from __future__ import annotations
 
+import logging
+import math
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 import ezdxf
+import ezdxf.bbox
 from ezdxf.addons.drawing import Frontend, RenderContext
 from ezdxf.addons.drawing.backend import BackendInterface
 from ezdxf.addons.drawing.config import Configuration
@@ -27,9 +30,26 @@ from ezdxf.math import Vec2
 from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d
 
 
-# Max deviation (drawing units) when flattening curves to polylines.
-# Smaller = more vertices, smoother arcs. 0.01 is fine for typical mm-scale CAD.
-CURVE_FLATTENING_DISTANCE = 0.01
+logger = logging.getLogger(__name__)
+
+
+# Floor for curve flattening (drawing units). Used directly for normal-scale
+# DXFs; relaxed proportionally for files with abnormally large bboxes so the
+# vertex count stays bounded across pathological unit scales (e.g. INSUNITS=0
+# files mis-interpreted as 1000× their intended unit).
+BASE_TOLERANCE = 0.01
+# Tolerance auto-scales with bbox diagonal: tol = max(BASE, D × SCALE_FACTOR).
+# At 1e-5, even at fit-zoom one chord deviation is ~67× tighter than a screen
+# pixel — well below anything a user can perceive.
+SCALE_FACTOR = 1e-5
+# Legacy alias kept for external imports / downstream readers.
+CURVE_FLATTENING_DISTANCE = BASE_TOLERANCE
+
+# Circle-detection thresholds. Kept in lockstep with the client-side
+# `detectCircle` in app/static/measure_core.js so server emit and client
+# OSNAP/QUA snap agree on what counts as a circle.
+CIRCLE_MIN_VERTS = 8
+CIRCLE_RADIAL_TOL = 0.02
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
@@ -42,14 +62,65 @@ class RenderOutput:
     primitives: list[dict[str, Any]]
     bbox: tuple[float, float, float, float] | None  # (xmin, ymin, xmax, ymax)
     background: str  # "#RRGGBB"
+    # Tolerance actually used to flatten curves for this file. Surfaced for
+    # tests + future dashboard diagnostics ("why does this file have so few /
+    # so many vertices?"). Default keeps callers that construct it manually
+    # working.
+    flatten_tolerance: float = BASE_TOLERANCE
+    # Raw `$INSUNITS` header value from the source DXF (0 = unitless,
+    # 1 = inch, 2 = foot, 4 = mm, 5 = cm, 6 = m, …). Persisted to the file
+    # record and fed into the dashboard's unit-scale-warning heuristic.
+    # None when the header is missing or unparseable.
+    insunits: int | None = None
+
+
+def choose_flatten_tolerance(diagonal: float) -> float:
+    """Pick a curve-flattening tolerance from a file's bbox diagonal.
+
+    `max(BASE_TOLERANCE, diagonal * SCALE_FACTOR)`. Defensive on
+    negative / NaN inputs — returns `BASE_TOLERANCE`."""
+    if not math.isfinite(diagonal) or diagonal <= 0:
+        return BASE_TOLERANCE
+    return max(BASE_TOLERANCE, diagonal * SCALE_FACTOR)
+
+
+def _modelspace_diagonal(doc) -> float | None:
+    """Cheap bbox-diagonal probe. Prefers the DXF header's `$EXTMIN` /
+    `$EXTMAX` (free — already in memory after readfile) and falls back to
+    `ezdxf.bbox.extents(fast=True)` only when the header values are
+    missing or degenerate. Returns None when no estimate can be made.
+
+    The header path costs microseconds; the fallback path costs seconds
+    on 100 k-entity files, so the header shortcut matters."""
+    try:
+        emin = doc.header.get("$EXTMIN")
+        emax = doc.header.get("$EXTMAX")
+    except Exception:
+        emin = emax = None
+    if emin is not None and emax is not None:
+        dx = float(emax[0]) - float(emin[0])
+        dy = float(emax[1]) - float(emin[1])
+        if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
+            return math.hypot(dx, dy)
+    # Fall back to the entity-sweep extents probe. Slower but works on
+    # files whose header lacks usable extents.
+    try:
+        ext = ezdxf.bbox.extents(doc.modelspace(), fast=True)
+    except Exception:
+        return None
+    if not ext.has_data:
+        return None
+    size = ext.size
+    return math.hypot(float(size.x), float(size.y))
 
 
 class JSONBackend(BackendInterface):
     """Collects drawing operations as JSON-serialisable primitive dicts."""
 
-    def __init__(self) -> None:
+    def __init__(self, flatten_tolerance: float = BASE_TOLERANCE) -> None:
         self.primitives: list[dict[str, Any]] = []
         self.background: str = "#ffffff"
+        self.flatten_tolerance = flatten_tolerance
         self._xmin = float("inf")
         self._ymin = float("inf")
         self._xmax = float("-inf")
@@ -122,9 +193,25 @@ class JSONBackend(BackendInterface):
 
     def draw_path(self, path: NumpyPath2d, properties: BackendProperties) -> None:
         for sub in path.sub_paths():
-            points = _flatten_path(sub)
+            points = _flatten_path(sub, self.flatten_tolerance)
             if len(points) < 2:
                 continue
+            # Closed curve sub-paths (CIRCLE, 360° ARC, etc.) that the radial
+            # test recognises are emitted as a `circle` primitive instead of
+            # a many-vertex closed polyline — saves ~30× on memory / bandwidth
+            # for BGA-ball-heavy packaging DXFs and lets the canvas draw via
+            # ctx.arc + sub-pixel LOD batching. `has_curves` gates against
+            # collapsing pure-LINE polylines that happen to approximate a
+            # circle (an N-gon SMD pad with N ≥ 8 must keep its corners).
+            if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
+                circle = _detect_circle_subpath(points)
+                if circle is not None:
+                    cx, cy = circle["center"]
+                    r = circle["r"]
+                    self._track_point(cx - r, cy - r)
+                    self._track_point(cx + r, cy + r)
+                    self._append({"type": "circle", **circle, **_props(properties)})
+                    continue
             self._track_points(points)
             self._append(
                 {
@@ -144,7 +231,7 @@ class JSONBackend(BackendInterface):
         rings: list[list[list[float]]] = []
         for path in paths:
             for sub in path.sub_paths():
-                pts = _flatten_path(sub)
+                pts = _flatten_path(sub, self.flatten_tolerance)
                 if len(pts) >= 3:
                     self._track_points(pts)
                     rings.append(pts)
@@ -195,19 +282,82 @@ class JSONBackend(BackendInterface):
 def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
     """Parse a DXF file and return drawing primitives + bbox."""
     doc = ezdxf.readfile(str(dxf_path))
+    msp = doc.modelspace()
+    diagonal = _modelspace_diagonal(doc)
+    tol = choose_flatten_tolerance(diagonal) if diagonal is not None else BASE_TOLERANCE
+    if tol != BASE_TOLERANCE:
+        logger.info(
+            "flatten: diagonal=%.3g → tol=%.4g (base=%.4g)",
+            diagonal, tol, BASE_TOLERANCE,
+        )
     ctx = RenderContext(doc)
-    backend = JSONBackend()
-    Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=True)
+    backend = JSONBackend(flatten_tolerance=tol)
+    Frontend(ctx, backend).draw_layout(msp, finalize=True)
     return RenderOutput(
         primitives=backend.primitives,
         bbox=backend.bbox,
         background=backend.background,
+        flatten_tolerance=tol,
+        insunits=_read_insunits(doc),
     )
 
 
+def _read_insunits(doc) -> int | None:
+    """Pull `$INSUNITS` from the DXF header. Returns None when missing or
+    unparseable so callers can downstream-default without try/except."""
+    try:
+        raw = doc.header.get("$INSUNITS")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---- helpers ---------------------------------------------------------------
-def _flatten_path(sub: NumpyPath2d) -> list[list[float]]:
-    return [[float(v.x), float(v.y)] for v in sub.flattening(CURVE_FLATTENING_DISTANCE)]
+def _flatten_path(sub: NumpyPath2d, tolerance: float = BASE_TOLERANCE) -> list[list[float]]:
+    return [[float(v.x), float(v.y)] for v in sub.flattening(tolerance)]
+
+
+def _detect_circle_subpath(points: list[list[float]]) -> dict[str, Any] | None:
+    """Return `{"center": [cx, cy], "r": float}` when `points` describe a
+    circle within tolerance, else None. Predicate matches the client-side
+    `detectCircle` so server emit and client OSNAP agree. Caller is expected
+    to gate this on `sub.is_closed and sub.has_curves` to avoid collapsing
+    real polylines whose vertex layout happens to be near-circular."""
+    if len(points) < CIRCLE_MIN_VERTS:
+        return None
+    first, last = points[0], points[-1]
+    n = len(points) - 1 if first[0] == last[0] and first[1] == last[1] else len(points)
+    if n < CIRCLE_MIN_VERTS:
+        return None
+    sx = sy = 0.0
+    for i in range(n):
+        sx += points[i][0]
+        sy += points[i][1]
+    cx = sx / n
+    cy = sy / n
+    rmin = float("inf")
+    rmax = 0.0
+    rsum = 0.0
+    for i in range(n):
+        dx = points[i][0] - cx
+        dy = points[i][1] - cy
+        r = math.hypot(dx, dy)
+        if r < rmin:
+            rmin = r
+        if r > rmax:
+            rmax = r
+        rsum += r
+    rmean = rsum / n
+    if rmean < 1e-9:
+        return None
+    if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
+        return None
+    return {"center": [cx, cy], "r": rmean}
 
 
 def _props(p: BackendProperties) -> dict[str, Any]:

@@ -207,6 +207,16 @@ function slotCell(product, role) {
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
 
+  // Unit-scale warning badge — surfaces files with $INSUNITS=0 or a
+  // suspiciously large bbox so the user notices before opening the viewer.
+  if (f.unit_scale_warning) {
+    const badge = document.createElement("span");
+    badge.className = "warn-badge";
+    badge.textContent = "⚠ unit";
+    badge.title = f.unit_scale_warning_detail || "";
+    cell.querySelector(".slot-status").appendChild(badge);
+  }
+
   const actions = document.createElement("div");
   actions.className = "slot-actions";
   if (f.status === "awaiting_layers") {

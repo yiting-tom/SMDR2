@@ -78,17 +78,20 @@ def _preprocess_worker(
     bbox: tuple[float, float, float, float] | None
     background: str
     primitives: list[dict[str, Any]]
+    insunits: int | None
     if transient_primitives and Path(transient_primitives).exists():
         with open(transient_primitives) as f:
             cached = json.load(f)
         primitives = cached["primitives"]
         bbox = tuple(cached["bbox"]) if cached.get("bbox") else None
         background = cached.get("background", "#ffffff")
+        insunits = cached.get("insunits")
     else:
         out = flatten_for_render(src)
         primitives = out.primitives
         bbox = out.bbox
         background = out.background
+        insunits = out.insunits
 
     # 2. Apply layer filter (None = legacy, keep everything).
     if selected_layers is not None:
@@ -145,6 +148,7 @@ def _preprocess_worker(
         "primitive_count": len(primitives),
         "bbox": bbox,
         "background": background,
+        "insunits": insunits,
         "prematch_total": sum(len(v) for v in by_class.values()),
     }
 
@@ -217,6 +221,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
         primitive_count=result["primitive_count"],
         bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
         background=result["background"],
+        insunits=result.get("insunits"),
     )
 
 
@@ -270,6 +275,7 @@ def _discover_layers_worker(
         "primitives": out.primitives,
         "bbox": out.bbox,
         "background": out.background,
+        "insunits": out.insunits,
     }))
 
     return {
