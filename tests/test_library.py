@@ -12,7 +12,7 @@ from app.library import (
 )
 
 
-def _make_template(class_name="bga_ball"):
+def _make_template(class_name="BGABall"):
     return Template.from_entities(
         class_name,
         [[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]],
@@ -33,24 +33,24 @@ def test_store_creates_default_classes(tmp_db):
 
 def test_add_template_persists(tmp_db):
     lib = _default_lib(tmp_db)
-    t = _make_template("bga_ball")
+    t = _make_template("BGABall")
     lib.add_template(t)
-    assert lib.count("bga_ball") == 1
+    assert lib.count("BGABall") == 1
 
     # Re-open: template survives.
     lib2 = _default_lib(tmp_db)
-    assert lib2.count("bga_ball") == 1
-    assert lib2.templates_of("bga_ball")[0].id == t.id
+    assert lib2.count("BGABall") == 1
+    assert lib2.templates_of("BGABall")[0].id == t.id
 
 
 def test_delete_template(tmp_db):
     lib = _default_lib(tmp_db)
-    t = _make_template("smd")
+    t = _make_template("SMD-2T")
     lib.add_template(t)
     assert lib.delete_template(t.id)
-    assert lib.count("smd") == 0
+    assert lib.count("SMD-2T") == 0
     lib2 = _default_lib(tmp_db)
-    assert lib2.count("smd") == 0
+    assert lib2.count("SMD-2T") == 0
 
 
 def test_delete_nonexistent_returns_false(tmp_db):
@@ -60,14 +60,14 @@ def test_delete_nonexistent_returns_false(tmp_db):
 
 def test_move_template_changes_class_and_persists(tmp_db):
     lib = _default_lib(tmp_db)
-    t = _make_template("bga_ball")
+    t = _make_template("BGABall")
     lib.add_template(t)
-    assert lib.move_template(t.id, "smd")
-    assert lib.count("bga_ball") == 0
-    assert lib.count("smd") == 1
+    assert lib.move_template(t.id, "SMD-2T")
+    assert lib.count("BGABall") == 0
+    assert lib.count("SMD-2T") == 1
     lib2 = _default_lib(tmp_db)
-    assert lib2.count("bga_ball") == 0
-    assert lib2.count("smd") == 1
+    assert lib2.count("BGABall") == 0
+    assert lib2.count("SMD-2T") == 1
 
 
 def test_add_custom_class(tmp_db):
@@ -81,22 +81,22 @@ def test_add_custom_class(tmp_db):
 def test_template_from_entities_validates_nonempty():
     import pytest
     with pytest.raises(ValueError):
-        Template.from_entities("smd", [[]])
+        Template.from_entities("SMD-2T", [[]])
 
 
 def test_all_templates_returns_indexed_tuples(tmp_db):
     lib = _default_lib(tmp_db)
-    t1 = _make_template("smd")
-    t2 = _make_template("smd")
-    t3 = _make_template("bga_ball")
+    t1 = _make_template("SMD-2T")
+    t2 = _make_template("SMD-2T")
+    t3 = _make_template("BGABall")
     for t in (t1, t2, t3):
         lib.add_template(t)
     flat = lib.all_templates()
     flat_by_id = {t.id: (c, i, t) for c, i, t in flat}
-    assert flat_by_id[t1.id][0] == "smd"
+    assert flat_by_id[t1.id][0] == "SMD-2T"
     assert flat_by_id[t1.id][1] == 0
     assert flat_by_id[t2.id][1] == 1
-    assert flat_by_id[t3.id][0] == "bga_ball"
+    assert flat_by_id[t3.id][0] == "BGABall"
     assert flat_by_id[t3.id][1] == 0
 
 
@@ -106,15 +106,15 @@ def test_multiple_libraries_isolated(tmp_db):
     lib_a = reg.get(DEFAULT_LIBRARY_ID)
     lib_b = reg.create("BGA Variants")
 
-    t = _make_template("bga_ball")
+    t = _make_template("BGABall")
     lib_a.add_template(t)
-    assert lib_a.count("bga_ball") == 1
-    assert lib_b.count("bga_ball") == 0  # other library is independent
+    assert lib_a.count("BGABall") == 1
+    assert lib_b.count("BGABall") == 0  # other library is independent
 
     # Reload and confirm separation persists.
     reg2 = LibraryRegistry(Store(tmp_db))
-    assert reg2.get(DEFAULT_LIBRARY_ID).count("bga_ball") == 1
-    assert reg2.get(lib_b.library_id).count("bga_ball") == 0
+    assert reg2.get(DEFAULT_LIBRARY_ID).count("BGABall") == 1
+    assert reg2.get(lib_b.library_id).count("BGABall") == 0
 
 
 def test_cannot_delete_default_library(tmp_db):

@@ -288,17 +288,24 @@ const HIGHLIGHT_WIDTH_MULT = 2.5;
 const DOT_THRESHOLD_CSS_PX = 3.0;
 
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
-// dark background and for mutual distinguishability.
+// dark background and for mutual distinguishability. SMD-2T/3T/8T/14T share
+// a red family so the eye groups SMD variants together; LidOuter/LidInner/Lid
+// share a purple family for the same reason.
 const CLASS_COLORS = {
-  smd:           "#ff5252",  // red
-  substrate:     "#69f0ae",  // mint
-  die_area:      "#ffeb3b",  // yellow
-  lid_outer:     "#ba68c8",  // purple
-  lid_inner:     "#f06292",  // pink
-  bga_ball:      "#ffab40",  // orange
-  pin_mark:      "#f48fb1",  // soft pink
-  fiducial_mark: "#4dd0e1",  // teal
-  "2d_barcode":  "#c6ff00",  // lime
+  "SMD-2T":       "#ff5252",  // red
+  "SMD-3T":       "#ff8a80",  // light red
+  "SMD-8T":       "#d50000",  // deep red
+  "SMD-14T":      "#b71c1c",  // maroon
+  "Substrate":    "#69f0ae",  // mint
+  "DieArea":      "#ffeb3b",  // yellow
+  "LidOuter":     "#ba68c8",  // purple
+  "LidInner":     "#f06292",  // pink
+  "Lid":          "#9575cd",  // muted purple
+  "BGABall":      "#ffab40",  // orange
+  "Pin-1":        "#f48fb1",  // soft pink
+  "FiducialMark": "#4dd0e1",  // teal
+  "2DBarcode":    "#c6ff00",  // lime
+  "Side":         "#90a4ae",  // blue-grey
 };
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
@@ -1825,9 +1832,31 @@ async function fetchClasses() {
   renderClassToolbar();
 }
 
+// Less-common classes hidden from the toolbar by default to keep it tight.
+// Hotkeys still resolve to them — only the button is suppressed. Clicking
+// "More ▾" reveals them for the rest of the tab session; entering add-mode
+// for a hidden class (e.g. via hotkey) auto-expands so the active state is
+// visible.
+const COLLAPSED_TOOLBAR_CLASSES = new Set(["SMD-3T", "SMD-8T", "SMD-14T"]);
+const TOOLBAR_EXPAND_KEY = "smdr2.toolbar.expanded";
+function isToolbarExpanded() {
+  return sessionStorage.getItem(TOOLBAR_EXPAND_KEY) === "1";
+}
+function setToolbarExpanded(v) {
+  if (v) sessionStorage.setItem(TOOLBAR_EXPAND_KEY, "1");
+  else   sessionStorage.removeItem(TOOLBAR_EXPAND_KEY);
+}
+
 function renderClassToolbar() {
   $classToolbar.innerHTML = "";
+  const expanded = isToolbarExpanded()
+    || (addModeClass && COLLAPSED_TOOLBAR_CLASSES.has(addModeClass));
+  let hasCollapsed = false;
   classes.forEach((cls, i) => {
+    if (!expanded && COLLAPSED_TOOLBAR_CLASSES.has(cls.name)) {
+      hasCollapsed = true;
+      return;
+    }
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "class-btn";
@@ -1836,15 +1865,25 @@ function renderClassToolbar() {
     if (addModeClass === cls.name) {
       btn.classList.add(matchesStaged ? "staged" : "active");
     }
-    const hotkey = HOTKEYS[i] ?? "";
-    btn.innerHTML =
-      `<span class="icon">${addModeClass === cls.name && matchesStaged ? "✓" : "+"}</span>` +
-      `<span class="name">${cls.name}</span>` +
-      `<span class="count">(${cls.count})</span>` +
-      (hotkey ? `<span class="hotkey">[${hotkey}]</span>` : "");
+    btn.innerHTML = `<span class="name">${cls.name}</span>`;
     btn.addEventListener("click", () => enterAddMode(cls.name));
     $classToolbar.appendChild(btn);
   });
+  // Only show the toggle if there's something to hide/reveal at all.
+  if (expanded || hasCollapsed) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "class-btn class-btn-more";
+    toggle.textContent = expanded ? "Less ▴" : "More ▾";
+    toggle.title = expanded
+      ? "Hide less-common SMD variants"
+      : "Show SMD-3T / SMD-8T / SMD-14T";
+    toggle.addEventListener("click", () => {
+      setToolbarExpanded(!expanded);
+      renderClassToolbar();
+    });
+    $classToolbar.appendChild(toggle);
+  }
 }
 
 function enterAddMode(className) {
@@ -2123,11 +2162,17 @@ async function renderLibrary() {
   }
 }
 
-// Fold-state persistence so the user's "I folded bga_ball away" sticks
+// Fold-state persistence so the user's "I folded BGABall away" sticks
 // across opening/closing the modal (and across page reloads in the same tab).
+// Classes in DEFAULT_FOLDED_CLASSES start folded on first visit (less-common
+// SMD variants); once the user toggles anything, sessionStorage is written
+// and their explicit choices win from then on.
 const FOLD_KEY = "smdr2.library.folded";
+const DEFAULT_FOLDED_CLASSES = ["SMD-3T", "SMD-8T", "SMD-14T"];
 function getFoldedClasses() {
-  try { return new Set(JSON.parse(sessionStorage.getItem(FOLD_KEY) ?? "[]")); }
+  const raw = sessionStorage.getItem(FOLD_KEY);
+  if (raw === null) return new Set(DEFAULT_FOLDED_CLASSES);
+  try { return new Set(JSON.parse(raw)); }
   catch { return new Set(); }
 }
 function setFoldedClasses(s) {

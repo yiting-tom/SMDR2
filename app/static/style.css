@@ -186,25 +186,17 @@ nav#class-toolbar .class-btn.staged {
   color: #00ffff;
   filter: none;
 }
-nav#class-toolbar .class-btn .icon {
-  font-weight: 700;
-  font-family: ui-monospace, monospace;
-  width: 1ch;
-  display: inline-block;
-  color: inherit;
-}
 nav#class-toolbar .class-btn .name { color: inherit; }
-nav#class-toolbar .class-btn .hotkey {
-  color: inherit;
-  opacity: 0.55;
-  font-family: ui-monospace, monospace;
-  font-size: 0.72rem;
+nav#class-toolbar .class-btn-more {
+  color: #8794a3;
+  border-color: #2a3340;
+  border-style: dashed;
+  margin-left: 0.2rem;
 }
-nav#class-toolbar .class-btn .count {
-  color: inherit;
-  opacity: 0.75;
-  font-family: ui-monospace, monospace;
-  font-size: 0.72rem;
+nav#class-toolbar .class-btn-more:hover {
+  color: #c0cad6;
+  border-color: #3a4658;
+  filter: none;
 }
 
 main { flex: 1; position: relative; overflow: hidden; }

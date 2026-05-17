@@ -44,7 +44,7 @@ def test_envelope_with_empty_input():
 
 
 def test_rule1_passes_with_far_apart_substrate_and_smd():
-    mj = {"substrate.0": [["S1"]], "smd.0": [["A", "B", "C"]]}
+    mj = {"Substrate.0": [["S1"]], "SMD-2T.0": [["A", "B", "C"]]}
     shapes = {
         "S1": _shape("S1", 0, 0),
         "A":  _shape("A", 100, 0),
@@ -65,7 +65,7 @@ def test_rule1_passes_with_far_apart_substrate_and_smd():
 
 
 def test_rule1_fails_when_too_close():
-    mj = {"substrate.0": [["S1"]], "smd.0": [["A", "B", "C"]]}
+    mj = {"Substrate.0": [["S1"]], "SMD-2T.0": [["A", "B", "C"]]}
     shapes = {
         "S1": _shape("S1", 0, 0),
         "A":  _shape("A", 1, 0),
@@ -87,8 +87,8 @@ def test_rule1_no_subrules_when_bd_missing():
 
 
 def test_rule2_cross_dxf_match():
-    sbt = _bundle({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
-    pod = _bundle({"bga_ball.0": [["x"], ["y"], ["z"]]}, {})
+    sbt = _bundle({"BGABall.0": [["a"], ["b"], ["c"]]}, {})
+    pod = _bundle({"BGABall.0": [["x"], ["y"], ["z"]]}, {})
     r = check_rules("p", {"SBT": sbt, "POD": pod})
     _check_envelope(r)
     assert r["Rule2"]["pass"] is True
@@ -98,8 +98,8 @@ def test_rule2_cross_dxf_match():
 
 
 def test_rule2_cross_dxf_count_mismatch_still_emits_subrules():
-    sbt = _bundle({"bga_ball.0": [["a"], ["b"], ["c"]]}, {})
-    pod = _bundle({"bga_ball.0": [["x"], ["y"]]}, {})
+    sbt = _bundle({"BGABall.0": [["a"], ["b"], ["c"]]}, {})
+    pod = _bundle({"BGABall.0": [["x"], ["y"]]}, {})
     r = check_rules("p", {"SBT": sbt, "POD": pod})
     assert r["Rule2"]["pass"] is False
     assert "3" in r["Rule2"]["text"] and "2" in r["Rule2"]["text"]
@@ -116,8 +116,8 @@ def test_rule3_passes_when_every_smd_is_close():
     We want a SMD strictly outside but within the threshold instead."""
     bd = _bundle(
         match_json={
-            "substrate.0": [["S"]],
-            "smd.0":       [["A"], ["B"]],
+            "Substrate.0": [["S"]],
+            "SMD-2T.0":       [["A"], ["B"]],
         },
         shapes={
             # Substrate footprint (10×10 square at origin)
@@ -147,8 +147,8 @@ def test_rule3_passes_when_every_smd_is_close():
 def test_rule3_fails_when_any_smd_is_too_far():
     bd = _bundle(
         match_json={
-            "substrate.0": [["S"]],
-            "smd.0":       [["A"], ["B"]],
+            "Substrate.0": [["S"]],
+            "SMD-2T.0":       [["A"], ["B"]],
         },
         shapes={
             "S": EntityShape.from_points("S", [
@@ -177,7 +177,7 @@ def test_rule3_handles_no_bd():
 
 def test_rule3_handles_no_smds():
     bd = _bundle(
-        match_json={"substrate.0": [["S"]]},
+        match_json={"Substrate.0": [["S"]]},
         shapes={"S": EntityShape.from_points("S", [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])},
     )
     r = check_rules("p", {"BD": bd})

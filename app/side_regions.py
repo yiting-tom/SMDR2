@@ -3,8 +3,8 @@
 A side region is an axis-aligned, world-space rectangle the engineer paints
 on the viewer to tag the frontside / bottomside half of a DXF sheet. The
 match-JSON serializer uses these to rewrite each instance's key from
-``smd.0`` to ``frontside.smd.0`` etc., based on the instance's bbox-center
-containment.
+``SMD-2T.0`` to ``frontside.SMD-2T.0`` etc., based on the instance's
+bbox-center containment.
 
 This module is intentionally pure: it has no DB or filesystem dependencies
 so it stays trivially unit-testable.

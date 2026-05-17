@@ -29,16 +29,37 @@ from typing import Iterable
 
 # Canonical class list. Auto-seeded into every newly-created library.
 DEFAULT_CLASSES: list[str] = [
-    "smd",
-    "substrate",
-    "die_area",
-    "lid_outer",
-    "lid_inner",
-    "bga_ball",
-    "pin_mark",
-    "fiducial_mark",
-    "2d_barcode",
+    "SMD-2T",
+    "Substrate",
+    "LidOuter",
+    "LidInner",
+    "DieArea",
+    "Pin-1",
+    "FiducialMark",
+    "2DBarcode",
+    "BGABall",
+    "Lid",
+    "Side",
+    "SMD-3T",
+    "SMD-8T",
+    "SMD-14T",
 ]
+
+
+# Legacy snake_case class names → new canonical IDs. Applied as a one-shot
+# rename pass on every Store boot. Idempotent: after the first run all the
+# WHERE clauses match zero rows, so subsequent boots are no-ops.
+LEGACY_CLASS_RENAME: dict[str, str] = {
+    "smd":           "SMD-2T",
+    "substrate":     "Substrate",
+    "die_area":      "DieArea",
+    "lid_outer":     "LidOuter",
+    "lid_inner":     "LidInner",
+    "bga_ball":      "BGABall",
+    "pin_mark":      "Pin-1",
+    "fiducial_mark": "FiducialMark",
+    "2d_barcode":    "2DBarcode",
+}
 
 
 DEFAULT_LIBRARY_ID = "default"
@@ -197,6 +218,25 @@ class Store:
                 DROP TABLE classes;
                 ALTER TABLE classes__new RENAME TO classes;
             """)
+
+        # Legacy snake_case class names → new canonical IDs. Rewrite both the
+        # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
+        # rows that would collide with an already-existing (library_id, NEW)
+        # row, and the trailing DELETE cleans up any such leftovers. Naturally
+        # idempotent — once renamed, no rows match the old name.
+        for old, new in LEGACY_CLASS_RENAME.items():
+            self.conn.execute(
+                "UPDATE templates SET class_name = ? WHERE class_name = ?",
+                (new, old),
+            )
+            self.conn.execute(
+                "UPDATE OR IGNORE classes SET name = ? WHERE name = ?",
+                (new, old),
+            )
+            self.conn.execute(
+                "DELETE FROM classes WHERE name = ?",
+                (old,),
+            )
 
     # ---- library CRUD ----------------------------------------------------
     def create_library(self, library_id: str, name: str) -> None:

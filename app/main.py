@@ -750,8 +750,8 @@ async def save_match_json(file_id: str) -> dict:
             result = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
             base_key = f"{cls_name}.{idx}"
             # Split this template's instances by their side label so a single
-            # smd.0 template can contribute to both frontside.smd.0 and
-            # bottomside.smd.0 in the same file.
+            # SMD-2T.0 template can contribute to both frontside.SMD-2T.0 and
+            # bottomside.SMD-2T.0 in the same file.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
                 rec.frontside_rect, rec.bottomside_rect,

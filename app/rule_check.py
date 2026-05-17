@@ -163,30 +163,30 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
     """Mock product-scoped DRC. Replace with the real implementation when ready."""
     results: RuleResult = {}
 
-    # ---- Rule1: substrate-to-first-SMD shortest distance in BD -----------
+    # ---- Rule1: Substrate-to-first-SMD-2T shortest distance in BD -------
     bd = dxfs_by_role.get("BD")
     rule1_sub: list[SubRule] = []
     rule1_pass = False
-    rule1_text = "BD: substrate-to-first-SMD distance check"
+    rule1_text = "BD: Substrate-to-first-SMD-2T distance check"
     if bd is None:
         rule1_text = "BD DXF required (not uploaded)"
     else:
-        substrate = _first_match_handles(bd["match_json"], "substrate")
-        first_smd = _first_match_handles(bd["match_json"], "smd")
+        substrate = _first_match_handles(bd["match_json"], "Substrate")
+        first_smd = _first_match_handles(bd["match_json"], "SMD-2T")
         shapes = bd["entity_shapes"]
         if not substrate or not first_smd:
             rule1_text = (
-                f"BD must contain at least one substrate and one SMD "
-                f"(substrate={'yes' if substrate else 'no'}, smd={'yes' if first_smd else 'no'})"
+                f"BD must contain at least one Substrate and one SMD-2T "
+                f"(Substrate={'yes' if substrate else 'no'}, SMD-2T={'yes' if first_smd else 'no'})"
             )
         else:
             dist = _shortest_distance(shapes, substrate, first_smd)
             if dist is None:
-                rule1_text = "BD substrate/SMD geometry could not be computed"
+                rule1_text = "BD Substrate/SMD-2T geometry could not be computed"
             else:
                 rule1_pass = dist > SUBSTRATE_TO_SMD_MIN_DIST
                 rule1_text = (
-                    f"Substrate-to-first-SMD distance must exceed "
+                    f"Substrate-to-first-SMD-2T distance must exceed "
                     f"{SUBSTRATE_TO_SMD_MIN_DIST} mm"
                 )
                 rule1_sub.append({
@@ -209,10 +209,10 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
             f"POD={'yes' if pod else 'no'})"
         )
     else:
-        sbt_count = _count_for_prefix(sbt["match_json"], "bga_ball")
-        pod_count = _count_for_prefix(pod["match_json"], "bga_ball")
-        sbt_handles = _all_handles_for_prefix(sbt["match_json"], "bga_ball")
-        pod_handles = _all_handles_for_prefix(pod["match_json"], "bga_ball")
+        sbt_count = _count_for_prefix(sbt["match_json"], "BGABall")
+        pod_count = _count_for_prefix(pod["match_json"], "BGABall")
+        sbt_handles = _all_handles_for_prefix(sbt["match_json"], "BGABall")
+        pod_handles = _all_handles_for_prefix(pod["match_json"], "BGABall")
         rule2_pass = sbt_count == pod_count
         rule2_text = f"SBT BGA count ({sbt_count}) must equal POD BGA count ({pod_count})"
 
@@ -224,30 +224,30 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                 "part": "SBT",
                 "from": sbt_handles[:1],
                 "to":   sbt_handles[-1:] if len(sbt_handles) > 1 else [],
-                "text": f"SBT bga_ball count = {sbt_count}",
+                "text": f"SBT BGABall count = {sbt_count}",
             })
         if pod_handles:
             rule2_sub.append({
                 "part": "POD",
                 "from": pod_handles[:1],
                 "to":   pod_handles[-1:] if len(pod_handles) > 1 else [],
-                "text": f"POD bga_ball count = {pod_count}",
+                "text": f"POD BGABall count = {pod_count}",
             })
     results["Rule2"] = {"pass": rule2_pass, "text": rule2_text, "rules": rule2_sub}
 
-    # ---- Rule3: every SMD must be within 5 mm of the substrate in BD -----
+    # ---- Rule3: every SMD-2T must be within 5 mm of Substrate in BD -----
     rule3_sub: list[SubRule] = []
     rule3_pass = False
     if bd is None:
-        rule3_text = "BD DXF required for SMD-to-substrate proximity check (not uploaded)"
+        rule3_text = "BD DXF required for SMD-2T-to-Substrate proximity check (not uploaded)"
     else:
-        substrate = _first_match_handles(bd["match_json"], "substrate")
-        smd_groups = _all_match_groups(bd["match_json"], "smd")
+        substrate = _first_match_handles(bd["match_json"], "Substrate")
+        smd_groups = _all_match_groups(bd["match_json"], "SMD-2T")
         shapes = bd["entity_shapes"]
         if not substrate:
-            rule3_text = "BD must contain a substrate"
+            rule3_text = "BD must contain a Substrate"
         elif not smd_groups:
-            rule3_text = "BD has no SMD matches to evaluate"
+            rule3_text = "BD has no SMD-2T matches to evaluate"
         else:
             all_under = True
             for i, smd_handles in enumerate(smd_groups):
@@ -261,13 +261,13 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
                     "part": "BD",
                     "from": list(smd_handles),
                     "to":   list(substrate),
-                    "text": f"SMD #{i + 1} → substrate = {dist:.3f} mm "
+                    "text": f"SMD-2T #{i + 1} → Substrate = {dist:.3f} mm "
                             f"({'< ' if passes else '>= '}{SMD_TO_SUBSTRATE_MAX_DIST} mm)",
                 })
             rule3_pass = all_under
             rule3_text = (
-                f"Every SMD must be within {SMD_TO_SUBSTRATE_MAX_DIST} mm of the substrate "
-                f"({len(smd_groups)} SMD{'' if len(smd_groups) == 1 else 's'} checked)"
+                f"Every SMD-2T must be within {SMD_TO_SUBSTRATE_MAX_DIST} mm of the Substrate "
+                f"({len(smd_groups)} SMD-2T{'' if len(smd_groups) == 1 else 's'} checked)"
             )
     results["Rule3"] = {"pass": rule3_pass, "text": rule3_text, "rules": rule3_sub}
 
