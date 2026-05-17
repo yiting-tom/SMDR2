@@ -47,6 +47,14 @@ PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampli
 # the same data collapses to a single bucket while still distinguishing
 # real design steps (1 nm) well below human-meaningful resolution.
 CIRCLE_RADIUS_KEY_DIGITS = 6
+# Canonical density (point count) every non-CIRCLE template + candidate gets
+# resampled to before centroid / PCA / scale / Chamfer. Matches the
+# upper-bound density `collect_entity_points` uses for synthesised circles,
+# keeping internal cloud sizes uniform between the two code paths. The cost
+# is one searchsorted per candidate; the payoff is that 11-vertex and
+# 65-vertex copies of the same physical substrate become 64-point clouds of
+# identical density and Chamfer correctly to ~0 distance.
+RESAMPLE_N = 64
 
 # Worker count default. Single-process when 1 (no multiprocessing overhead).
 # Set higher for very large drawings where the per-candidate alignment loop
@@ -243,6 +251,37 @@ def _dedup_closing(pts: np.ndarray) -> np.ndarray:
     return pts
 
 
+def _resample_arclength(points: np.ndarray, n: int) -> np.ndarray:
+    """Return n points evenly spaced by cumulative arclength along `points`.
+
+    Always traverses the polyline as if it were closed (last → first
+    segment included). For genuinely-closed inputs (rectangles, BGA pads,
+    substrate outlines) this is exactly what we want, and since
+    `EntityShape.points` is stored post-dedup we have to add the closing
+    segment back ourselves. For genuinely-open inputs (e.g. an isolated
+    line) the artificial closing chord is applied identically to template
+    and candidate so the bias cancels out under Chamfer.
+
+    For degenerate inputs (< 2 vertices, or coincident vertices yielding
+    zero total length) the cloud is returned unmodified or repeated;
+    callers reject these via the `c_norm < 1e-9` guard.
+    """
+    if points.shape[0] < 2:
+        return points
+    extended = np.concatenate([points, points[:1]], axis=0)
+    deltas = np.diff(extended, axis=0)
+    seg = np.linalg.norm(deltas, axis=1)
+    total = float(seg.sum())
+    if total < 1e-12:
+        return np.tile(points[:1], (n, 1))
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    targets = np.linspace(0.0, total, n, endpoint=False)
+    idx = np.clip(np.searchsorted(cum, targets, side="right") - 1,
+                  0, len(seg) - 1)
+    frac = (targets - cum[idx]) / seg[idx]
+    return extended[idx] + frac[:, None] * deltas[idx]
+
+
 def align_score(
     template_pts: np.ndarray,
     candidate_pts: np.ndarray,
@@ -250,8 +289,13 @@ def align_score(
     """Best (score, scale) over 4 PCA orientations, after optimal isotropic
     scaling. Returns None if scale falls outside [SCALE_MIN, SCALE_MAX].
     """
-    template_pts = _dedup_closing(template_pts)
-    candidate_pts = _dedup_closing(candidate_pts)
+    if template_pts.shape[0] < 2 or candidate_pts.shape[0] < 2:
+        return None
+    # Resample both to canonical density so vertex-count differences don't
+    # bias scale or Chamfer. _resample_arclength absorbs the closing-vertex
+    # dedup that the previous serial path did explicitly.
+    template_pts = _resample_arclength(template_pts, RESAMPLE_N)
+    candidate_pts = _resample_arclength(candidate_pts, RESAMPLE_N)
     if template_pts.shape[0] < 2 or candidate_pts.shape[0] < 2:
         return None
     t_centered = template_pts - template_pts.mean(axis=0)
@@ -278,10 +322,12 @@ def align_score(
 
 # ---- Signature pre-filter -------------------------------------------------
 def signatures_compatible(a: EntityShape, b: EntityShape) -> bool:
-    if a.vertex_count == 0 or b.vertex_count == 0:
-        return False
-    vc_ratio = a.vertex_count / b.vertex_count
-    if vc_ratio < (1 - VERTEX_COUNT_RATIO) or vc_ratio > (1 + VERTEX_COUNT_RATIO):
+    # vertex_count is no longer a gate: same-shape entities with very
+    # different vertex counts (e.g. mirrored substrate stored as 11 vs 65
+    # verts) are genuine matches now that the matcher resamples to a
+    # canonical density before PCA / Chamfer. We still reject truly empty
+    # clouds.
+    if a.vertex_count < 2 or b.vertex_count < 2:
         return False
     if a.path_length > 0 and b.path_length > 0:
         pl_ratio = a.path_length / b.path_length
@@ -464,8 +510,12 @@ def _match_single_serial(
 ) -> MatchOutput:
     """Single-entity match — hot loop, heavily inlined for speed.
 
-    Template-side state (centered points, PCA axes, mean radius) is computed
-    once outside the loop instead of once per candidate.
+    Template-side state (resampled points, centered, PCA axes, mean radius)
+    is computed once outside the loop instead of once per candidate. Both
+    template and candidate clouds are resampled to RESAMPLE_N points along
+    their arclength so per-entity vertex-count differences don't bias scale
+    or Chamfer (see `_resample_arclength` + design.md in the
+    improve-polyline-density-invariance change).
     """
     matches: list[MatchResult] = []
     near: list[NearMiss] = []
@@ -474,11 +524,14 @@ def _match_single_serial(
         return MatchOutput(matches=matches, near_misses=near)
 
     # Template-side once
-    t_centered = template.points - template.centroid
+    t_resampled = _resample_arclength(template.points, RESAMPLE_N)
+    t_centered = t_resampled - t_resampled.mean(axis=0)
     t_axes, _ = _pca_axes(t_centered)
     t_norm = float(np.linalg.norm(t_centered, axis=1).mean())
     if t_norm < 1e-9:
         return MatchOutput(matches=matches, near_misses=near)
+    # Cloud size is now uniform per call, so the brute-vs-tree branch is a
+    # one-shot decision outside the loop.
     use_tree = t_centered.shape[0] > BRUTE_FORCE_CUTOFF
     t_tree = cKDTree(t_centered) if use_tree else None
 
@@ -490,7 +543,8 @@ def _match_single_serial(
         if shape.points.shape[0] < 2:
             continue
 
-        c_centered = shape.points - shape.centroid
+        c_resampled = _resample_arclength(shape.points, RESAMPLE_N)
+        c_centered = c_resampled - c_resampled.mean(axis=0)
         c_norm = float(np.linalg.norm(c_centered, axis=1).mean())
         if c_norm < 1e-9:
             continue

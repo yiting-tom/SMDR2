@@ -75,13 +75,22 @@ def test_align_translated_copy():
     assert score < 1e-6
 
 
+# Transform-noise floor — the matcher now resamples to RESAMPLE_N points
+# along arclength before scoring, so a rotated / mirrored / scaled cloud's
+# sample positions are phase-shifted relative to the template by up to half
+# the sample spacing. The chamfer floor is bounded by that, not by ULP. The
+# matcher's actual acceptance threshold (TOLERANCE_ABS = 0.05) is unchanged
+# and these tests still assert "comfortably below" it.
+TRANSFORM_NOISE_FLOOR = 0.05
+
+
 @pytest.mark.parametrize("angle", [30.0, 90.0, 137.0, 270.0])
 def test_align_rotated_rect(angle):
     rotated = rotate(RECT, angle)
     res = align_score(np.asarray(RECT), np.asarray(rotated))
     assert res is not None
     score, _ = res
-    assert score < 1e-3, f"rotation by {angle}° should still match"
+    assert score < TRANSFORM_NOISE_FLOOR, f"rotation by {angle}° should still match"
 
 
 def test_align_mirrored_copy():
@@ -89,7 +98,7 @@ def test_align_mirrored_copy():
     res = align_score(np.asarray(RECT), np.asarray(mirrored))
     assert res is not None
     score, _ = res
-    assert score < 1e-3
+    assert score < TRANSFORM_NOISE_FLOOR
 
 
 def test_align_within_scale_tolerance():
@@ -97,7 +106,7 @@ def test_align_within_scale_tolerance():
     res = align_score(np.asarray(RECT), np.asarray(scaled))
     assert res is not None
     score, sc = res
-    assert score < 1e-2
+    assert score < TRANSFORM_NOISE_FLOOR
     assert 0.95 <= sc <= 1.05
 
 
@@ -137,6 +146,79 @@ def test_find_matches_excludes_template_handle():
     }
     out = find_matches(["t"], drawing)
     assert "t" not in {m.handles[0] for m in out.matches}
+
+
+# ---- density-invariant matching ------------------------------------------
+def _sample_closed_polygon(corners, n_per_side):
+    """Build a closed polyline by walking the corners and inserting
+    `n_per_side` additional points along each edge. Returns the list of
+    points (with closing duplicate appended)."""
+    pts = []
+    m = len(corners)
+    for i in range(m):
+        a = corners[i]
+        b = corners[(i + 1) % m]
+        for k in range(n_per_side + 1):  # corner + interior samples
+            f = k / (n_per_side + 1)
+            pts.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+    pts.append(corners[0])  # closing duplicate
+    return pts
+
+
+def test_find_matches_low_vs_high_vertex_count_same_shape():
+    # Same closed 2×1 rectangle, drawn two ways: 5-vertex (corners + close)
+    # and 41-vertex (corners + 9 interior samples per side + close).
+    corners = [(0, 0), (2, 0), (2, 1), (0, 1)]
+    sparse = _sample_closed_polygon(corners, n_per_side=0)   # 5 verts
+    dense = _sample_closed_polygon(corners, n_per_side=9)    # 41 verts
+    assert len(sparse) == 5 and len(dense) == 41
+    drawing = {
+        "sparse_template": shape("sparse_template", sparse),
+        "dense_copy":      shape("dense_copy", translate(dense, 10, 0)),
+    }
+    out = find_matches(["sparse_template"], drawing)
+    assert {m.handles[0] for m in out.matches} == {"dense_copy"}
+
+
+def test_find_matches_density_invariant_under_mirror():
+    # Mirrored copy with a very different vertex count — the substrate
+    # failure case the change was built for.
+    corners = [(0, 0), (2, 0), (2, 1), (0, 1)]
+    sparse = _sample_closed_polygon(corners, n_per_side=0)   # 5 verts
+    dense_mirrored = mirror_x(_sample_closed_polygon(corners, n_per_side=15))  # 65 verts
+    assert len(sparse) == 5 and len(dense_mirrored) == 65
+    drawing = {
+        "sparse_template": shape("sparse_template", sparse),
+        "dense_mirror":    shape("dense_mirror", dense_mirrored),
+    }
+    out = find_matches(["sparse_template"], drawing)
+    assert {m.handles[0] for m in out.matches} == {"dense_mirror"}
+
+
+def test_find_matches_same_perimeter_different_shape_rejected():
+    # Path length matches the rectangle's (perimeter 6) but the shape is
+    # genuinely different — a 1.5×1.5 square. Density-invariant resampling
+    # must NOT collapse these into the same match.
+    rect_perimeter_6 = [(0, 0), (2, 0), (2, 1), (0, 1), (0, 0)]
+    square_15 = [(0, 0), (1.5, 0), (1.5, 1.5), (0, 1.5), (0, 0)]
+    drawing = {
+        "rect":   shape("rect", rect_perimeter_6),
+        "square": shape("square", translate(square_15, 10, 0)),
+    }
+    out = find_matches(["rect"], drawing)
+    assert not out.matches  # different shape, no match
+
+
+def test_find_matches_line_segment_still_works():
+    # 2-vertex degenerate-low input — must still match a translated copy.
+    line = [(0.0, 0.0), (2.0, 0.0)]
+    drawing = {
+        "t": shape("t", line),
+        "a": shape("a", translate(line, 5, 0)),
+        "b": shape("b", translate(line, 0, 5)),
+    }
+    out = find_matches(["t"], drawing)
+    assert {m.handles[0] for m in out.matches} == {"a", "b"}
 
 
 # ---- multi-entity find_matches -------------------------------------------
