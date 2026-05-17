@@ -78,9 +78,26 @@ class Template:
     entity_point_sets: list[list[Point]]
     centroid: tuple[float, float]
     bbox: tuple[float, float, float, float]
+    # Per-entity primitive kind at commit time (e.g., "circle", "polyline").
+    # Same length as entity_point_sets. None entries mean mixed-kind handle
+    # or legacy row (template committed before the column was added).
+    entity_kinds: list[str | None] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.entity_kinds is None:
+            self.entity_kinds = [None] * len(self.entity_point_sets)
+        elif len(self.entity_kinds) != len(self.entity_point_sets):
+            raise ValueError(
+                "entity_kinds length must equal entity_point_sets length"
+            )
 
     @classmethod
-    def from_entities(cls, class_name: str, entity_point_sets: list[list[Point]]) -> "Template":
+    def from_entities(
+        cls,
+        class_name: str,
+        entity_point_sets: list[list[Point]],
+        entity_kinds: list[str | None] | None = None,
+    ) -> "Template":
         if not entity_point_sets or all(len(e) == 0 for e in entity_point_sets):
             raise ValueError("template must have at least one point")
         all_pts = [p for ent in entity_point_sets for p in ent]
@@ -93,6 +110,10 @@ class Template:
             entity_point_sets=entity_point_sets,
             centroid=(cx, cy),
             bbox=bbox,
+            entity_kinds=(
+                list(entity_kinds) if entity_kinds is not None
+                else [None] * len(entity_point_sets)
+            ),
         )
 
 
@@ -125,6 +146,7 @@ CREATE TABLE IF NOT EXISTS templates (
     bbox_xmax          REAL NOT NULL,
     bbox_ymax          REAL NOT NULL,
     created_at         REAL NOT NULL,
+    entity_kinds       TEXT,
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 """
@@ -170,6 +192,15 @@ class Store:
             self.conn.execute(
                 f"ALTER TABLE templates ADD COLUMN library_id TEXT NOT NULL "
                 f"DEFAULT '{DEFAULT_LIBRARY_ID}'"
+            )
+
+        # templates.entity_kinds — JSON-encoded parallel list of primitive
+        # types (or None) captured at commit time. NULL on legacy rows; the
+        # loader parses NULL as [None] * len(entity_point_sets) so existing
+        # libraries keep working without the circle fast path.
+        if not has_col("templates", "entity_kinds"):
+            self.conn.execute(
+                "ALTER TABLE templates ADD COLUMN entity_kinds TEXT"
             )
 
         # Pre-multi-library schema had templates.FOREIGN KEY(class_name)
@@ -277,14 +308,15 @@ class Store:
             self.conn.execute(
                 "INSERT INTO templates "
                 "(id, library_id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     t.id, library_id, t.class_name,
                     json.dumps(t.entity_point_sets, separators=(",", ":")),
                     t.centroid[0], t.centroid[1],
                     t.bbox[0], t.bbox[1], t.bbox[2], t.bbox[3],
                     time.time(),
+                    json.dumps(t.entity_kinds, separators=(",", ":")),
                 ),
             )
 
@@ -313,7 +345,7 @@ class Store:
 
             tmpl_rows = self.conn.execute(
                 "SELECT id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax "
+                "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, entity_kinds "
                 "FROM templates WHERE library_id = ? ORDER BY created_at ASC",
                 (library_id,),
             ).fetchall()
@@ -322,12 +354,20 @@ class Store:
                 point_sets: list[list[Point]] = [
                     [(float(p[0]), float(p[1])) for p in ent] for ent in raw_sets
                 ]
+                # Legacy rows store NULL → reconstruct a parallel [None, ...]
+                # list so downstream code can index it uniformly.
+                raw_kinds = r["entity_kinds"]
+                if raw_kinds is None:
+                    entity_kinds: list[str | None] = [None] * len(point_sets)
+                else:
+                    entity_kinds = list(json.loads(raw_kinds))
                 t = Template(
                     id=r["id"],
                     class_name=r["class_name"],
                     entity_point_sets=point_sets,
                     centroid=(r["centroid_x"], r["centroid_y"]),
                     bbox=(r["bbox_xmin"], r["bbox_ymin"], r["bbox_xmax"], r["bbox_ymax"]),
+                    entity_kinds=entity_kinds,
                 )
                 templates.setdefault(r["class_name"], []).append(t)
             return classes, templates
@@ -495,6 +535,25 @@ def build_handle_index(primitives: list[dict]) -> dict[str, list[int]]:
             continue
         idx.setdefault(h, []).append(i)
     return idx
+
+
+def collect_entity_kinds(
+    primitives: list[dict],
+    handle_index: dict[str, list[int]],
+    handle: str,
+) -> str | None:
+    """Return the shared primitive `type` for a handle, or None if its
+    primitives have more than one type (mixed-kind handle) or the handle has
+    no primitives. Used to tag EntityShape.kind / Template.entity_kinds so
+    the matcher can dispatch primitive-specific fast paths."""
+    types: set[str] = set()
+    for pi in handle_index.get(handle, []):
+        types.add(primitives[pi]["type"])
+        if len(types) > 1:
+            return None
+    if not types:
+        return None
+    return next(iter(types))
 
 
 def collect_entity_points(primitives: list[dict], handle_index: dict[str, list[int]], handle: str) -> list[Point]:

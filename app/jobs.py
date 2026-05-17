@@ -122,7 +122,10 @@ def _preprocess_worker(
     for cls_name, templates in templates_by_class.items():
         seen: set[str] = set()
         for tmpl in templates:
-            result = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
+            result = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+            )
             for m in result.matches:
                 for h in m.handles:
                     seen.add(h)

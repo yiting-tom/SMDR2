@@ -45,6 +45,7 @@ from app.library import (
     LIBRARIES,
     Template,
     build_handle_index,
+    collect_entity_kinds,
     collect_entity_points,
 )
 from app.matching import (
@@ -692,7 +693,10 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
     entity_point_sets = [
         collect_entity_points(data["primitives"], handle_index, h) for h in req.handles
     ]
-    tmpl = Template.from_entities(req.class_name, entity_point_sets)
+    entity_kinds = [
+        collect_entity_kinds(data["primitives"], handle_index, h) for h in req.handles
+    ]
+    tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
     lib.add_template(tmpl)
     return {
         "template_id": tmpl.id,
@@ -711,7 +715,10 @@ async def scan_all(file_id: str) -> dict:
     for cls_name in lib.classes:
         seen: set[str] = set()
         for tmpl in lib.templates_of(cls_name):
-            out = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
+            out = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+            )
             for m in out.matches:
                 for h in m.handles:
                     seen.add(h)
@@ -747,7 +754,10 @@ async def save_match_json(file_id: str) -> dict:
     side_counts = {"frontside": 0, "bottomside": 0, "unassigned": 0}
     for cls_name in lib.classes:
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
-            result = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
+            result = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+            )
             base_key = f"{cls_name}.{idx}"
             # Split this template's instances by their side label so a single
             # SMD-2T.0 template can contribute to both frontside.SMD-2T.0 and

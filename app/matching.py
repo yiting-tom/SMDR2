@@ -34,6 +34,19 @@ SCALE_MAX = 1.05
 TOLERANCE_ABS = 0.05            # ε for chamfer (world units / mm)
 VERTEX_COUNT_RATIO = 0.25       # candidate must be within ±25% vertex count
 PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
+# Decimal digits kept when bucketing CIRCLE radii for the exact-radius fast
+# path. 10⁻⁶ corresponds to 1 nm precision in mm-unit DXFs — six orders of
+# magnitude finer than any meaningful BGA / SMD design tolerance, yet loose
+# enough to absorb the ~10⁻¹¹-mm noise that CAD operations (block inserts,
+# transforms) accumulate on large-radius circles.
+#
+# Diagnostic that drove this value: a real packaging DXF with 400,768
+# bit-identical-by-design CIRCLE entities at r ≈ 189.957671 mm split into
+# *two* buckets at the original 10-digit precision (365k vs 35k), because
+# the noise span was 4.5e-11 mm — straddling the 10⁻¹⁰ boundary. At digit 6
+# the same data collapses to a single bucket while still distinguishing
+# real design steps (1 nm) well below human-meaningful resolution.
+CIRCLE_RADIUS_KEY_DIGITS = 6
 
 # Worker count default. Single-process when 1 (no multiprocessing overhead).
 # Set higher for very large drawings where the per-candidate alignment loop
@@ -51,12 +64,19 @@ class EntityShape:
     radius: float                 # max distance from centroid (compact bound)
     path_length: float
     vertex_count: int
+    kind: str | None = None       # source primitive type when uniform, else None
 
     @classmethod
-    def from_points(cls, handle: str, points: list[tuple[float, float]]) -> "EntityShape":
+    def from_points(
+        cls,
+        handle: str,
+        points: list[tuple[float, float]],
+        *,
+        kind: str | None = None,
+    ) -> "EntityShape":
         arr = np.asarray(points, dtype=np.float64)
         if arr.shape[0] == 0:
-            return cls(handle, arr, np.zeros(2), 0.0, 0.0, 0)
+            return cls(handle, arr, np.zeros(2), 0.0, 0.0, 0, kind)
         # Compute path length on the raw sequence (includes the closing
         # segment for closed polylines) BEFORE dedup.
         path_length = (
@@ -71,7 +91,7 @@ class EntityShape:
         centroid = arr.mean(axis=0)
         d = arr - centroid
         radius = float(np.linalg.norm(d, axis=1).max())
-        return cls(handle, arr, centroid, radius, path_length, arr.shape[0])
+        return cls(handle, arr, centroid, radius, path_length, arr.shape[0], kind)
 
 
 @dataclass
@@ -107,13 +127,14 @@ def build_entity_shapes(
     handle_index: dict[str, list[int]],
 ) -> dict[str, EntityShape]:
     """One EntityShape per DXF handle, aggregating all its primitives' points."""
-    from app.library import collect_entity_points
+    from app.library import collect_entity_kinds, collect_entity_points
     shapes: dict[str, EntityShape] = {}
     for h in handle_index:
         pts = collect_entity_points(primitives, handle_index, h)
         if not pts:
             continue
-        shapes[h] = EntityShape.from_points(h, pts)
+        kind = collect_entity_kinds(primitives, handle_index, h)
+        shapes[h] = EntityShape.from_points(h, pts, kind=kind)
     return shapes
 
 
@@ -287,7 +308,10 @@ def find_matches(
         return MatchOutput(matches=[], near_misses=[])
 
     if len(template_shapes) == 1:
-        return _match_single(template_shapes[0], drawing_shapes, template_handle_set,
+        tpl = template_shapes[0]
+        if tpl.kind == "circle" and tpl.radius > 0:
+            return _match_single_circle(tpl, drawing_shapes, template_handle_set)
+        return _match_single(tpl, drawing_shapes, template_handle_set,
                              tolerance, n_jobs=n_jobs)
     return _match_multi(template_shapes, drawing_shapes, template_handle_set, tolerance)
 
@@ -297,26 +321,95 @@ def find_matches_from_pointsets(
     drawing_shapes: dict[str, EntityShape],
     tolerance: float = TOLERANCE_ABS,
     n_jobs: int | None = None,
+    entity_kinds: list[str | None] | None = None,
 ) -> MatchOutput:
     """Match a Template (stored as per-entity point sets) against a drawing.
 
     Used by /api/scan-all where the template doesn't live in the drawing's
     handle space — we construct virtual EntityShape objects from the stored
     points and feed them straight into the matching pipeline.
+
+    `entity_kinds` (parallel to `entity_point_sets`) is the primitive type
+    that each point set was collected from at commit time, e.g. `"circle"`.
+    When provided AND the template is a single entity with kind `"circle"`,
+    we take the radius-bucket fast path. Legacy templates without kinds fall
+    back to the generic pipeline.
     """
     n_jobs = N_JOBS if n_jobs is None else n_jobs
+    if entity_kinds is None:
+        kinds_iter: list[str | None] = [None] * len(entity_point_sets)
+    else:
+        if len(entity_kinds) != len(entity_point_sets):
+            raise ValueError("entity_kinds length must equal entity_point_sets length")
+        kinds_iter = list(entity_kinds)
     template_shapes: list[EntityShape] = [
-        EntityShape.from_points(f"_template_{i}", pts)
-        for i, pts in enumerate(entity_point_sets)
+        EntityShape.from_points(f"_template_{i}", pts, kind=k)
+        for i, (pts, k) in enumerate(zip(entity_point_sets, kinds_iter))
         if pts
     ]
     if not template_shapes:
         return MatchOutput(matches=[], near_misses=[])
     skip: set[str] = set()
     if len(template_shapes) == 1:
-        return _match_single(template_shapes[0], drawing_shapes, skip, tolerance,
-                             n_jobs=n_jobs)
+        tpl = template_shapes[0]
+        if tpl.kind == "circle" and tpl.radius > 0:
+            return _match_single_circle(tpl, drawing_shapes, skip)
+        return _match_single(tpl, drawing_shapes, skip, tolerance, n_jobs=n_jobs)
     return _match_multi(template_shapes, drawing_shapes, skip, tolerance)
+
+
+# ---- Single-CIRCLE fast path --------------------------------------------
+def _radius_bucket_key(r: float) -> int:
+    """Bucket key for the exact-radius CIRCLE fast path.
+
+    Integer return so bit-identical floats hash identically and floats within
+    10⁻¹⁰ round to the same bucket. See design.md for the rationale.
+    """
+    return round(r * (10 ** CIRCLE_RADIUS_KEY_DIGITS))
+
+
+# Cache the bucket dict per drawing identity. `_shapes_for(file_id)` keeps
+# each file's drawing dict alive until invalidation (library swap, re-
+# preprocess), at which point a fresh dict object is produced and gets a
+# fresh `id()` → fresh cache slot.
+_radius_bucket_cache: dict[int, dict[int, list[str]]] = {}
+
+
+def _get_radius_buckets(
+    drawing: dict[str, EntityShape],
+) -> dict[int, list[str]]:
+    """Return (and cache) the per-drawing radius bucket dict."""
+    cache_id = id(drawing)
+    cached = _radius_bucket_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    buckets: dict[int, list[str]] = {}
+    for h, s in drawing.items():
+        if s.kind != "circle" or s.radius <= 0:
+            continue
+        buckets.setdefault(_radius_bucket_key(s.radius), []).append(h)
+    _radius_bucket_cache[cache_id] = buckets
+    return buckets
+
+
+def _match_single_circle(
+    template: EntityShape,
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+) -> MatchOutput:
+    """Exact-radius bucket lookup for single-CIRCLE templates.
+
+    Bypasses PCA + Chamfer entirely. No NearMiss emitted: circle similarity
+    is a single number the user reads off the canvas, and emitting an object
+    per off-bucket entity was the dominant cost in the prior generic path.
+    """
+    key = _radius_bucket_key(template.radius)
+    hits = _get_radius_buckets(drawing).get(key, [])
+    matches = [
+        MatchResult(handles=[h], score=0.0, scale=1.0)
+        for h in hits if h not in skip
+    ]
+    return MatchOutput(matches=matches, near_misses=[])
 
 
 SIGN_VARIANTS = (
