@@ -17,7 +17,6 @@ header .title {
   color: #e8eef5;
   text-decoration: none;
 }
-header a.title:hover { color: #00ffff; }
 header #back-btn {
   background: transparent;
   color: #c0cad6;
@@ -88,16 +87,6 @@ header #role-switcher .role-btn.empty {
   cursor: not-allowed;
 }
 header #role-switcher .role-btn.empty:hover { border-color: #2a3340; color: #4a5868; }
-header .spacer { flex: 1; }
-header #status { color: #9aa5b1; }
-header #cursor-coords { color: #9aa5b1; font-family: ui-monospace, monospace; }
-header #handle-info {
-  color: #00ffff;
-  font-family: ui-monospace, monospace;
-  min-width: 12ch;
-  text-align: right;
-}
-header #handle-info.empty { color: #4a5868; }
 
 header button {
   background: transparent;
@@ -115,11 +104,47 @@ header button.active {
   color: #00ffff;
 }
 
-header #mode-hint {
+/* Canvas-bottom status bar — holds the four live readouts (status, mode
+   hint, hovered handle, cursor coords). Floats over the bottom edge of
+   the canvas; pointer-events fall through so clicks still pick geometry
+   under the bar. */
+#canvas-statusbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.2rem 0.8rem;
+  font-size: 0.78rem;
+  background: rgba(15, 19, 24, 0.72);
+  backdrop-filter: blur(2px);
+  border-top: 1px solid #2a3340;
+  z-index: 1;
+  pointer-events: none;
+}
+#canvas-statusbar .spacer { flex: 1; }
+#canvas-statusbar #status { color: #9aa5b1; pointer-events: auto; }
+#canvas-statusbar #cursor-coords {
+  color: #9aa5b1;
+  font-family: ui-monospace, monospace;
+  pointer-events: auto;
+}
+#canvas-statusbar #handle-info {
+  color: #00ffff;
+  font-family: ui-monospace, monospace;
+  min-width: 12ch;
+  text-align: right;
+  pointer-events: auto;
+}
+#canvas-statusbar #handle-info.empty { color: #4a5868; }
+#canvas-statusbar #mode-hint {
   color: #ffb84d;
   font-weight: 600;
   font-size: 0.8rem;
   letter-spacing: 0.04em;
+  pointer-events: auto;
 }
 
 /* Popup menu used by the "Sides" toolbar button (right-click). */

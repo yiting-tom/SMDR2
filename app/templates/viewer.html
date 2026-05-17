@@ -7,7 +7,6 @@
 </head>
 <body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}">
   <header>
-    <a class="title" href="/" title="Back to dashboard">SMDR2</a>
     <a id="back-btn" href="/" title="Back to product dashboard">← Products</a>
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
     <span id="product-context"></span>
@@ -28,11 +27,6 @@
     <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Visibility</button>
     <button id="layers-btn" type="button" title="Pick which DXF layers feed render / match / rule-check">Layers</button>
     <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">Rules</button>
-    <span id="status">loading…</span>
-    <span class="spacer"></span>
-    <span id="mode-hint" class="hint"></span>
-    <span id="handle-info">Handle —</span>
-    <span id="cursor-coords">—</span>
   </header>
   <nav id="class-toolbar" aria-label="Object classes"></nav>
   <main>
@@ -59,6 +53,13 @@
       </header>
       <div id="rule-sidebar-body"></div>
     </aside>
+    <footer id="canvas-statusbar">
+      <span id="status">loading…</span>
+      <span class="spacer"></span>
+      <span id="mode-hint" class="hint"></span>
+      <span id="handle-info">Handle —</span>
+      <span id="cursor-coords">—</span>
+    </footer>
   </main>
 
   <div id="library-modal" class="modal" hidden>
