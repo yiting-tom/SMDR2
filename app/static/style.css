@@ -223,6 +223,33 @@ nav#class-toolbar .class-btn-more:hover {
   border-color: #3a4658;
   filter: none;
 }
+/* Mode-toggle buttons (Chain, Sides) at the head of the toolbar row.
+   Neutral grey so they read as a different group from the colored
+   object-class buttons that follow. */
+nav#class-toolbar .tool-btn {
+  background: transparent;
+  color: #e8eef5;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.18rem 0.55rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+nav#class-toolbar .tool-btn:hover { border-color: #4a6080; }
+nav#class-toolbar .tool-btn.active {
+  background: #003e4d;
+  border-color: #00ffff;
+  color: #00ffff;
+}
+nav#class-toolbar .toolbar-sep {
+  display: inline-block;
+  width: 1px;
+  height: 1.2rem;
+  background: #2a3340;
+  margin: 0 0.25rem;
+}
 
 main { flex: 1; position: relative; overflow: hidden; }
 

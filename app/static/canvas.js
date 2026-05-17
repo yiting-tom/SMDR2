@@ -23,7 +23,6 @@ import {
   resolveSnap as _resolveSnapCore,
   applyOrtho as _applyOrthoCore,
 } from "./measure_core.js";
-import { openLayerModal } from "./layer_modal.js";
 
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
@@ -36,7 +35,6 @@ const $libraryBtn = document.getElementById("library-btn");
 const $libraryModal = document.getElementById("library-modal");
 const $libraryBody = document.getElementById("library-body");
 const $librarySummary = document.getElementById("library-summary");
-const $layersBtn = document.getElementById("layers-btn");
 const $visibilityBtn = document.getElementById("visibility-btn");
 const $visibilityPanel = document.getElementById("visibility-panel");
 const $visibilityList = document.getElementById("visibility-list");
@@ -1848,7 +1846,9 @@ function setToolbarExpanded(v) {
 }
 
 function renderClassToolbar() {
-  $classToolbar.innerHTML = "";
+  // Remove only the dynamically-rendered class buttons; static
+  // mode-toggle prefix (Chain, Sides, separator) stays put.
+  $classToolbar.querySelectorAll(".class-btn").forEach(n => n.remove());
   const expanded = isToolbarExpanded()
     || (addModeClass && COLLAPSED_TOOLBAR_CLASSES.has(addModeClass));
   let hasCollapsed = false;
@@ -2051,44 +2051,6 @@ async function saveMatchJson() {
   }
 }
 $saveMatchBtn.addEventListener("click", saveMatchJson);
-
-// ---- Layers modal -------------------------------------------------------
-// Opens the shared layer-selection modal. If the file has no manifest yet
-// (legacy, pre-feature), `triggerDiscovery` re-runs Phase 1 first. On
-// confirm we poll the file's status until it returns to ready_to_match,
-// then reload so the canvas re-fetches the newly-filtered primitives.
-async function openLayersModal() {
-  const hasManifest = await (async () => {
-    const probe = await fetch(`/api/files/${FILE_ID}/layers`);
-    return probe.ok;
-  })();
-  const fileName = document.body.dataset.fileName || "";
-  const result = await openLayerModal({
-    fileId: FILE_ID,
-    fileName,
-    triggerDiscovery: !hasManifest,
-    onConfirm: async () => {
-      if ($status) $status.textContent = "re-preprocessing with new layer set…";
-    },
-  });
-  if (!result.confirmed) return;
-  // Wait for Phase 2 to complete, then reload the page so the canvas
-  // re-fetches primitives, prematch, etc.
-  for (let i = 0; i < 200; i++) {
-    const r = await fetch(API.fileInfo());
-    if (r.ok) {
-      const f = await r.json();
-      if (f.status === "ready_to_match") break;
-      if (f.status === "error") {
-        if ($status) $status.textContent = `error: ${f.error || "preprocess failed"}`;
-        return;
-      }
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  location.reload();
-}
-$layersBtn.addEventListener("click", openLayersModal);
 
 // ---- Library modal ------------------------------------------------------
 $libraryBtn.addEventListener("click", openLibrary);
