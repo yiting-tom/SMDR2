@@ -520,6 +520,28 @@ function worldToScreen(x, y) {
   ];
 }
 
+// Emit one device-pixel `Path2D` rect per (x, y) world position, keyed by
+// color. Steps out of the world transform so dots are crisp 1×1 fills
+// regardless of zoom / DPR. Reused by the main pass + every highlight
+// pass that needs sub-pixel-circle LOD batching.
+function flushDotBuckets(dotBuckets) {
+  if (!dotBuckets.size) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
+  for (const [color, xs] of dotBuckets) {
+    const path = new Path2D();
+    for (let k = 0; k < xs.length; k += 2) {
+      const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
+      const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
+      path.rect(sx | 0, sy | 0, 1, 1);
+    }
+    ctx.fillStyle = color;
+    ctx.fill(path);
+  }
+  ctx.restore();
+}
+
 function render() {
   const t0 = performance.now();
   ctx.fillStyle = background;
@@ -566,22 +588,7 @@ function render() {
   // step out of the world transform into device-pixel space so each dot is
   // a crisp 1×1 fill regardless of zoom / DPR — and one fill per color is
   // far cheaper than N separate fillRects for the same N.
-  if (dotBuckets.size) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
-    for (const [color, xs] of dotBuckets) {
-      const path = new Path2D();
-      for (let k = 0; k < xs.length; k += 2) {
-        const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
-        const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
-        path.rect(sx | 0, sy | 0, 1, 1);
-      }
-      ctx.fillStyle = color;
-      ctx.fill(path);
-    }
-    ctx.restore();
-  }
+  flushDotBuckets(dotBuckets);
 
   // Persistent side-region overlay — drawn beneath highlights so it never
   // hides selection / match / scan-all feedback.
@@ -589,6 +596,7 @@ function render() {
 
   if (scanAllByHandle) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
@@ -597,41 +605,72 @@ function render() {
       if (!cls) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle) || nearMissSet.has(p.handle)) continue;
       const col = classColor(cls);
+      if (p.type === "circle" && p.r < dotR) {
+        let bucket = buckets.get(col);
+        if (!bucket) { bucket = []; buckets.set(col, bucket); }
+        bucket.push(p.center[0], p.center[1]);
+        continue;
+      }
       drawPrimitive(p, { stroke: col, fill: col, lineWidth: hw });
     }
+    flushDotBuckets(buckets);
   }
   if (nearMissSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (nearMissSet.has(p.handle) && !matchSet.has(p.handle) && !selection.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(NEARMISS_COLOR);
+          if (!bucket) { bucket = []; buckets.set(NEARMISS_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: NEARMISS_COLOR, fill: NEARMISS_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   if (selection.size || matchSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(HIGHLIGHT_COLOR);
+          if (!bucket) { bucket = []; buckets.set(HIGHLIGHT_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: HIGHLIGHT_COLOR, fill: HIGHLIGHT_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   if (hoverSet.size || pinnedSet.size) {
     const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1);
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (hoverSet.has(p.handle) || pinnedSet.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(HOVER_COLOR);
+          if (!bucket) { bucket = []; buckets.set(HOVER_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: HOVER_COLOR, fill: HOVER_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   // Rule-check focused sub-rule: highlight from + to and draw an annotation
   // line between their centroids.
