@@ -208,16 +208,30 @@ let connectivityGraph = null;   // lazy: Array<Set<number>>  parallel to primiti
 // Measure-distance tool (AutoCAD `DIST`-style, with continuous chaining).
 // Mutually exclusive with addMode.
 //
-// measureState.picks      = list of world [x,y] anchor points; each click
-//                           appends one. picks.length >= 1 means a rubber-band
-//                           is live from picks[last] to the cursor. Frozen
-//                           segments are the pairs picks[i], picks[i+1].
-// measureState.snapHint   = last resolveSnap() result for marker rendering
-// measureState.lastCursor = world [x,y] from the most recent mousemove — kept
-//                           so a Shift key press can re-resolve ortho without
-//                           requiring mouse motion
+// measureState.picks           = the active chain's world [x,y] anchors;
+//                                 each left-click appends one; picks.length
+//                                 >= 1 means a rubber-band is live from
+//                                 picks[last] to the cursor. Frozen segments
+//                                 within the active chain are the pairs
+//                                 picks[i], picks[i+1].
+// measureState.chains          = committed chains (each one a picks-shaped
+//                                 array with >= 2 picks). Enter pushes the
+//                                 active chain here and resets picks=[].
+// measureState.snapHint        = last resolveSnap() result for marker rendering
+// measureState.lastCursor      = world [x,y] from the most recent mousemove —
+//                                 kept so a Shift key press or right-click
+//                                 pop can re-resolve without requiring
+//                                 mouse motion
+// measureState.cancelHitboxes  = screen-space CSS-pixel rects of the per-chain
+//                                 ✕ buttons; rebuilt every render
 let measureMode = false;
-let measureState = { picks: [], snapHint: null, lastCursor: null };
+let measureState = {
+  chains: [],
+  picks: [],
+  snapHint: null,
+  lastCursor: null,
+  cancelHitboxes: [],
+};
 
 function measureAnchor() {
   return measureState.picks.length ? measureState.picks[measureState.picks.length - 1] : null;
@@ -921,12 +935,31 @@ function drawPickDot(pt) {
 }
 
 function drawMeasureOverlay() {
-  const { picks, snapHint } = measureState;
-  // Frozen segments between consecutive picks.
+  const { chains, picks, snapHint } = measureState;
+  // Hitboxes are derived state — rebuild every frame so pan / zoom / resize
+  // keep the click target glued to the visible ✕ glyph.
+  measureState.cancelHitboxes = [];
+
+  // Committed chains: solid segments + endpoint dots + per-segment labels +
+  // one ✕ cancel affordance per chain (anchored to the first segment).
+  for (let ci = 0; ci < chains.length; ci++) {
+    const c = chains[ci];
+    for (let i = 1; i < c.length; i++) {
+      drawMeasureSegment(c[i - 1], c[i], false);
+    }
+    for (const p of c) drawPickDot(p);
+    for (let i = 1; i < c.length; i++) {
+      const a = c[i - 1], b = c[i];
+      drawSegmentLabel(a, b, fmtCoord(Math.hypot(b[0] - a[0], b[1] - a[1])));
+    }
+    if (c.length >= 2) drawCancelButton(c[0], c[1], ci);
+  }
+
+  // Active chain: frozen segments between consecutive picks.
   for (let i = 1; i < picks.length; i++) {
     drawMeasureSegment(picks[i - 1], picks[i], false);
   }
-  // Endpoint dots on every pick.
+  // Endpoint dots on every active pick.
   for (const p of picks) drawPickDot(p);
   // Live rubber-band from the last pick to the snap-resolved cursor.
   const anchor = measureAnchor();
@@ -935,8 +968,9 @@ function drawMeasureOverlay() {
   }
   if (snapHint) drawSnapMarker(snapHint);
 
-  // Midpoint label per segment. Frozen segments show their distance; the
-  // live segment additionally appends Σ once the chain has ≥ 2 picks.
+  // Midpoint label per active-chain segment. Frozen segments show their
+  // distance; the live segment additionally appends Σ once the chain has
+  // ≥ 2 picks.
   let frozenTotal = 0;
   for (let i = 1; i < picks.length; i++) {
     const a = picks[i - 1], b = picks[i];
@@ -955,6 +989,62 @@ function drawMeasureOverlay() {
   }
 
   updateMeasureReadout();
+}
+
+// Draw a 14×14 CSS-px ✕ button next to the midpoint-offset label of
+// segment a..b, then push its CSS-pixel hitbox onto cancelHitboxes so
+// mousedown can route the click to chain removal. Position math mirrors
+// drawSegmentLabel so the ✕ tracks the label across pan/zoom.
+function drawCancelButton(a, b, chainIndex) {
+  const [sax, say] = worldToScreen(a[0], a[1]);
+  const [sbx, sby] = worldToScreen(b[0], b[1]);
+  const sdx = sbx - sax, sdy = sby - say;
+  const slen = Math.hypot(sdx, sdy);
+  if (slen < 2) return;
+  const mx = (sax + sbx) / 2;
+  const my = (say + sby) / 2;
+  const px = -sdy / slen, py = sdx / slen;
+  const offset = 10 * dpr;
+  const lcx = mx + px * offset;
+  const lcy = my + py * offset;
+
+  // Recompute the label box so we can park the ✕ flush to its right edge.
+  // drawSegmentLabel uses the same font/padding — keep them in sync.
+  const labelText = fmtCoord(Math.hypot(b[0] - a[0], b[1] - a[1]));
+  ctx.save();
+  ctx.font = `${12 * dpr}px ui-monospace, monospace`;
+  const labelW = ctx.measureText(labelText).width + 12 * dpr;     // text + 2 * padX
+  ctx.restore();
+
+  const btn = 14 * dpr;
+  const gap = 4 * dpr;
+  const bx = lcx + labelW / 2 + gap;          // left edge of the ✕ box
+  const by = lcy - btn / 2;                   // top edge
+
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.82)";
+  ctx.fillRect(bx, by, btn, btn);
+  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeRect(bx, by, btn, btn);
+  // ✕ glyph: two diagonal strokes inset by 25% of the box.
+  const inset = btn * 0.25;
+  ctx.beginPath();
+  ctx.moveTo(bx + inset, by + inset);
+  ctx.lineTo(bx + btn - inset, by + btn - inset);
+  ctx.moveTo(bx + btn - inset, by + inset);
+  ctx.lineTo(bx + inset, by + btn - inset);
+  ctx.stroke();
+  ctx.restore();
+
+  // Hitbox in CSS pixels (screen coords above are in device pixels).
+  measureState.cancelHitboxes.push({
+    cssLeft:   bx / dpr,
+    cssTop:    by / dpr,
+    cssRight:  (bx + btn) / dpr,
+    cssBottom: (by + btn) / dpr,
+    chainIndex,
+  });
 }
 
 function fmtCoord(n) {
@@ -1519,9 +1609,17 @@ function updateStatus() {
     $modeHint.textContent = `MARK ${markMode} · drag a rectangle (Esc to cancel)`;
   } else if (measureMode) {
     const n = measureState.picks.length;
-    $modeHint.textContent = n === 0
-      ? "MEASURE · pick first point"
-      : `MEASURE · pick next point · ${n} pt${n === 1 ? "" : "s"} (Shift = ortho, Esc to clear)`;
+    const m = measureState.chains.length;
+    const clearLabel = m ? "Esc to clear all" : "Esc to clear";
+    if (n === 0 && m === 0) {
+      $modeHint.textContent = "MEASURE · pick first point";
+    } else if (n === 0) {
+      $modeHint.textContent =
+        `MEASURE · pick first point · ${m} chain${m === 1 ? "" : "s"} saved (${clearLabel})`;
+    } else {
+      $modeHint.textContent =
+        `MEASURE · pick next point · ${n} pt${n === 1 ? "" : "s"} (Shift = ortho, ${clearLabel})`;
+    }
   } else if (addModeClass) {
     if (matchesStaged) {
       $modeHint.textContent = `ADD ${addModeClass} · press Enter to commit, Esc to cancel`;
@@ -1558,6 +1656,20 @@ $canvas.addEventListener("mousedown", (e) => {
       return;
     }
     if (measureMode) {
+      // Per-chain ✕ cancel hitbox wins over the pick-append flow. Hitboxes
+      // are in CSS pixels — convert clientX/Y to canvas-local CSS pixels.
+      const rect = $canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      for (const h of measureState.cancelHitboxes) {
+        if (cssX >= h.cssLeft && cssX <= h.cssRight &&
+            cssY >= h.cssTop  && cssY <= h.cssBottom) {
+          measureState.chains.splice(h.chainIndex, 1);
+          updateStatus();
+          render();
+          return;
+        }
+      }
       // Measure click: snap, then append to picks[]. Each click extends the
       // chain — picks[i],picks[i+1] are frozen segments, picks[last] anchors
       // the live rubber-band to the cursor.
@@ -2172,13 +2284,16 @@ window.addEventListener("keydown", (e) => {
   // Ignore when typing in an input (none right now, but defensive).
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-  // Esc cascade: cancel active box drag → clear active measurement (stay in
-  // measure mode) → cancel mark-mode drag / exit mark mode → clear scan-all
-  // overlay → exit add-mode → clear selection.
+  // Esc cascade: cancel active box drag → clear every measurement (active
+  // chain + every committed chain; stay in measure mode) → cancel mark-mode
+  // drag / exit mark mode → clear scan-all overlay → exit add-mode → clear
+  // selection.
   if (e.key === "Escape") {
     if (drag && drag.kind === "box") { drag = null; render(); return; }
-    if (measureMode && measureState.picks.length) {
+    if (measureMode && (measureState.picks.length || measureState.chains.length)) {
+      measureState.chains = [];
       measureState.picks = [];
+      measureState.snapHint = null;
       if ($measureReadout) $measureReadout.hidden = true;
       updateStatus();
       render();
@@ -2241,6 +2356,23 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  // Enter inside measure mode = commit the active chain into chains[] and
+  // start a fresh active chain. Chains with < 2 picks have no segment to
+  // display, so we reset without committing. addMode and measureMode are
+  // mutually exclusive, so this branch sits before the addMode Enter below.
+  if (e.key === "Enter" && measureMode) {
+    if (measureState.picks.length >= 2) {
+      measureState.chains.push(measureState.picks);
+    }
+    measureState.picks = [];
+    measureState.snapHint = null;
+    if ($measureReadout) $measureReadout.hidden = true;
+    updateStatus();
+    render();
+    e.preventDefault();
+    return;
+  }
+
   // Enter = commit staged template.
   if (e.key === "Enter") {
     if (addModeClass && matchesStaged) {
@@ -2272,7 +2404,13 @@ function enterMeasureMode() {
 
 function exitMeasureMode() {
   measureMode = false;
-  measureState = { picks: [], snapHint: null, lastCursor: null };
+  measureState = {
+    chains: [],
+    picks: [],
+    snapHint: null,
+    lastCursor: null,
+    cancelHitboxes: [],
+  };
   if ($measureBtn) $measureBtn.classList.remove("active");
   if ($measureReadout) $measureReadout.hidden = true;
   updateStatus();
@@ -2303,6 +2441,26 @@ window.addEventListener("keyup", (e) => {
   if (e.key === "Shift" && measureMode && measureAnchor()) {
     reresolveMeasureSnap(false);
   }
+});
+
+// Right-click in measure mode pops the active chain's last pick (AutoCAD's
+// `U` inside DIST). The context menu is always suppressed while measure mode
+// is on so the user can right-click anywhere without browser surprise.
+$canvas.addEventListener("contextmenu", (e) => {
+  if (!measureMode) return;
+  e.preventDefault();
+  if (measureState.picks.length === 0) return;
+  measureState.picks.pop();
+  // Re-resolve so the rubber-band and snap marker visually catch up to the
+  // new anchor without requiring a mousemove.
+  if (measureState.lastCursor) {
+    const [wx, wy] = measureState.lastCursor;
+    measureState.snapHint = applyOrtho(wx, wy, e.shiftKey) ?? resolveSnap(wx, wy);
+  } else {
+    measureState.snapHint = null;
+  }
+  updateStatus();
+  render();
 });
 
 // ---- mark side regions tool ---------------------------------------------
