@@ -88,6 +88,61 @@ header #role-switcher .role-btn.empty {
 }
 header #role-switcher .role-btn.empty:hover { border-color: #2a3340; color: #4a5868; }
 
+header #role-switcher .role-btn-wrap {
+  position: relative;
+  display: inline-block;
+}
+header #role-switcher .role-btn--multi {
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  font-size: 0.74rem;
+  background: transparent;
+  cursor: pointer;
+}
+header #role-switcher .role-btn--multi[aria-expanded="true"] {
+  border-color: #00ffff;
+  color: #00ffff;
+}
+header #role-switcher .role-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  margin: 0;
+  padding: 0.18rem 0;
+  list-style: none;
+  background: #14181f;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  min-width: 100%;
+  z-index: 100;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+header #role-switcher .role-menu[hidden] { display: none; }
+header #role-switcher .role-menu__item {
+  display: block;
+  padding: 0.18rem 0.65rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: #c0cad6;
+  text-decoration: none;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+header #role-switcher .role-menu__item:hover {
+  background: #1a2230;
+  color: #00ffff;
+}
+header #role-switcher .role-menu__item--current {
+  color: #00ffff;
+  background: #003e4d;
+  cursor: default;
+}
+header #role-switcher .role-menu__item--current:hover {
+  background: #003e4d;
+  color: #00ffff;
+}
+
 header button {
   background: transparent;
   color: #e8eef5;

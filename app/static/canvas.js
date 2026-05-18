@@ -126,29 +126,133 @@ async function loadFileInfo() {
     if (pRes.ok) {
       const p = await pRes.json();
       $productContext.textContent = `${p.name} / ${file.dxf_role}`;
-      $roleSwitcher.innerHTML = "";
-      for (const role of ["SBT", "BD", "POD", "RING"]) {
-        const sibling = p.files_by_role[role];
-        const btn = document.createElement("a");
-        btn.className = "role-btn";
-        btn.dataset.role = role;
-        btn.textContent = role;
-        if (role === file.dxf_role) {
-          btn.classList.add("current");
-        } else if (sibling) {
-          btn.href = `/viewer/${sibling.id}`;
-        } else {
-          btn.classList.add("empty");
-          btn.title = `${role} not uploaded yet`;
-        }
-        $roleSwitcher.appendChild(btn);
-      }
+      renderRoleSwitcher(p, file);
     }
   } else {
     $productContext.textContent = "";
+    closeRoleMenu();
     $roleSwitcher.innerHTML = "";
   }
 }
+
+// ---- Role switcher with per-role sibling-DXF dropdown -------------------
+// Surfaces every DXF a product has under each role (`files_by_role_all`)
+// so the engineer can flip between siblings (e.g., a BD's top + bottom
+// DXFs) without dropping back to the dashboard. Roles with 0 or 1 file
+// render as before; ≥ 2 → dropdown.
+let openRoleMenu = null;  // currently-open <ul.role-menu>, or null
+
+function closeRoleMenu() {
+  if (!openRoleMenu) return;
+  openRoleMenu.hidden = true;
+  const trigger = openRoleMenu.previousElementSibling;
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+  openRoleMenu = null;
+}
+
+function renderRoleSwitcher(product, file) {
+  closeRoleMenu();
+  $roleSwitcher.innerHTML = "";
+  for (const role of ["SBT", "BD", "POD", "RING"]) {
+    const siblings = product.files_by_role_all?.[role] ?? [];
+    const isCurrentRole = role === file.dxf_role;
+    if (siblings.length === 0) {
+      const btn = document.createElement("a");
+      btn.className = "role-btn empty";
+      btn.dataset.role = role;
+      btn.textContent = role;
+      btn.title = `${role} not uploaded yet`;
+      $roleSwitcher.appendChild(btn);
+    } else if (siblings.length === 1) {
+      const sibling = siblings[0];
+      const btn = document.createElement("a");
+      btn.className = "role-btn";
+      btn.dataset.role = role;
+      btn.textContent = role;
+      if (sibling.id === file.id) {
+        btn.classList.add("current");
+      } else {
+        btn.href = `/viewer/${sibling.id}`;
+      }
+      $roleSwitcher.appendChild(btn);
+    } else {
+      $roleSwitcher.appendChild(buildRoleDropdown(role, siblings, isCurrentRole, file.id));
+    }
+  }
+}
+
+function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
+  const wrap = document.createElement("span");
+  wrap.className = "role-btn-wrap";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "role-btn role-btn--multi";
+  if (isCurrentRole) trigger.classList.add("current");
+  trigger.dataset.role = role;
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.textContent = `${role} ×${siblings.length} ▾`;
+
+  const menu = document.createElement("ul");
+  menu.className = "role-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+
+  for (const sib of siblings) {
+    const li = document.createElement("li");
+    li.setAttribute("role", "none");
+    const label = sib.name ?? sib.dxf_view ?? sib.id;
+    let item;
+    if (sib.id === currentFileId) {
+      item = document.createElement("span");
+      item.className = "role-menu__item role-menu__item--current";
+    } else {
+      item = document.createElement("a");
+      item.className = "role-menu__item";
+      item.href = `/viewer/${sib.id}`;
+    }
+    item.setAttribute("role", "menuitem");
+    item.textContent = label;
+    li.appendChild(item);
+    menu.appendChild(li);
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = openRoleMenu === menu;
+    closeRoleMenu();
+    if (!wasOpen) {
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      openRoleMenu = menu;
+    }
+  });
+
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+  return wrap;
+}
+
+// Outside-click closes the open role-menu (skipped when the click is on
+// the trigger itself — the trigger's own handler will toggle correctly).
+document.addEventListener("mousedown", (e) => {
+  if (!openRoleMenu) return;
+  const wrap = openRoleMenu.parentElement;
+  if (wrap && wrap.contains(e.target)) return;
+  closeRoleMenu();
+});
+
+// Esc closes the open role-menu. Early-return when no menu is open so we
+// never intercept the viewer's other Esc handlers (mark-mode cancel,
+// measure-tool cancel, library modal, etc.).
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !openRoleMenu) return;
+  const trigger = openRoleMenu.previousElementSibling;
+  closeRoleMenu();
+  if (trigger) trigger.focus();
+  e.stopPropagation();
+}, true);
 
 $librarySwitcher.addEventListener("change", async () => {
   const newLibId = $librarySwitcher.value;
