@@ -228,8 +228,31 @@ class JSONBackend(BackendInterface):
         properties: BackendProperties,
     ) -> None:
         common = _props(properties)
+        paths_list = list(paths)
+        # Fast path: a single closed-curved sub-path that detects as a circle
+        # (e.g., HATCH bounded by a CIRCLE) collapses to a `circle` primitive
+        # so the canvas renderer can use ctx.arc + sub-pixel dot batching
+        # instead of filling an N-vertex polygon. Same `has_curves` gate as
+        # draw_path so a filled N-gon SMD pad keeps its corners.
+        if len(paths_list) == 1:
+            subs = list(paths_list[0].sub_paths())
+            if len(subs) == 1:
+                sub = subs[0]
+                if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
+                    pts = _flatten_path(sub, self.flatten_tolerance)
+                    if len(pts) >= 3:
+                        circle = _detect_circle_subpath(pts)
+                        if circle is not None:
+                            cx, cy = circle["center"]
+                            r = circle["r"]
+                            self._track_point(cx - r, cy - r)
+                            self._track_point(cx + r, cy + r)
+                            self._append(
+                                {"type": "circle", "filled": True, **circle, **common}
+                            )
+                            return
         rings: list[list[list[float]]] = []
-        for path in paths:
+        for path in paths_list:
             for sub in path.sub_paths():
                 pts = _flatten_path(sub, self.flatten_tolerance)
                 if len(pts) >= 3:

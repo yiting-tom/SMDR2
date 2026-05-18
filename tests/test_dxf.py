@@ -73,6 +73,43 @@ def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
         assert abs(r - 0.5) / 0.5 < 0.01
 
 
+def test_hatch_bounded_by_circle_emits_filled_circle(tmp_path):
+    """A HATCH whose only boundary is a circular edge must collapse to a
+    single `{type:"circle", filled:true}` primitive — not a many-vertex
+    filled_polygon. This is what lets the canvas dot-batch fast-render path
+    apply to filled balls / pads instead of stroking N tiny line segments
+    per circle."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    hatch = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    edge_path = hatch.paths.add_edge_path()
+    edge_path.add_arc(center=(2.0, -1.0), radius=0.3, start_angle=0, end_angle=360, ccw=True)
+
+    dxf_path = tmp_path / "filled_circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == hatch.dxf.handle]
+    assert prims_for_handle, "expected at least one primitive for the HATCH"
+    # Exactly one circle primitive, no fallback filled_polygon for the same
+    # handle. `filled:true` is what tells the canvas case "circle" to fill
+    # rather than stroke.
+    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
+    filled_polys = [p for p in prims_for_handle if p["type"] == "filled_polygon"]
+    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
+    assert not filled_polys, "filled circle must not fall back to filled_polygon"
+    cp = circle_prims[0]
+    assert cp.get("filled") is True
+    cx, cy = cp["center"]
+    assert abs(cx - 2.0) < 1e-3 and abs(cy - (-1.0)) < 1e-3
+    assert abs(cp["r"] - 0.3) / 0.3 < 0.01  # within 1 %
+    # HATCH is decorative; the collapsed circle must inherit that flag so
+    # the matcher continues to ignore it.
+    assert cp.get("decorative") is True
+
+
 def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     """An 8-vertex closed POLYLINE that is NOT a circular approximation must
     remain a polyline — guards against the circle detector eating real

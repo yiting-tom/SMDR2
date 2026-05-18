@@ -528,7 +528,12 @@ function drawPrimitive(p, opts) {
     case "circle":
       ctx.beginPath();
       ctx.arc(p.center[0], p.center[1], p.r, 0, Math.PI * 2);
-      ctx.strokeStyle = stroke ?? p.color; ctx.lineWidth = lineWidth; ctx.stroke();
+      if (p.filled) {
+        ctx.fillStyle = fill ?? p.color; ctx.fill();
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke(); }
+      } else {
+        ctx.strokeStyle = stroke ?? p.color; ctx.lineWidth = lineWidth; ctx.stroke();
+      }
       break;
   }
 }
