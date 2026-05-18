@@ -34,6 +34,8 @@ SCALE_MAX = 1.05
 TOLERANCE_ABS = 0.05            # ε for chamfer (world units / mm)
 VERTEX_COUNT_RATIO = 0.25       # candidate must be within ±25% vertex count
 PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
+RADIUS_RATIO = 0.20             # ±20% max-radius-from-centroid (rotation-invariant)
+SIGMA_RATIO_TOL = 0.15          # absolute Δ on σ₂/σ₁ ∈ [0,1] — principal-axis aspect
 # Decimal digits kept when bucketing CIRCLE radii for the exact-radius fast
 # path. 10⁻⁶ corresponds to 1 nm precision in mm-unit DXFs — six orders of
 # magnitude finer than any meaningful BGA / SMD design tolerance, yet loose
@@ -73,6 +75,12 @@ class EntityShape:
     path_length: float
     vertex_count: int
     kind: str | None = None       # source primitive type when uniform, else None
+    # Singular values of the centered cloud's covariance, σ₁ ≥ σ₂ ≥ 0.
+    # Rotation-/mirror-/translation-invariant; together they encode the
+    # principal-axis aspect ratio (σ₂/σ₁) used by `signatures_compatible`.
+    # Both are 0 for degenerate clouds (< 2 vertices or coincident points).
+    pca_sigma1: float = 0.0
+    pca_sigma2: float = 0.0
 
     @classmethod
     def from_points(
@@ -84,7 +92,7 @@ class EntityShape:
     ) -> "EntityShape":
         arr = np.asarray(points, dtype=np.float64)
         if arr.shape[0] == 0:
-            return cls(handle, arr, np.zeros(2), 0.0, 0.0, 0, kind)
+            return cls(handle, arr, np.zeros(2), 0.0, 0.0, 0, kind, 0.0, 0.0)
         # Compute path length on the raw sequence (includes the closing
         # segment for closed polylines) BEFORE dedup.
         path_length = (
@@ -99,7 +107,9 @@ class EntityShape:
         centroid = arr.mean(axis=0)
         d = arr - centroid
         radius = float(np.linalg.norm(d, axis=1).max())
-        return cls(handle, arr, centroid, radius, path_length, arr.shape[0], kind)
+        s1, s2 = _pca_singular_values(d)
+        return cls(handle, arr, centroid, radius, path_length, arr.shape[0],
+                   kind, s1, s2)
 
 
 @dataclass
@@ -147,6 +157,31 @@ def build_entity_shapes(
 
 
 # ---- PCA / alignment ------------------------------------------------------
+def _pca_singular_values(centered: np.ndarray) -> tuple[float, float]:
+    """Return (σ₁, σ₂) — sorted descending — for a centered 2D point cloud.
+
+    Both values are 0 for degenerate inputs (< 2 rows or zero covariance).
+    Kept independent of `_pca_axes` so `EntityShape.from_points` doesn't pay
+    for the eigenvector copy when only the σ values are needed.
+    """
+    if centered.shape[0] < 2:
+        return 0.0, 0.0
+    cov = centered.T @ centered
+    w = np.linalg.eigvalsh(cov)
+    w = np.clip(w, 0.0, None)
+    s = np.sqrt(w)
+    s_sorted = np.sort(s)[::-1]
+    return float(s_sorted[0]), float(s_sorted[1])
+
+
+def _sigma_ratio(shape: "EntityShape") -> float:
+    """σ₂/σ₁ ∈ [0, 1] — 0 for thin lines, 1 for isotropic clouds. Falls back
+    to 0 when σ₁ == 0 (degenerate)."""
+    if shape.pca_sigma1 <= 0.0:
+        return 0.0
+    return shape.pca_sigma2 / shape.pca_sigma1
+
+
 def _pca_axes(centered: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return (axes, singular_values) — axes is 2x2 rows = principal directions.
 
@@ -329,10 +364,22 @@ def signatures_compatible(a: EntityShape, b: EntityShape) -> bool:
     # clouds.
     if a.vertex_count < 2 or b.vertex_count < 2:
         return False
+    # Path length — cheapest scalar, runs first.
     if a.path_length > 0 and b.path_length > 0:
         pl_ratio = a.path_length / b.path_length
         if pl_ratio < (1 - PATH_LENGTH_RATIO) or pl_ratio > (1 + PATH_LENGTH_RATIO):
             return False
+    # Max-distance-from-centroid (rotation-invariant linear bound).
+    if a.radius > 0 and b.radius > 0:
+        r_ratio = a.radius / b.radius
+        if r_ratio < (1 - RADIUS_RATIO) or r_ratio > (1 + RADIUS_RATIO):
+            return False
+    # Principal-axis aspect ratio σ₂/σ₁ — rotation-/mirror-/scale-invariant.
+    # Discriminates rect-vs-square at equal perimeter (σ-ratio ≈0.5 vs ≈1.0)
+    # and thin-line-vs-blob (≈0 vs ≈1) without rejecting any allowed
+    # rotation/mirror/scale.
+    if abs(_sigma_ratio(a) - _sigma_ratio(b)) > SIGMA_RATIO_TOL:
+        return False
     return True
 
 

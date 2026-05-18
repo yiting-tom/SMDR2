@@ -198,15 +198,16 @@ def test_find_matches_density_invariant_under_mirror():
 def test_find_matches_same_perimeter_different_shape_rejected():
     # Path length matches the rectangle's (perimeter 6) but the shape is
     # genuinely different — a 1.5×1.5 square. Density-invariant resampling
-    # must NOT collapse these into the same match.
+    # must NOT collapse these into the same match, AND the rejection must
+    # happen at the signature stage so no chamfer is computed.
     rect_perimeter_6 = [(0, 0), (2, 0), (2, 1), (0, 1), (0, 0)]
     square_15 = [(0, 0), (1.5, 0), (1.5, 1.5), (0, 1.5), (0, 0)]
-    drawing = {
-        "rect":   shape("rect", rect_perimeter_6),
-        "square": shape("square", translate(square_15, 10, 0)),
-    }
-    out = find_matches(["rect"], drawing)
-    assert not out.matches  # different shape, no match
+    rect = shape("rect", rect_perimeter_6)
+    square = shape("square", translate(square_15, 10, 0))
+    # Signature gate must reject; chamfer never runs.
+    assert not signatures_compatible(rect, square)
+    out = find_matches(["rect"], {"rect": rect, "square": square})
+    assert not out.matches
 
 
 def test_find_matches_line_segment_still_works():
@@ -289,3 +290,61 @@ def test_n_jobs_does_not_change_result(test_dxf_path):
     shutdown_pool()
 
     assert {m.handles[0] for m in serial.matches} == {m.handles[0] for m in parallel.matches}
+
+
+# ---- signature pre-filter: rotation-invariant gates ----------------------
+def test_signature_rejects_same_perimeter_rect_vs_square():
+    # 2×1 rectangle (perimeter 6) vs 1.5×1.5 square (perimeter 6).
+    # Path-length gate passes; the σ-ratio gate rejects (~0.5 vs ~1.0).
+    rect = shape("rect", [(0, 0), (2, 0), (2, 1), (0, 1), (0, 0)])
+    square = shape("square", translate(
+        [(0, 0), (1.5, 0), (1.5, 1.5), (0, 1.5), (0, 0)], 10, 0))
+    assert not signatures_compatible(rect, square)
+
+
+def test_signature_rejects_thin_line_vs_thick_blob_same_perimeter():
+    # Long thin line (σ-ratio ≈ 0) vs near-square polyline of comparable
+    # path length (σ-ratio ≈ 1). σ-ratio gate must reject.
+    thin_line = shape("line", [(0, 0), (3, 0)])  # path length 3
+    # Square with perimeter 3 (side 0.75), σ-ratio ≈ 1.
+    blob = shape("blob", translate(
+        [(0, 0), (0.75, 0), (0.75, 0.75), (0, 0.75), (0, 0)], 50, 50))
+    assert not signatures_compatible(thin_line, blob)
+
+
+def test_signature_tolerates_sigma_ratio_within_threshold():
+    # Two rectangles with slightly different aspect ratios — σ-ratios
+    # differ by less than SIGMA_RATIO_TOL (0.15), and radius / path-length
+    # are also within their gates → signature passes.
+    rect_2_1 = shape("a", [(0, 0), (2, 0), (2, 1), (0, 1), (0, 0)])
+    rect_1p9_1p1 = shape("b", translate(
+        [(0, 0), (1.9, 0), (1.9, 1.1), (0, 1.1), (0, 0)], 50, 50))
+    assert signatures_compatible(rect_2_1, rect_1p9_1p1)
+
+
+@pytest.mark.parametrize("angle", [17.0, 45.0, 113.0, 271.0])
+def test_signature_invariant_under_rotation(angle):
+    # The same shape rotated by any angle must produce the same radius
+    # and σ-ratio (within numerical noise), and pass the signature gate.
+    base = shape("base", RECT)
+    rotated = shape("rot", rotate(RECT, angle))
+    assert abs(base.radius - rotated.radius) < 1e-9
+    from app.matching import _sigma_ratio
+    assert abs(_sigma_ratio(base) - _sigma_ratio(rotated)) < 1e-9
+    assert signatures_compatible(base, rotated)
+
+
+def test_pca_singular_values_degenerate_inputs():
+    # < 2 rows → both σ are 0; coincident points → both σ are 0.
+    empty = shape("e", [])
+    assert empty.pca_sigma1 == 0.0 and empty.pca_sigma2 == 0.0
+    single = shape("s", [(1.0, 2.0)])
+    assert single.pca_sigma1 == 0.0 and single.pca_sigma2 == 0.0
+    coincident = shape("c", [(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)])
+    assert coincident.pca_sigma1 == 0.0 and coincident.pca_sigma2 == 0.0
+
+
+def test_pca_singular_values_ordered():
+    # σ₁ ≥ σ₂ always.
+    s = shape("s", RECT)
+    assert s.pca_sigma1 >= s.pca_sigma2 >= 0.0
