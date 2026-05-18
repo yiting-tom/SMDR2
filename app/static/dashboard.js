@@ -178,10 +178,10 @@ function slotCell(product, role) {
   cell.dataset.role = role;
   cell.dataset.productId = product.id;
 
-  const f = product.files_by_role[role];
+  const allFiles = (product.files_by_role_all && product.files_by_role_all[role]) || [];
   cell.innerHTML = `<span class="role-label">${role}</span>`;
 
-  if (!f) {
+  if (!allFiles.length) {
     cell.classList.add("empty");
     cell.innerHTML += `<span class="file-name">+ Drop or click</span>`;
     cell.addEventListener("click", () => pickFile(product.id, role));
@@ -189,6 +189,74 @@ function slotCell(product, role) {
     return cell;
   }
 
+  if (allFiles.length === 1) {
+    // Common case — single-file presentation matches the pre-multi-DXF UI
+    // (file name + status + Open/Layers/Replace) and adds a small
+    // "+ Add file" affordance so the user can grow into multi-file mode
+    // without having to delete-and-re-upload.
+    renderSingleFileSlot(cell, product, role, allFiles[0]);
+    cell.appendChild(buildAddButton(product, role));
+    return cell;
+  }
+
+  // 2+ files — stack them, each with its own compact action row.
+  const filesContainer = document.createElement("div");
+  filesContainer.className = "slot-files";
+  for (const f of allFiles) {
+    filesContainer.appendChild(slotFileRow(product, role, f, /*compact=*/true));
+  }
+  cell.appendChild(filesContainer);
+  cell.appendChild(buildAddButton(product, role));
+  return cell;
+}
+
+function buildAddButton(product, role) {
+  const btn = document.createElement("button");
+  btn.className = "replace-btn slot-add";
+  btn.type = "button";
+  btn.textContent = "+ Add file";
+  btn.title = "Upload another DXF into this role";
+  btn.addEventListener("click", () => pickFile(product.id, role));
+  return btn;
+}
+
+function renderSingleFileSlot(cell, product, role, f) {
+  // Inlined "old" rendering: file-name + status + actions directly on
+  // the cell, no per-row wrapping.
+  const { statusColor, statusLabel, matchBadge } = fileStatusBits(f);
+  cell.innerHTML +=
+    `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
+    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
+  if (f.unit_scale_warning) {
+    const badge = document.createElement("span");
+    badge.className = "warn-badge";
+    badge.textContent = "⚠ unit";
+    badge.title = f.unit_scale_warning_detail || "";
+    cell.querySelector(".slot-status").appendChild(badge);
+  }
+  cell.appendChild(buildFileActions(product, role, f, /*compact=*/false));
+}
+
+function slotFileRow(product, role, f, compact) {
+  const row = document.createElement("div");
+  row.className = "slot-file";
+  row.dataset.fileId = f.id;
+  const { statusColor, statusLabel, matchBadge } = fileStatusBits(f);
+  row.innerHTML =
+    `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
+    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
+  if (f.unit_scale_warning) {
+    const badge = document.createElement("span");
+    badge.className = "warn-badge";
+    badge.textContent = "⚠ unit";
+    badge.title = f.unit_scale_warning_detail || "";
+    row.querySelector(".slot-status").appendChild(badge);
+  }
+  row.appendChild(buildFileActions(product, role, f, compact));
+  return row;
+}
+
+function fileStatusBits(f) {
   const statusColor =
     f.status === "ready_to_match"     ? "#69f0ae" :
     f.status === "preprocessing"      ? "#ffb84d" :
@@ -202,21 +270,10 @@ function slotCell(product, role) {
   const matchBadge = f.match_saved
     ? `<span style="color:#69f0ae;font-size:0.78rem;">✓ matched</span>`
     : `<span style="color:#9aa5b1;font-size:0.78rem;">not matched</span>`;
+  return { statusColor, statusLabel, matchBadge };
+}
 
-  cell.innerHTML +=
-    `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
-    `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
-
-  // Unit-scale warning badge — surfaces files with $INSUNITS=0 or a
-  // suspiciously large bbox so the user notices before opening the viewer.
-  if (f.unit_scale_warning) {
-    const badge = document.createElement("span");
-    badge.className = "warn-badge";
-    badge.textContent = "⚠ unit";
-    badge.title = f.unit_scale_warning_detail || "";
-    cell.querySelector(".slot-status").appendChild(badge);
-  }
-
+function buildFileActions(product, role, f, compact) {
   const actions = document.createElement("div");
   actions.className = "slot-actions";
   if (f.status === "awaiting_layers") {
@@ -229,8 +286,6 @@ function slotCell(product, role) {
   } else if (f.status === "ready_to_match") {
     actions.innerHTML = `<a class="open-link" href="/viewer/${f.id}">Open →</a>`;
   }
-  // "Layers" button available any time the file has a manifest (i.e.
-  // after discovery has run at least once).
   if (f.status !== "discovering_layers" && f.status !== "error") {
     const layersBtn = document.createElement("button");
     layersBtn.className = "replace-btn";
@@ -244,11 +299,21 @@ function slotCell(product, role) {
   replace.className = "replace-btn";
   replace.type = "button";
   replace.textContent = "Replace";
-  replace.addEventListener("click", () => pickFile(product.id, role));
+  replace.title = "Replace this DXF";
+  replace.addEventListener("click", () => pickFile(product.id, role, f.id));
   actions.appendChild(replace);
-  cell.appendChild(actions);
-
-  return cell;
+  // The delete control is only useful when there are siblings to keep;
+  // for the single-file slot, "Replace" already covers the swap path.
+  if (compact) {
+    const del = document.createElement("button");
+    del.className = "replace-btn";
+    del.type = "button";
+    del.textContent = "✕";
+    del.title = "Remove this DXF from the role";
+    del.addEventListener("click", () => deleteProductFile(product, role, f));
+    actions.appendChild(del);
+  }
+  return actions;
 }
 
 function wireDragAndDrop(cell, productId, role) {
@@ -263,31 +328,56 @@ function wireDragAndDrop(cell, productId, role) {
   });
 }
 
-function pickFile(productId, role) {
-  pendingSlot = { productId, role };
+// `replaceFileId` is the id of the file this upload should evict before
+// landing the new one (the "Replace" button path). Omit for additive uploads.
+function pickFile(productId, role, replaceFileId = null) {
+  pendingSlot = { productId, role, replaceFileId };
   $fileInput.click();
 }
 $fileInput.addEventListener("change", () => {
   const f = $fileInput.files?.[0];
   $fileInput.value = "";
   if (f && pendingSlot) {
-    uploadFile(pendingSlot.productId, pendingSlot.role, f);
+    uploadFile(
+      pendingSlot.productId,
+      pendingSlot.role,
+      f,
+      pendingSlot.replaceFileId || null,
+    );
   }
 });
 
-async function uploadFile(productId, role, file) {
+async function uploadFile(productId, role, file, replaceFileId = null) {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("dxf_role", role);
+  if (replaceFileId) fd.append("replace_file_id", replaceFileId);
   $status.textContent = `uploading ${file.name} → ${role}…`;
   const res = await fetch(`/api/products/${productId}/files`, { method: "POST", body: fd });
   if (!res.ok) {
-    $status.textContent = `upload failed: ${res.status}`;
+    let msg = `upload failed: ${res.status}`;
+    try {
+      const body = await res.json();
+      const detail = body?.detail;
+      if (typeof detail === "string") msg = `upload failed: ${detail}`;
+    } catch { /* response wasn't JSON */ }
+    $status.textContent = msg;
     return;
   }
   $status.textContent = `uploaded ${file.name} → ${role}`;
   await refresh();
   startPollingIfBusy();
+}
+
+async function deleteProductFile(product, role, file) {
+  if (!confirm(`Remove "${file.name}" from ${role}?`)) return;
+  const res = await fetch(`/api/products/${product.id}/files/${file.id}`, { method: "DELETE" });
+  if (!res.ok) {
+    $status.textContent = `remove failed: ${res.status}`;
+    return;
+  }
+  $status.textContent = `removed ${file.name} from ${role}`;
+  await refresh();
 }
 
 async function deleteProduct(p) {

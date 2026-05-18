@@ -707,6 +707,27 @@ body.dashboard main.dashboard-main {
 .product-card .slot a.open-link:hover { border-color: #00ffff; color: #00ffff; }
 .product-card .slot button.replace-btn:hover { border-color: #ffb84d; color: #ffb84d; }
 
+/* Multi-DXF-per-role: when a role has 2+ files, the slot stacks them and
+   exposes an "+ Add file" button below. Single-file slots use the
+   inherited single-file layout, so no extra styling kicks in. */
+.product-card .slot .slot-files {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.product-card .slot .slot-file {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.25rem 0;
+  border-top: 1px dashed #1c2630;
+}
+.product-card .slot .slot-file:first-child { border-top: 0; padding-top: 0; }
+.product-card .slot button.slot-add {
+  align-self: flex-start;
+  margin-top: 0.35rem;
+}
+
 .product-card .product-footer {
   display: flex;
   align-items: center;

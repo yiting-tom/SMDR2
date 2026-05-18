@@ -172,3 +172,187 @@ def test_side_regions_patch_on_missing_file_404s():
             },
         )
         assert r.status_code == 404
+
+
+# ---- multi-DXF-per-role API tests ---------------------------------------
+# Minimal valid DXF — enough bytes to pass the upload's "non-empty" check
+# and the .dxf filename check. The upload pipeline parses asynchronously
+# and tolerates malformed bytes by transitioning the file to status=error
+# without breaking the upload-time contract we test below.
+_STUB_DXF = b"0\nEOF\n"
+
+
+def _new_product(client, name: str) -> str:
+    r = client.post("/api/products", json={"name": name, "library_id": "default"})
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_upload_two_files_same_role_coexist():
+    """A (product, role) accumulates DXFs; uploading a second file under
+    the same role doesn't evict the first when no replace_file_id is sent."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "two-files-coexist")
+
+        r1 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("a.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        assert r1.status_code == 200, r1.text
+
+        r2 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("b.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        assert r2.status_code == 200, r2.text
+
+        g = client.get(f"/api/products/{pid}").json()
+        ids = {f["id"] for f in g["files_by_role_all"]["SBT"]}
+        assert ids == {r1.json()["file_id"], r2.json()["file_id"]}
+        assert len(ids) == 2
+
+
+def test_upload_with_replace_file_id_evicts_target():
+    """`replace_file_id` evicts that specific file before the new one lands."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "replace-specific")
+
+        r1 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("a.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        old_id = r1.json()["file_id"]
+
+        r2 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("b.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "SBT", "replace_file_id": old_id},
+        )
+        assert r2.status_code == 200, r2.text
+
+        g = client.get(f"/api/products/{pid}").json()
+        ids = [f["id"] for f in g["files_by_role_all"]["SBT"]]
+        assert old_id not in ids
+        assert ids == [r2.json()["file_id"]]
+
+
+def test_upload_replace_file_id_must_match_product_and_role():
+    """Replacing across products or roles is rejected so the eviction
+    can't cross slot boundaries by accident."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid_a = _new_product(client, "replace-cross-a")
+        pid_b = _new_product(client, "replace-cross-b")
+
+        r = client.post(
+            f"/api/products/{pid_a}/files",
+            files={"file": ("a.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        fid_a = r.json()["file_id"]
+
+        # Try to replace product A's file via product B's endpoint.
+        cross = client.post(
+            f"/api/products/{pid_b}/files",
+            files={"file": ("b.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "SBT", "replace_file_id": fid_a},
+        )
+        assert cross.status_code == 400
+
+
+def test_two_files_can_each_mark_same_view():
+    """When two DXFs share a (product, role), each file may independently
+    mark its own top/bottom/side region rectangles. Rule-check merges
+    matches across files, so overlapping view labels are expected, not
+    a conflict."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "two-files-independent-views")
+
+        r1 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("a.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        a_id = r1.json()["file_id"]
+        r2 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("b.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        b_id = r2.json()["file_id"]
+
+        ra = client.patch(
+            f"/api/files/{a_id}/side-regions",
+            json={
+                "top_view_rect": {"x0": 0, "y0": 0, "x1": 5, "y1": 5},
+                "bottom_view_rect": None,
+                "side_view_rect": None,
+            },
+        )
+        assert ra.status_code == 200, ra.text
+
+        rb = client.patch(
+            f"/api/files/{b_id}/side-regions",
+            json={
+                "top_view_rect": {"x0": 10, "y0": 10, "x1": 20, "y1": 20},
+                "bottom_view_rect": None,
+                "side_view_rect": None,
+            },
+        )
+        assert rb.status_code == 200, rb.text
+
+        ga = client.get(f"/api/files/{a_id}").json()
+        gb = client.get(f"/api/files/{b_id}").json()
+        assert ga["top_view_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 5.0, "y1": 5.0}
+        assert gb["top_view_rect"] == {"x0": 10.0, "y0": 10.0, "x1": 20.0, "y1": 20.0}
+
+
+def test_delete_one_of_many_keeps_siblings():
+    """Removing one file from a multi-file role leaves the rest intact."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "delete-keeps-siblings")
+        a = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("a.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        b = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("b.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        c = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("c.dxf", _STUB_DXF + b"c", "application/dxf")},
+            data={"dxf_role": "SBT"},
+        )
+        kept_ids = {a.json()["file_id"], c.json()["file_id"]}
+        gone_id = b.json()["file_id"]
+
+        d = client.delete(f"/api/products/{pid}/files/{gone_id}")
+        assert d.status_code == 204
+
+        g = client.get(f"/api/products/{pid}").json()
+        remaining = {f["id"] for f in g["files_by_role_all"]["SBT"]}
+        assert remaining == kept_ids
+
+
+def test_delete_file_404_when_not_in_product():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "delete-404")
+        r = client.delete(f"/api/products/{pid}/files/no-such-file")
+        assert r.status_code == 404

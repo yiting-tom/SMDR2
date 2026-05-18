@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS files (
     library_id      TEXT NOT NULL DEFAULT 'default',
     product_id      TEXT,
     dxf_role        TEXT,
+    dxf_view        TEXT,
     match_saved     INTEGER NOT NULL DEFAULT 0,
     selected_layers TEXT,
     top_view_rect    TEXT,
@@ -84,6 +85,10 @@ class FileRecord:
     library_id: str = "default"
     product_id: str | None = None
     dxf_role: str | None = None
+    # 'multi' (the default): per-view geometry derives from in-DXF region
+    # rects. 'top' / 'bottom' / 'side': the whole file represents that view;
+    # region rects MUST be NULL. None on rows that aren't bound to a product.
+    dxf_view: str | None = None
     match_saved: bool = False
     error: str | None = None
     parsed_at: float | None = None
@@ -115,6 +120,7 @@ class FileRecord:
             "library_id": self.library_id,
             "product_id": self.product_id,
             "dxf_role": self.dxf_role,
+            "dxf_view": self.dxf_view,
             "match_saved": self.match_saved,
             "error": self.error,
             "parsed_at": self.parsed_at,
@@ -205,6 +211,15 @@ class FileStore:
                 self.conn.execute("ALTER TABLE files ADD COLUMN product_id TEXT")
             if "dxf_role" not in cols:
                 self.conn.execute("ALTER TABLE files ADD COLUMN dxf_role TEXT")
+            if "dxf_view" not in cols:
+                self.conn.execute("ALTER TABLE files ADD COLUMN dxf_view TEXT")
+                # Backfill: every existing product-bound row was implicitly
+                # 'multi' under the old single-file-per-role model.
+                self.conn.execute(
+                    "UPDATE files SET dxf_view = 'multi' "
+                    "WHERE product_id IS NOT NULL AND dxf_role IS NOT NULL "
+                    "AND dxf_view IS NULL"
+                )
             if "match_saved" not in cols:
                 self.conn.execute(
                     "ALTER TABLE files ADD COLUMN match_saved INTEGER NOT NULL DEFAULT 0"
@@ -235,9 +250,15 @@ class FileStore:
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
-            # A product can have at most one file per role.
+            # A (product, role) can hold multiple DXFs. View-coverage
+            # uniqueness (each top/bottom/side region sourced by at most
+            # one file) is enforced at write time by `app.product_views`
+            # using the file rect columns. The DB-level unique constraints
+            # from earlier iterations are obsolete and dropped here.
+            self.conn.execute("DROP INDEX IF EXISTS idx_files_product_role")
+            self.conn.execute("DROP INDEX IF EXISTS idx_files_product_role_view")
             self.conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_product_role "
+                "CREATE INDEX IF NOT EXISTS idx_files_product_role "
                 "ON files(product_id, dxf_role) "
                 "WHERE product_id IS NOT NULL AND dxf_role IS NOT NULL"
             )
@@ -251,21 +272,23 @@ class FileStore:
         library_id: str = "default",
         product_id: str | None = None,
         dxf_role: str | None = None,
+        dxf_view: str | None = None,
         initial_status: str = PREPROCESSING,
     ) -> FileRecord:
         rec = FileRecord(
             id=file_id, name=name, size=size,
             uploaded_at=time.time(), status=initial_status,
             library_id=library_id,
-            product_id=product_id, dxf_role=dxf_role,
+            product_id=product_id, dxf_role=dxf_role, dxf_view=dxf_view,
         )
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO files "
-                "(id, name, size, uploaded_at, status, library_id, product_id, dxf_role, match_saved) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                "(id, name, size, uploaded_at, status, library_id, product_id, "
+                "dxf_role, dxf_view, match_saved) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 (rec.id, rec.name, rec.size, rec.uploaded_at, rec.status,
-                 rec.library_id, rec.product_id, rec.dxf_role),
+                 rec.library_id, rec.product_id, rec.dxf_role, rec.dxf_view),
             )
         return rec
 
@@ -422,6 +445,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         library_id=library_id or "default",
         product_id=_get("product_id"),
         dxf_role=_get("dxf_role"),
+        dxf_view=_get("dxf_view"),
         match_saved=bool(_get("match_saved", 0)),
         error=row["error"],
         parsed_at=row["parsed_at"],

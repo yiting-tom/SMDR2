@@ -25,7 +25,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -191,21 +191,47 @@ class CreateProductRequest(BaseModel):
     library_id: str = DEFAULT_LIBRARY_ID
 
 
+def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
+    """Build (`files_by_role`, `files_by_role_all`) from a product's file list.
+
+    `files_by_role[role]` is the primary file dict (the `multi` row if any,
+    else the first split row, else None) — preserved for the existing
+    rule-results modal and other callers that expect at-most-one file per
+    role.
+
+    `files_by_role_all[role]` is the complete list of file dicts (possibly
+    empty), ordered with the `multi` row first and split rows after in a
+    stable view order.
+    """
+    view_order = {"multi": 0, "top": 1, "bottom": 2, "side": 3, None: 4}
+    by_role_all: dict[str, list[dict]] = {role: [] for role in VALID_ROLES}
+    by_role_recs: dict[str, list[FileRecord]] = {role: [] for role in VALID_ROLES}
+    for f in files:
+        if f.dxf_role in by_role_all:
+            by_role_recs[f.dxf_role].append(f)
+    for role, recs in by_role_recs.items():
+        recs.sort(key=lambda r: view_order.get(r.dxf_view, 9))
+        by_role_all[role] = [r.to_dict() for r in recs]
+    by_role = {
+        role: (lst[0] if lst else None)
+        for role, lst in by_role_all.items()
+    }
+    return by_role, by_role_all
+
+
 @app.get("/api/products")
 async def list_products() -> dict:
     """Every product with its files (per role) and rule-check readiness."""
     items = []
     for p in PRODUCT_STORE.list_all():
         files = FILE_STORE.list_by_product(p.id)
-        by_role = {role: None for role in VALID_ROLES}
-        for f in files:
-            if f.dxf_role in by_role:
-                by_role[f.dxf_role] = f.to_dict()
+        by_role, by_role_all = _group_files_by_role(files)
         uploaded = [f for f in files if f.dxf_role is not None]
         ready_for_rc = bool(uploaded) and all(f.match_saved for f in uploaded)
         items.append({
             **p.to_dict(),
             "files_by_role": by_role,
+            "files_by_role_all": by_role_all,
             "match_progress": {
                 "saved": sum(1 for f in uploaded if f.match_saved),
                 "total": len(uploaded),
@@ -222,14 +248,12 @@ async def get_product(product_id: str) -> dict:
     if p is None:
         raise HTTPException(status_code=404, detail="product not found")
     files = FILE_STORE.list_by_product(product_id)
-    by_role = {role: None for role in VALID_ROLES}
-    for f in files:
-        if f.dxf_role in by_role:
-            by_role[f.dxf_role] = f.to_dict()
+    by_role, by_role_all = _group_files_by_role(files)
     uploaded = [f for f in files if f.dxf_role is not None]
     return {
         **p.to_dict(),
         "files_by_role": by_role,
+        "files_by_role_all": by_role_all,
         "match_progress": {
             "saved": sum(1 for f in uploaded if f.match_saved),
             "total": len(uploaded),
@@ -258,13 +282,49 @@ async def delete_product(product_id: str) -> dict:
     return {"deleted": product_id}
 
 
+@app.delete("/api/products/{product_id}/files/{file_id}", status_code=204)
+async def delete_product_file(product_id: str, file_id: str) -> Response:
+    """Detach a file from a product slot. Useful for removing a single
+    split-view file from a (role, view) without uploading a replacement.
+    The file row itself stays (so other libraries / products that may
+    reference it keep working); only the product/role/view binding clears.
+    """
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    rec = FILE_STORE.get(file_id)
+    if rec is None or rec.product_id != product_id:
+        raise HTTPException(status_code=404, detail="file not found in this product")
+    with FILE_STORE.lock, FILE_STORE.conn:
+        FILE_STORE.conn.execute(
+            "UPDATE files SET product_id = NULL, dxf_role = NULL, "
+            "dxf_view = NULL, match_saved = 0 WHERE id = ?",
+            (file_id,),
+        )
+    # Drop any cached match JSON so it doesn't haunt a future product binding.
+    try:
+        match_path(file_id).unlink()
+    except FileNotFoundError:
+        pass
+    return Response(status_code=204)
+
+
 @app.post("/api/products/{product_id}/files")
 async def upload_product_file(
     product_id: str,
     file: UploadFile = File(...),
     dxf_role: str = Form(...),
+    replace_file_id: str | None = Form(None),
 ) -> dict:
-    """Upload one DXF into a product slot. Replaces an existing slot if any."""
+    """Upload a DXF into a product role.
+
+    A `(product, role)` can hold any number of DXFs; this endpoint is
+    purely additive by default. To replace an existing file (the
+    common "swap this DXF" flow), pass `replace_file_id` — that file
+    is detached from the product before the new one is registered.
+    View coverage (top/bottom/side) is determined by the per-file
+    region rects set later via the side-regions endpoint; the upload
+    itself does not assign a view.
+    """
     product = PRODUCT_STORE.get(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -276,18 +336,28 @@ async def upload_product_file(
     if not content:
         raise HTTPException(status_code=400, detail="empty upload")
 
-    # If a file already occupies this slot, free it so the unique index allows the new one.
-    existing_in_slot = next(
-        (f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role == dxf_role),
-        None,
-    )
-    if existing_in_slot is not None:
-        # Clear product/role on the old file so it doesn't collide with the new one.
+    # Optional targeted eviction of a specific file in this product+role.
+    if replace_file_id:
+        evictee = FILE_STORE.get(replace_file_id)
+        if (
+            evictee is None
+            or evictee.product_id != product_id
+            or evictee.dxf_role != dxf_role
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="replace_file_id does not match a file in this product+role",
+            )
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = NULL, dxf_role = NULL WHERE id = ?",
-                (existing_in_slot.id,),
+                "UPDATE files SET product_id = NULL, dxf_role = NULL, "
+                "dxf_view = NULL, match_saved = 0 WHERE id = ?",
+                (replace_file_id,),
             )
+        try:
+            match_path(replace_file_id).unlink()
+        except FileNotFoundError:
+            pass
 
     fid = _file_id_from_bytes(content)
     dst = upload_path(fid)
@@ -298,19 +368,19 @@ async def upload_product_file(
         FILE_STORE.register(
             fid, file.filename, len(content),
             library_id=product.library_id,
-            product_id=product_id, dxf_role=dxf_role,
+            product_id=product_id, dxf_role=dxf_role, dxf_view="multi",
             initial_status=DISCOVERING_LAYERS,
         )
     else:
-        # Re-uploading into an existing slot: bytes may be identical, but
-        # treat this as a fresh discovery pass either way — the user may be
-        # swapping in a new file and the prior layer selection no longer
-        # applies. Wiping selected_layers forces Phase 1 to re-run.
+        # Same content hash → reuse the row, rebinding it to this product
+        # slot. Wiping selected_layers forces Phase 1 to re-run.
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = ?, dxf_role = ?, library_id = ?, "
-                "status = ?, match_saved = 0, selected_layers = NULL WHERE id = ?",
-                (product_id, dxf_role, product.library_id, DISCOVERING_LAYERS, fid),
+                "UPDATE files SET product_id = ?, dxf_role = ?, dxf_view = 'multi', "
+                "library_id = ?, status = ?, match_saved = 0, "
+                "selected_layers = NULL WHERE id = ?",
+                (product_id, dxf_role, product.library_id,
+                 DISCOVERING_LAYERS, fid),
             )
     job_id = jobs.submit_discover_layers(fid)
     return {
@@ -380,6 +450,11 @@ async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
     top = normalise_rect(req.top_view_rect.model_dump()) if req.top_view_rect else None
     bottom = normalise_rect(req.bottom_view_rect.model_dump()) if req.bottom_view_rect else None
     side = normalise_rect(req.side_view_rect.model_dump()) if req.side_view_rect else None
+    # Each file's region rects are independent — when a (product, role)
+    # has multiple DXFs, every file may legitimately mark its own top /
+    # bottom / side rectangles, and downstream rule-check merges all of
+    # them into one role-level bundle. No cross-file uniqueness check
+    # here.
     FILE_STORE.update_side_regions(file_id, top, bottom, side)
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
@@ -769,9 +844,9 @@ async def save_match_json(file_id: str) -> dict:
             # consumers (rule checker, exports) see e.g. top_view.bga_ball.0.
             json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
             base_key = f"{json_cls}.{idx}"
-            # Split this template's instances by their view label so a single
-            # smd_2t.0 template can contribute to top_view.smd_2t.0,
-            # bottom_view.smd_2t.0, and side_view.smd_2t.0 in the same file.
+            # Each match instance is classified by which view rect it
+            # falls inside, producing keys like top_view.smd_2t.0; matches
+            # outside every rect collapse to the unprefixed base_key.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
                 rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
@@ -827,23 +902,55 @@ async def run_product_rule_check(product_id: str) -> dict:
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
 
-    # Build the per-role payload the rule checker consumes.
-    dxfs_by_role: dict[str, dict] = {}
+    # Build the per-role payload the rule checker consumes. A role may
+    # be served by multiple files (multi + split views); the merge below
+    # produces ONE `match_json` and ONE `entity_shapes` per role so the
+    # rule_check.py contract (one bundle per role) is preserved.
+    #
+    # Handle namespacing rule: when a role has only one contributing file
+    # (the common case, including every legacy product) handles stay bare —
+    # the viewer's highlight path matches handles literally against its
+    # primitive index and bare strings keep that working. When a role has
+    # 2+ files, handles are prefixed with `<short_file_id>:<handle>` so
+    # they stay unique across the merged set; the rule_check code treats
+    # handles as opaque strings, so this is invisible to rule logic.
+    files_by_role_recs: dict[str, list[FileRecord]] = {}
     for f in files:
-        mp = match_path(f.id)
-        if not mp.exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
-            )
-        with open(mp) as fp:
-            mj = json.load(fp)
-        _, shapes = _shapes_for(f.id)
-        dxfs_by_role[f.dxf_role] = {
-            "file_id": f.id,
-            "dxf_path": str(upload_path(f.id)),
-            "match_json": mj,
-            "entity_shapes": shapes,
+        files_by_role_recs.setdefault(f.dxf_role, []).append(f)
+
+    dxfs_by_role: dict[str, dict] = {}
+    for role, role_files in files_by_role_recs.items():
+        merged_mj: dict[str, list[list[str]]] = {}
+        merged_shapes: dict = {}
+        file_ids: list[str] = []
+        dxf_paths: list[str] = []
+        namespaced = len(role_files) > 1
+        for f in role_files:
+            mp = match_path(f.id)
+            if not mp.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
+                )
+            with open(mp) as fp:
+                mj = json.load(fp)
+            _, shapes = _shapes_for(f.id)
+            short = f.id[:8]
+            prefix = f"{short}:" if namespaced else ""
+            for h, shape in shapes.items():
+                merged_shapes[prefix + h] = shape
+            for key, groups in mj.items():
+                ns_groups = [[prefix + h for h in g] for g in groups]
+                merged_mj.setdefault(key, []).extend(ns_groups)
+            file_ids.append(f.id)
+            dxf_paths.append(str(upload_path(f.id)))
+        dxfs_by_role[role] = {
+            "file_id": file_ids[0],
+            "dxf_path": dxf_paths[0],
+            "file_ids": file_ids,
+            "dxf_paths": dxf_paths,
+            "match_json": merged_mj,
+            "entity_shapes": merged_shapes,
         }
 
     result = check_rules(product_id, dxfs_by_role)

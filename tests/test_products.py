@@ -93,3 +93,91 @@ def test_set_match_saved(tmp_db):
     assert fstore.get("z1").match_saved is True
     fstore.set_match_saved("z1", False)
     assert fstore.get("z1").match_saved is False
+
+
+# ---- multi-DXF-per-role coexistence rules --------------------------------
+def test_same_role_accumulates_files_under_multi(tmp_db):
+    """All DXFs in a (product, role) are tagged `multi`; the schema
+    distinguishes them by file id alone. Three siblings coexist."""
+    pstore, fstore = _bootstrap(tmp_db)
+    p = pstore.create("Pkg-MV", DEFAULT_LIBRARY_ID)
+    fstore.register("f1", "a.dxf", 1, library_id=DEFAULT_LIBRARY_ID,
+                    product_id=p.id, dxf_role="SBT", dxf_view="multi")
+    fstore.register("f2", "b.dxf", 1, library_id=DEFAULT_LIBRARY_ID,
+                    product_id=p.id, dxf_role="SBT", dxf_view="multi")
+    fstore.register("f3", "c.dxf", 1, library_id=DEFAULT_LIBRARY_ID,
+                    product_id=p.id, dxf_role="SBT", dxf_view="multi")
+    ids = {f.id for f in fstore.list_by_product(p.id) if f.dxf_role == "SBT"}
+    assert ids == {"f1", "f2", "f3"}
+
+
+def test_same_role_allows_multiple_files(tmp_db):
+    """A (product, role) accepts any number of DXFs; the DB no longer
+    enforces a per-slot unique constraint. View coverage is the job of
+    `app.product_views.resolve_views`, not the schema."""
+    pstore, fstore = _bootstrap(tmp_db)
+    p = pstore.create("Pkg-Multi", DEFAULT_LIBRARY_ID)
+    fstore.register("a", "a.dxf", 1, library_id=DEFAULT_LIBRARY_ID,
+                    product_id=p.id, dxf_role="BD", dxf_view="multi")
+    # Adding a second file under the same (product, role) must succeed.
+    fstore.register("b", "b.dxf", 1, library_id=DEFAULT_LIBRARY_ID,
+                    product_id=p.id, dxf_role="BD", dxf_view="multi")
+    ids = {f.id for f in fstore.list_by_product(p.id) if f.dxf_role == "BD"}
+    assert ids == {"a", "b"}
+
+
+def test_legacy_row_backfilled_to_multi(tmp_db):
+    """A row inserted with a pre-multi-dxf schema (no dxf_view column) is
+    migrated to dxf_view='multi' when FileStore reinitialises."""
+    import sqlite3
+    # Build a legacy schema close to the production shape before this
+    # change — every column referenced by `_row_to_record` is present
+    # except the new dxf_view; the old (product_id, dxf_role) unique
+    # index is also present.
+    raw = sqlite3.connect(str(tmp_db))
+    raw.executescript("""
+        CREATE TABLE files (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            size            INTEGER NOT NULL,
+            uploaded_at     REAL NOT NULL,
+            status          TEXT NOT NULL,
+            error           TEXT,
+            parsed_at       REAL,
+            primitive_count INTEGER,
+            bbox_xmin       REAL,
+            bbox_ymin       REAL,
+            bbox_xmax       REAL,
+            bbox_ymax       REAL,
+            background      TEXT,
+            library_id      TEXT NOT NULL DEFAULT 'default',
+            product_id      TEXT,
+            dxf_role        TEXT,
+            match_saved     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX idx_files_product_role
+            ON files(product_id, dxf_role)
+            WHERE product_id IS NOT NULL AND dxf_role IS NOT NULL;
+    """)
+    raw.execute(
+        "INSERT INTO files (id, name, size, uploaded_at, status, library_id, product_id, dxf_role) "
+        "VALUES ('legacy', 'old.dxf', 1, 0.0, 'ready_to_match', 'default', 'p1', 'SBT')"
+    )
+    raw.commit()
+    raw.close()
+    # Initialise the new FileStore against the legacy DB.
+    fstore = FileStore(tmp_db)
+    rec = fstore.get("legacy")
+    assert rec is not None
+    assert rec.dxf_view == "multi"
+    # The view-aware UNIQUE index from the intermediate iteration must NOT
+    # be present (the current model permits multiple files per role); a
+    # non-unique (product_id, dxf_role) index is fine and aids queries.
+    indexes = {r["name"]: r["sql"] for r in fstore.conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='index' AND name LIKE 'idx_files_product%'"
+    ).fetchall()}
+    assert "idx_files_product_role_view" not in indexes
+    pr_sql = indexes.get("idx_files_product_role") or ""
+    assert "UNIQUE" not in pr_sql.upper(), (
+        f"idx_files_product_role must not be UNIQUE; got: {pr_sql}"
+    )
