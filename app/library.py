@@ -28,22 +28,50 @@ from typing import Iterable
 
 
 # Canonical class list. Auto-seeded into every newly-created library.
+# Order is also the display / toolbar / fold order — keep deliberate.
 DEFAULT_CLASSES: list[str] = [
-    "SMD-2T",
     "Substrate",
+    "Pin-1",
+    "Lid",
     "LidOuter",
     "LidInner",
     "DieArea",
-    "Pin-1",
-    "FiducialMark",
-    "2DBarcode",
+    "FiducialCircle",
+    "FiducialCross",
+    "SMD-2T",
     "BGABall",
-    "Lid",
-    "Side",
+    "2DBarcode",
     "SMD-3T",
     "SMD-8T",
     "SMD-14T",
 ]
+
+
+# Class IDs that are no longer seeded. The migration drops both their class
+# row and any templates filed under them, so legacy DBs converge to the new
+# default list without manual cleanup.
+DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
+
+
+# Display ID → match-JSON snake_case key. Display labels stay in their
+# canonical form (BGABall, Pin-1, …); only the persisted JSON key uses the
+# snake_case identifier downstream consumers (rule checker, exports) expect.
+CLASS_JSON_KEY: dict[str, str] = {
+    "Substrate":      "substrate",
+    "Pin-1":          "pin_1",
+    "Lid":            "lid",
+    "LidOuter":       "lid_outer",
+    "LidInner":       "lid_inner",
+    "DieArea":        "die_area",
+    "FiducialCircle": "fiducial_circle",
+    "FiducialCross":  "fiducial_cross",
+    "SMD-2T":         "smd_2t",
+    "BGABall":        "bga_ball",
+    "2DBarcode":      "2d_barcode",
+    "SMD-3T":         "smd_3t",
+    "SMD-8T":         "smd_8t",
+    "SMD-14T":        "smd_14t",
+}
 
 
 # Legacy snake_case class names → new canonical IDs. Applied as a one-shot
@@ -57,7 +85,6 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
     "lid_inner":     "LidInner",
     "bga_ball":      "BGABall",
     "pin_mark":      "Pin-1",
-    "fiducial_mark": "FiducialMark",
     "2d_barcode":    "2DBarcode",
 }
 
@@ -268,6 +295,48 @@ class Store:
                 "DELETE FROM classes WHERE name = ?",
                 (old,),
             )
+
+        # Drop deprecated classes (and any templates filed under them) so
+        # legacy DBs converge to the new DEFAULT_CLASSES set on boot.
+        for dead in DEPRECATED_CLASSES:
+            self.conn.execute("DELETE FROM templates WHERE class_name = ?", (dead,))
+            self.conn.execute("DELETE FROM classes WHERE name = ?", (dead,))
+
+        # Make sure every existing library carries the full DEFAULT_CLASSES set
+        # before re-ranking, so newly-added defaults (e.g. FiducialCircle /
+        # FiducialCross) slot into their canonical position rather than the
+        # tail. INSERT OR IGNORE is a no-op for classes that already exist.
+        lib_ids = [r["id"] for r in self.conn.execute("SELECT id FROM libraries")]
+        now = time.time()
+        for lib_id in lib_ids:
+            for c in DEFAULT_CLASSES:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO classes (library_id, name, rank, created_at) "
+                    "VALUES (?, ?, 0, ?)",
+                    (lib_id, c, now),
+                )
+
+        # Re-rank classes per library so the toolbar order tracks the current
+        # DEFAULT_CLASSES list. Anything not in DEFAULT_CLASSES (custom classes
+        # added by the user) is pushed to the end, preserving relative order.
+        rank_priority = {n: i for i, n in enumerate(DEFAULT_CLASSES)}
+        rows = self.conn.execute(
+            "SELECT library_id, name, rank, created_at FROM classes"
+        ).fetchall()
+        per_lib: dict[str, list[sqlite3.Row]] = {}
+        for r in rows:
+            per_lib.setdefault(r["library_id"], []).append(r)
+        for lib_id, lib_rows in per_lib.items():
+            lib_rows.sort(key=lambda r: (
+                rank_priority.get(r["name"], len(DEFAULT_CLASSES)),
+                r["rank"],
+                r["created_at"],
+            ))
+            for new_rank, r in enumerate(lib_rows):
+                self.conn.execute(
+                    "UPDATE classes SET rank = ? WHERE library_id = ? AND name = ?",
+                    (new_rank, lib_id, r["name"]),
+                )
 
     # ---- library CRUD ----------------------------------------------------
     def create_library(self, library_id: str, name: str) -> None:

@@ -321,9 +321,9 @@ const CLASS_COLORS = {
   "Lid":          "#9575cd",  // muted purple
   "BGABall":      "#ffab40",  // orange
   "Pin-1":        "#f48fb1",  // soft pink
-  "FiducialMark": "#4dd0e1",  // teal
-  "2DBarcode":    "#c6ff00",  // lime
-  "Side":         "#90a4ae",  // blue-grey
+  "FiducialCircle": "#4dd0e1",  // teal
+  "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
+  "2DBarcode":      "#c6ff00",  // lime
 };
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }

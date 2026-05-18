@@ -41,6 +41,7 @@ from app.files import (
     READY,
 )
 from app.library import (
+    CLASS_JSON_KEY,
     DEFAULT_LIBRARY_ID,
     LIBRARIES,
     Template,
@@ -744,9 +745,11 @@ async def prematch(file_id: str) -> dict:
 
 # ---- Match JSON ----------------------------------------------------------
 # Format the downstream rule-checker expects:
-#   { "<className>.<template_index>": [[handle, ...], ...], ... }
-# Each inner list is one match (one occurrence of the template), containing
-# the DXF entity handles that make up that occurrence.
+#   { "<view>.<class_snake>.<template_index>": [[handle, ...], ...], ... }
+# Class portion is the snake_case form (substrate, smd_2t, bga_ball, ...)
+# from CLASS_JSON_KEY; the view prefix is omitted when no side region
+# contains the instance. Each inner list is one match occurrence,
+# containing the DXF entity handles that make up that occurrence.
 @app.post("/api/files/{file_id}/match-json")
 async def save_match_json(file_id: str) -> dict:
     rec = _resolve_file(file_id)
@@ -761,10 +764,14 @@ async def save_match_json(file_id: str) -> dict:
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
             )
-            base_key = f"{cls_name}.{idx}"
+            # Display name (Substrate, BGABall, …) stays canonical in the UI;
+            # match-JSON keys use the snake_case variant so downstream
+            # consumers (rule checker, exports) see e.g. top_view.bga_ball.0.
+            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
+            base_key = f"{json_cls}.{idx}"
             # Split this template's instances by their view label so a single
-            # SMD-2T.0 template can contribute to top_view.SMD-2T.0,
-            # bottom_view.SMD-2T.0, and side_view.SMD-2T.0 in the same file.
+            # smd_2t.0 template can contribute to top_view.smd_2t.0,
+            # bottom_view.smd_2t.0, and side_view.smd_2t.0 in the same file.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
                 rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,

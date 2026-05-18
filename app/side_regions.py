@@ -3,7 +3,7 @@
 A side region is an axis-aligned, world-space rectangle the engineer paints
 on the viewer to tag one of the three views (top / bottom / side) on a
 DXF sheet. The match-JSON serializer uses these to rewrite each instance's
-key from ``SMD-2T.0`` to ``top_view.SMD-2T.0`` etc., based on the
+key from ``smd_2t.0`` to ``top_view.smd_2t.0`` etc., based on the
 instance's bbox-center containment. Any subset of the three rectangles
 may be set; an unset rectangle never contains anything.
 

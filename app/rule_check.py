@@ -171,8 +171,8 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
     if bd is None:
         rule1_text = "BD DXF required (not uploaded)"
     else:
-        substrate = _first_match_handles(bd["match_json"], "Substrate")
-        first_smd = _first_match_handles(bd["match_json"], "SMD-2T")
+        substrate = _first_match_handles(bd["match_json"], "substrate")
+        first_smd = _first_match_handles(bd["match_json"], "smd_2t")
         shapes = bd["entity_shapes"]
         if not substrate or not first_smd:
             rule1_text = (
@@ -209,10 +209,10 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
             f"POD={'yes' if pod else 'no'})"
         )
     else:
-        sbt_count = _count_for_prefix(sbt["match_json"], "BGABall")
-        pod_count = _count_for_prefix(pod["match_json"], "BGABall")
-        sbt_handles = _all_handles_for_prefix(sbt["match_json"], "BGABall")
-        pod_handles = _all_handles_for_prefix(pod["match_json"], "BGABall")
+        sbt_count = _count_for_prefix(sbt["match_json"], "bga_ball")
+        pod_count = _count_for_prefix(pod["match_json"], "bga_ball")
+        sbt_handles = _all_handles_for_prefix(sbt["match_json"], "bga_ball")
+        pod_handles = _all_handles_for_prefix(pod["match_json"], "bga_ball")
         rule2_pass = sbt_count == pod_count
         rule2_text = f"SBT BGA count ({sbt_count}) must equal POD BGA count ({pod_count})"
 
@@ -241,8 +241,8 @@ def check_rules(product_id: str, dxfs_by_role: RoleBundle) -> RuleResult:
     if bd is None:
         rule3_text = "BD DXF required for SMD-2T-to-Substrate proximity check (not uploaded)"
     else:
-        substrate = _first_match_handles(bd["match_json"], "Substrate")
-        smd_groups = _all_match_groups(bd["match_json"], "SMD-2T")
+        substrate = _first_match_handles(bd["match_json"], "substrate")
+        smd_groups = _all_match_groups(bd["match_json"], "smd_2t")
         shapes = bd["entity_shapes"]
         if not substrate:
             rule3_text = "BD must contain a Substrate"

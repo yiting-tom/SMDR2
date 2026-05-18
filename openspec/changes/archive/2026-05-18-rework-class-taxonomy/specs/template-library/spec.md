@@ -1,24 +1,4 @@
-# template-library Specification
-
-## Purpose
-TBD - created by archiving change initial-build. Update Purpose after archive.
-## Requirements
-### Requirement: Multi-library template store
-
-The system SHALL support multiple template libraries identified by
-unique `library_id`. Each library SHALL have its own set of classes and
-templates; no template SHALL be shared across libraries. A `Default`
-library (`library_id = "default"`) SHALL always exist and SHALL NOT be
-deletable.
-
-#### Scenario: Templates in one library do not leak into another
-- **WHEN** template T is added to library A
-- **AND** library B is queried for class T.class_name
-- **THEN** library B's count for that class is zero
-
-#### Scenario: Default library cannot be deleted
-- **WHEN** the user calls `DELETE /api/libraries/default`
-- **THEN** the API returns 400
+## MODIFIED Requirements
 
 ### Requirement: Default class seeding
 
@@ -68,46 +48,6 @@ library: `FiducialMark` (superseded by the `FiducialCircle` /
 - **AND** seeds the missing defaults (`FiducialCircle`, `FiducialCross`)
 - **AND** re-ranks the surviving rows so they match the canonical order
 
-### Requirement: Per-file library binding with reassignment
-
-Each file SHALL be bound to exactly one `library_id`. The bound library
-SHALL be selectable at upload time via the `library_id` form field
-(default: `default`). `PATCH /api/files/{file_id}` with
-`{"library_id": "<new-id>"}` SHALL reassign the file and re-trigger
-preprocessing so the pre-match overlay reflects the new library's
-templates.
-
-#### Scenario: Switching a file's library re-preprocesses
-- **WHEN** a file's library is reassigned via PATCH
-- **THEN** its status becomes `preprocessing`
-- **AND** a new preprocess job is submitted with the new `library_id`
-- **AND** after completion the prematch JSON reflects the new library's templates
-
-#### Scenario: Switching to the same library is a no-op
-- **WHEN** PATCH is called with the file's existing library_id
-- **THEN** the response carries `unchanged: true`
-- **AND** no new job is submitted
-
-### Requirement: Template CRUD
-
-The library SHALL support creating, listing, deleting and moving
-templates between classes within the same library.
-
-#### Scenario: Commit creates a template under a file's library
-- **WHEN** the user posts handles to `POST /api/files/{id}/commit` with a class name
-- **THEN** the template is added to the file's library, not any other library
-- **AND** the response carries the new template id and the bound `library_id`
-
-#### Scenario: Delete removes a template
-- **WHEN** `DELETE /api/templates/{template_id}` is called
-- **THEN** the template no longer appears in any library's listing
-- **AND** the change is persistent across server restart
-
-#### Scenario: Move template across classes
-- **WHEN** `PATCH /api/templates/{template_id}` is called with a new `class_name`
-- **THEN** the template is moved into that class within its current library
-- **AND** the new class is auto-created in the library if missing
-
 ### Requirement: SQLite persistence with migration from pre-multi-library schema
 
 Library state SHALL persist to `data/library.sqlite` and SHALL survive
@@ -146,6 +86,8 @@ multi-library schema and migrate them in-place by:
 - **THEN** after migration both rows exist
 - **AND** their `rank` values place them at positions 7 and 8 in the
   ordered class listing, between `DieArea` and `SMD-2T`
+
+## ADDED Requirements
 
 ### Requirement: Display name vs. match-JSON key separation
 
@@ -200,4 +142,3 @@ to using its display ID verbatim as the match-JSON key.
   saves a match JSON
 - **THEN** the saved JSON keys use `MyMarker.<idx>` (or the
   side-prefixed variant) verbatim
-
