@@ -71,25 +71,28 @@ def test_side_regions_patch_persists_and_normalises(tmp_path, monkeypatch):
     FILE_STORE.register(fid, "stub.dxf", 1)
 
     with TestClient(app) as client:
-        # Send a deliberately unnormalised frontside rect (x0 > x1) plus a
-        # normal bottomside rect.
+        # Send a deliberately unnormalised top_view rect (x0 > x1), a normal
+        # bottom_view rect, and a side_view rect.
         r = client.patch(
             f"/api/files/{fid}/side-regions",
             json={
-                "frontside_rect": {"x0": 10, "y0": 5, "x1": 0, "y1": 0},
-                "bottomside_rect": {"x0": 50, "y0": 50, "x1": 60, "y1": 60},
+                "top_view_rect": {"x0": 10, "y0": 5, "x1": 0, "y1": 0},
+                "bottom_view_rect": {"x0": 50, "y0": 50, "x1": 60, "y1": 60},
+                "side_view_rect": {"x0": 100, "y0": 100, "x1": 110, "y1": 110},
             },
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["frontside_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 5.0}
-        assert body["bottomside_rect"] == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+        assert body["top_view_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 5.0}
+        assert body["bottom_view_rect"] == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+        assert body["side_view_rect"] == {"x0": 100.0, "y0": 100.0, "x1": 110.0, "y1": 110.0}
         assert body["match_saved"] is False
 
         # GET round-trips the rectangles on the file record.
         g = client.get(f"/api/files/{fid}").json()
-        assert g["frontside_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 5.0}
-        assert g["bottomside_rect"] == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+        assert g["top_view_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 5.0}
+        assert g["bottom_view_rect"] == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
+        assert g["side_view_rect"] == {"x0": 100.0, "y0": 100.0, "x1": 110.0, "y1": 110.0}
 
 
 def test_side_regions_patch_clears_saved_match(tmp_path):
@@ -112,8 +115,9 @@ def test_side_regions_patch_clears_saved_match(tmp_path):
         r = client.patch(
             f"/api/files/{fid}/side-regions",
             json={
-                "frontside_rect": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
-                "bottomside_rect": None,
+                "top_view_rect": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+                "bottom_view_rect": None,
+                "side_view_rect": None,
             },
         )
         assert r.status_code == 200, r.text
@@ -123,12 +127,48 @@ def test_side_regions_patch_clears_saved_match(tmp_path):
     assert FILE_STORE.get(fid).match_saved is False
 
 
+def test_side_regions_patch_only_side_view_clears_saved_match(tmp_path):
+    """PATCHing with only side_view_rect changing must also invalidate the
+    saved Match JSON — the cache-invalidation hook covers all three rects."""
+    from fastapi.testclient import TestClient
+    from app.files import FILE_STORE
+    from app.main import app
+    from app.storage import match_path
+
+    fid = "side-regions-test-3"
+    FILE_STORE.register(fid, "stub.dxf", 1)
+    FILE_STORE.set_match_saved(fid, True)
+    mp = match_path(fid)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    mp.write_text("{\"smd.0\": [[\"A\"]]}")
+
+    with TestClient(app) as client:
+        r = client.patch(
+            f"/api/files/{fid}/side-regions",
+            json={
+                "top_view_rect": None,
+                "bottom_view_rect": None,
+                "side_view_rect": {"x0": 0, "y0": 0, "x1": 5, "y1": 5},
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["match_saved"] is False
+        assert r.json()["side_view_rect"] == {"x0": 0.0, "y0": 0.0, "x1": 5.0, "y1": 5.0}
+
+    assert not mp.exists()
+    assert FILE_STORE.get(fid).match_saved is False
+
+
 def test_side_regions_patch_on_missing_file_404s():
     from fastapi.testclient import TestClient
     from app.main import app
     with TestClient(app) as client:
         r = client.patch(
             "/api/files/nonexistent/side-regions",
-            json={"frontside_rect": None, "bottomside_rect": None},
+            json={
+                "top_view_rect": None,
+                "bottom_view_rect": None,
+                "side_view_rect": None,
+            },
         )
         assert r.status_code == 404

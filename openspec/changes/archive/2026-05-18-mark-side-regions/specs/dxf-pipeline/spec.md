@@ -31,10 +31,10 @@ selected layers SHALL NOT clear the side rectangles.
 
 ### Requirement: Side-prefixed match JSON keys
 
-When the system writes `data/match/{file_id}.json` (via `POST
-/api/files/{file_id}/match-json`), each match instance SHALL be
-emitted under a key derived from its bbox-center position relative to
-the file's side rectangles:
+The system SHALL emit each match instance into
+`data/match/{file_id}.json` (written via `POST
+/api/files/{file_id}/match-json`) under a key derived from its
+bbox-center position relative to the file's side rectangles:
 
 - center inside `frontside_rect` → key `frontside.<class>.<index>`
 - center inside `bottomside_rect` → key `bottomside.<class>.<index>`
@@ -70,14 +70,14 @@ keys in the same output file.
 
 ### Requirement: Side-region edits invalidate saved match
 
-When `PATCH /api/files/{file_id}/side-regions` changes either
-rectangle, the server SHALL delete the cached
-`data/match/{file_id}.json` if present and reset the file's
-`match_saved` flag to `0` so the engineer re-runs Save Match. The
-response SHALL include the updated `match_saved` value so the
-dashboard can refresh. `data/prematch/{file_id}.json` is not
-side-aware (it's a flat per-class handle list used for the viewer's
-colored overlay) and is left untouched.
+The server SHALL delete the cached `data/match/{file_id}.json` (if
+present) and reset the file's `match_saved` flag to `0` whenever
+`PATCH /api/files/{file_id}/side-regions` changes either rectangle,
+so the engineer re-runs Save Match. The response SHALL include the
+updated `match_saved` value so the dashboard can refresh.
+`data/prematch/{file_id}.json` is not side-aware (it's a flat
+per-class handle list used for the viewer's colored overlay) and is
+left untouched.
 
 #### Scenario: Editing regions clears the saved match
 - **WHEN** the user PATCHes the side regions and the file previously had `match_saved = 1`

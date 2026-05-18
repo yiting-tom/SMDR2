@@ -334,11 +334,12 @@ class RectModel(BaseModel):
 
 
 class SideRegionsRequest(BaseModel):
-    # Both fields are always sent; null means "clear that side". The frontend
-    # mirrors local state so a partial update sends the current rect for the
-    # untouched side.
-    frontside_rect: RectModel | None = None
-    bottomside_rect: RectModel | None = None
+    # All three fields are always sent; null means "clear that view". The
+    # frontend mirrors local state so a partial update sends the current
+    # rect for any untouched view.
+    top_view_rect: RectModel | None = None
+    bottom_view_rect: RectModel | None = None
+    side_view_rect: RectModel | None = None
 
 
 @app.patch("/api/files/{file_id}")
@@ -365,19 +366,20 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
 
 @app.patch("/api/files/{file_id}/side-regions")
 async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
-    """Persist this file's frontside / bottomside rectangles.
+    """Persist this file's top_view / bottom_view / side_view rectangles.
 
     Invalidates `data/match/{file_id}.json` (rule-checker input)
     because the saved match keys are no longer in sync with the new
-    side labels. Resets `match_saved` so the engineer re-runs Save Match
+    view labels. Resets `match_saved` so the engineer re-runs Save Match
     after redrawing regions.
     """
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found")
-    front = normalise_rect(req.frontside_rect.model_dump()) if req.frontside_rect else None
-    bottom = normalise_rect(req.bottomside_rect.model_dump()) if req.bottomside_rect else None
-    FILE_STORE.update_side_regions(file_id, front, bottom)
+    top = normalise_rect(req.top_view_rect.model_dump()) if req.top_view_rect else None
+    bottom = normalise_rect(req.bottom_view_rect.model_dump()) if req.bottom_view_rect else None
+    side = normalise_rect(req.side_view_rect.model_dump()) if req.side_view_rect else None
+    FILE_STORE.update_side_regions(file_id, top, bottom, side)
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
     # rectangles. The user has to re-run Save Match to regenerate.
@@ -390,8 +392,9 @@ async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
 
     return {
         "file_id": file_id,
-        "frontside_rect": front,
-        "bottomside_rect": bottom,
+        "top_view_rect": top,
+        "bottom_view_rect": bottom,
+        "side_view_rect": side,
         "match_saved": False,
     }
 
@@ -751,7 +754,7 @@ async def save_match_json(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     out: dict[str, list[list[str]]] = {}
     total_matches = 0
-    side_counts = {"frontside": 0, "bottomside": 0, "unassigned": 0}
+    side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 0}
     for cls_name in lib.classes:
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
             result = find_matches_from_pointsets(
@@ -759,12 +762,12 @@ async def save_match_json(file_id: str) -> dict:
                 entity_kinds=tmpl.entity_kinds,
             )
             base_key = f"{cls_name}.{idx}"
-            # Split this template's instances by their side label so a single
-            # SMD-2T.0 template can contribute to both frontside.SMD-2T.0 and
-            # bottomside.SMD-2T.0 in the same file.
+            # Split this template's instances by their view label so a single
+            # SMD-2T.0 template can contribute to top_view.SMD-2T.0,
+            # bottom_view.SMD-2T.0, and side_view.SMD-2T.0 in the same file.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
-                rec.frontside_rect, rec.bottomside_rect,
+                rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
             )
             for k, v in grouped.items():
                 out.setdefault(k, []).extend(v)

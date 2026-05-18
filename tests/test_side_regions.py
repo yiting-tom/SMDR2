@@ -33,77 +33,117 @@ def test_point_in_rect_closed_interval():
     assert not point_in_rect((5.0, 5.0), None)
 
 
-def test_side_prefix_center_in_frontside():
+# ---- side_prefix_for ------------------------------------------------------
+def test_side_prefix_center_in_top_view():
     shapes = {"A": _shape("A", [(0, 0), (2, 0), (2, 2), (0, 2)])}
-    front = {"x0": -5, "y0": -5, "x1": 5, "y1": 5}
-    back = {"x0": 100, "y0": 100, "x1": 110, "y1": 110}
-    assert side_prefix_for(["A"], shapes, front, back) == "frontside"
+    top = {"x0": -5, "y0": -5, "x1": 5, "y1": 5}
+    bottom = {"x0": 100, "y0": 100, "x1": 110, "y1": 110}
+    assert side_prefix_for(["A"], shapes, top, bottom, None) == "top_view"
 
 
-def test_side_prefix_center_in_bottomside():
+def test_side_prefix_center_in_bottom_view():
     shapes = {"A": _shape("A", [(50, 50), (52, 50), (52, 52), (50, 52)])}
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 40, "y0": 40, "x1": 60, "y1": 60}
-    assert side_prefix_for(["A"], shapes, front, back) == "bottomside"
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 40, "y0": 40, "x1": 60, "y1": 60}
+    assert side_prefix_for(["A"], shapes, top, bottom, None) == "bottom_view"
 
 
-def test_side_prefix_overlap_tiebreaks_to_frontside():
+def test_side_prefix_center_in_side_view_only():
+    shapes = {"A": _shape("A", [(200, 200)])}
+    side = {"x0": 190, "y0": 190, "x1": 210, "y1": 210}
+    assert side_prefix_for(["A"], shapes, None, None, side) == "side_view"
+
+
+def test_side_prefix_overlap_priority_top_over_bottom():
+    # top_view and bottom_view overlap on the same point — top_view wins.
     shapes = {"A": _shape("A", [(5, 5), (6, 6)])}
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    assert side_prefix_for(["A"], shapes, front, back) == "frontside"
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, top, bottom, None) == "top_view"
+
+
+def test_side_prefix_overlap_priority_top_over_side():
+    # top_view and side_view overlap — top_view wins.
+    shapes = {"A": _shape("A", [(5, 5), (6, 6)])}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, top, None, side) == "top_view"
+
+
+def test_side_prefix_overlap_priority_bottom_over_side_when_top_absent():
+    # No top_view set; bottom_view and side_view overlap — bottom_view wins.
+    shapes = {"A": _shape("A", [(5, 5)])}
+    bottom = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, None, bottom, side) == "bottom_view"
+
+
+def test_side_prefix_all_three_overlap_resolves_to_top():
+    # All three rectangles cover the same point — priority forces top_view.
+    shapes = {"A": _shape("A", [(5, 5)])}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, top, bottom, side) == "top_view"
 
 
 def test_side_prefix_center_in_neither_returns_none():
     shapes = {"A": _shape("A", [(100, 100), (101, 101)])}
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
-    assert side_prefix_for(["A"], shapes, front, back) is None
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
+    side = {"x0": 70, "y0": 70, "x1": 80, "y1": 80}
+    assert side_prefix_for(["A"], shapes, top, bottom, side) is None
 
 
-def test_side_prefix_both_rects_none_returns_none():
+def test_side_prefix_all_rects_none_returns_none():
     shapes = {"A": _shape("A", [(5, 5)])}
-    assert side_prefix_for(["A"], shapes, None, None) is None
+    assert side_prefix_for(["A"], shapes, None, None, None) is None
 
 
-def test_side_prefix_only_frontside_set():
+def test_side_prefix_only_top_view_set():
     shapes = {
-        "A": _shape("A", [(1, 1)]),       # inside frontside
+        "A": _shape("A", [(1, 1)]),       # inside top_view
         "B": _shape("B", [(50, 50)]),     # outside everything
     }
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    assert side_prefix_for(["A"], shapes, front, None) == "frontside"
-    assert side_prefix_for(["B"], shapes, front, None) is None
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, top, None, None) == "top_view"
+    assert side_prefix_for(["B"], shapes, top, None, None) is None
 
 
-def test_side_prefix_only_bottomside_set():
+def test_side_prefix_only_bottom_view_set():
     shapes = {"A": _shape("A", [(7, 7)])}
-    back = {"x0": 5, "y0": 5, "x1": 10, "y1": 10}
-    assert side_prefix_for(["A"], shapes, None, back) == "bottomside"
+    bottom = {"x0": 5, "y0": 5, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, None, bottom, None) == "bottom_view"
+
+
+def test_side_prefix_only_side_view_set():
+    shapes = {"A": _shape("A", [(7, 7)])}
+    side = {"x0": 5, "y0": 5, "x1": 10, "y1": 10}
+    assert side_prefix_for(["A"], shapes, None, None, side) == "side_view"
 
 
 def test_side_prefix_multi_entity_uses_combined_bbox():
-    # Two entities — the combined bbox center is around (5, 5), inside frontside.
+    # Two entities — the combined bbox center is around (5, 5), inside top_view.
     shapes = {
         "A": _shape("A", [(0, 0), (1, 1)]),
         "B": _shape("B", [(9, 9), (10, 10)]),
     }
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 100, "y0": 100, "x1": 110, "y1": 110}
-    assert side_prefix_for(["A", "B"], shapes, front, back) == "frontside"
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 100, "y0": 100, "x1": 110, "y1": 110}
+    assert side_prefix_for(["A", "B"], shapes, top, bottom, None) == "top_view"
 
 
 def test_side_prefix_unknown_handles_returns_none():
     shapes = {"A": _shape("A", [(5, 5)])}
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     # All handles miss the map → no usable bbox → no prefix.
-    assert side_prefix_for(["X", "Y"], shapes, front, None) is None
+    assert side_prefix_for(["X", "Y"], shapes, top, None, None) is None
 
 
 def test_side_prefix_empty_points_returns_none():
     shapes = {"A": _shape("A", [])}
-    front = {"x0": -1, "y0": -1, "x1": 1, "y1": 1}
-    assert side_prefix_for(["A"], shapes, front, None) is None
+    top = {"x0": -1, "y0": -1, "x1": 1, "y1": 1}
+    assert side_prefix_for(["A"], shapes, top, None, None) is None
 
 
 # ---- split_matches_by_side -----------------------------------------------
@@ -111,56 +151,85 @@ def _mr(handles: list[str]) -> MatchResult:
     return MatchResult(handles=handles, score=0.0, scale=1.0)
 
 
-def test_split_matches_splits_instances_across_sides():
-    # Three matches: two centers in frontside, one in bottomside.
+def test_split_matches_splits_instances_across_three_views():
+    # Four matches: two in top_view, one in bottom_view, one in side_view.
     shapes = {
-        "F1": _shape("F1", [(1, 1)]),
-        "F2": _shape("F2", [(2, 2)]),
+        "T1": _shape("T1", [(1, 1)]),
+        "T2": _shape("T2", [(2, 2)]),
         "B1": _shape("B1", [(50, 50)]),
+        "S1": _shape("S1", [(200, 200)]),
     }
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 40, "y0": 40, "x1": 60, "y1": 60}
-    matches = [_mr(["F1"]), _mr(["B1"]), _mr(["F2"])]
-    out, counts = split_matches_by_side("smd.0", matches, shapes, front, back)
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 40, "y0": 40, "x1": 60, "y1": 60}
+    side = {"x0": 190, "y0": 190, "x1": 210, "y1": 210}
+    matches = [_mr(["T1"]), _mr(["B1"]), _mr(["T2"]), _mr(["S1"])]
+    out, counts = split_matches_by_side("smd.0", matches, shapes, top, bottom, side)
     assert out == {
-        "frontside.smd.0": [["F1"], ["F2"]],
-        "bottomside.smd.0": [["B1"]],
+        "top_view.smd.0": [["T1"], ["T2"]],
+        "bottom_view.smd.0": [["B1"]],
+        "side_view.smd.0": [["S1"]],
     }
-    assert counts == {"frontside": 2, "bottomside": 1, "unassigned": 0}
+    assert counts == {"top_view": 2, "bottom_view": 1, "side_view": 1, "unassigned": 0}
+
+
+def test_split_matches_only_side_view_set():
+    # Only side_view is non-null; an instance inside it gets the side_view prefix.
+    shapes = {"S": _shape("S", [(5, 5)])}
+    side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    out, counts = split_matches_by_side(
+        "smd.0", [_mr(["S"])], shapes, None, None, side,
+    )
+    assert out == {"side_view.smd.0": [["S"]]}
+    assert counts == {"top_view": 0, "bottom_view": 0, "side_view": 1, "unassigned": 0}
 
 
 def test_split_matches_keeps_unassigned_unprefixed():
     # No rectangles set → every instance falls under base_key, no prefix.
     shapes = {"H": _shape("H", [(5, 5)])}
-    out, counts = split_matches_by_side("smd.0", [_mr(["H"])], shapes, None, None)
+    out, counts = split_matches_by_side(
+        "smd.0", [_mr(["H"])], shapes, None, None, None,
+    )
     assert out == {"smd.0": [["H"]]}
-    assert counts == {"frontside": 0, "bottomside": 0, "unassigned": 1}
+    assert counts == {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 1}
 
 
 def test_split_matches_partial_outside_region_is_unassigned():
     shapes = {
-        "F": _shape("F", [(1, 1)]),
-        "Z": _shape("Z", [(100, 100)]),  # outside both
+        "T": _shape("T", [(1, 1)]),
+        "Z": _shape("Z", [(100, 100)]),  # outside all three
     }
-    front = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
-    back = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
+    side = {"x0": 70, "y0": 70, "x1": 80, "y1": 80}
     out, counts = split_matches_by_side(
-        "smd.0", [_mr(["F"]), _mr(["Z"])], shapes, front, back,
+        "smd.0", [_mr(["T"]), _mr(["Z"])], shapes, top, bottom, side,
     )
     assert out == {
-        "frontside.smd.0": [["F"]],
+        "top_view.smd.0": [["T"]],
         "smd.0": [["Z"]],
     }
-    assert counts == {"frontside": 1, "bottomside": 0, "unassigned": 1}
+    assert counts == {"top_view": 1, "bottom_view": 0, "side_view": 0, "unassigned": 1}
+
+
+def test_split_matches_all_three_overlap_resolves_to_top():
+    # Single point covered by all three — every match is emitted under top_view.
+    shapes = {f"H{i}": _shape(f"H{i}", [(5.0, 5.0)]) for i in range(3)}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    bottom = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    matches = [_mr([f"H{i}"]) for i in range(3)]
+    out, counts = split_matches_by_side("smd.0", matches, shapes, top, bottom, side)
+    assert out == {"top_view.smd.0": [["H0"], ["H1"], ["H2"]]}
+    assert counts == {"top_view": 3, "bottom_view": 0, "side_view": 0, "unassigned": 0}
 
 
 def test_split_matches_preserves_instance_order_within_side():
     shapes = {
         f"H{i}": _shape(f"H{i}", [(float(i), 1.0)]) for i in range(5)
     }
-    front = {"x0": -1, "y0": 0, "x1": 10, "y1": 2}
+    top = {"x0": -1, "y0": 0, "x1": 10, "y1": 2}
     matches = [_mr([f"H{i}"]) for i in range(5)]
-    out, _ = split_matches_by_side("smd.0", matches, shapes, front, None)
+    out, _ = split_matches_by_side("smd.0", matches, shapes, top, None, None)
     assert out == {
-        "frontside.smd.0": [["H0"], ["H1"], ["H2"], ["H3"], ["H4"]],
+        "top_view.smd.0": [["H0"], ["H1"], ["H2"], ["H3"], ["H4"]],
     }

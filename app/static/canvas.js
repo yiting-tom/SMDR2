@@ -106,9 +106,10 @@ async function loadFileInfo() {
   if (!fileRes.ok || !libsRes.ok) return;
   const file = await fileRes.json();
   currentFileInfo = file;
-  // Restore persisted side rectangles so the overlay is visible on load.
-  sideRects.frontside = file.frontside_rect ?? null;
-  sideRects.bottomside = file.bottomside_rect ?? null;
+  // Restore persisted view rectangles so the overlay is visible on load.
+  sideRects.top_view = file.top_view_rect ?? null;
+  sideRects.bottom_view = file.bottom_view_rect ?? null;
+  sideRects.side_view = file.side_view_rect ?? null;
   const libs = (await libsRes.json()).libraries;
   $librarySwitcher.innerHTML = "";
   for (const lib of libs) {
@@ -235,35 +236,54 @@ function measureAnchor() {
   return measureState.picks.length ? measureState.picks[measureState.picks.length - 1] : null;
 }
 
-// Mark-side-regions mode. The user paints two axis-aligned, world-space
-// rectangles — frontside first, then bottomside — that tag each match
-// instance with a "frontside." / "bottomside." key prefix at save-match
-// time. Persisted per-file on the server.
+// Mark-side-regions mode. The user paints up to three axis-aligned,
+// world-space rectangles — top_view, bottom_view, side_view — that tag
+// each match instance with a "top_view." / "bottom_view." / "side_view."
+// key prefix at save-match time. Persisted per-file on the server.
 //
-//   sideRects.frontside / .bottomside : {x0,y0,x1,y1} | null  (world)
-//   markMode                          : null | "frontside" | "bottomside"
-//   markQueue                         : remaining sides to capture this session
-//   markDrag                          : { startWorld, currentWorld } | null
-const sideRects = { frontside: null, bottomside: null };
+// The mode cycles through the three slots in order. For each slot:
+//   - left-drag → provisional rect (sideRects[slot] updated, NOT yet PATCHed)
+//   - Enter     → commit current sideRects[slot] (provisional or unchanged) and advance
+//   - bare-click (release-at-press-point) → skip slot (sideRects[slot] unchanged) and advance
+//   - Esc       → cancel entire session: sideRects revert to the pre-session snapshot
+//
+// The PATCH fires once on the final commit/skip; cancelling never PATCHes.
+//
+//   sideRects.top_view / .bottom_view / .side_view : {x0,y0,x1,y1} | null
+//   sideRectsSnapshot                              : null | {...}  (pre-session copy for Esc)
+//   markMode                                       : null | "top_view" | "bottom_view" | "side_view"
+//   markQueue                                      : remaining slots to capture this session
+//   markDrag                                       : { startWorld, currentWorld } | null
+const sideRects = { top_view: null, bottom_view: null, side_view: null };
+let sideRectsSnapshot = null;
 let markMode = null;
 let markQueue = [];
 let markDrag = null;
+// CSS-pixel hitboxes for the per-view × delete glyph drawn on each label.
+// Populated each frame by drawSideRegionLabels; consumed by mousedown.
+const sideLabelHitboxes = [];
 
 const SIDE_STYLES = {
-  frontside: {
+  top_view: {
     fill:   "rgba(124, 231, 194, 0.035)",
     stroke: "rgba(124, 231, 194, 0.85)",
     label:  "top view",
     labelColor: "rgba(124, 231, 194, 0.95)",
   },
-  bottomside: {
+  bottom_view: {
     fill:   "rgba(231, 160, 124, 0.035)",
     stroke: "rgba(231, 160, 124, 0.85)",
     label:  "bottom view",
     labelColor: "rgba(231, 160, 124, 0.95)",
   },
+  side_view: {
+    fill:   "rgba(180, 168, 255, 0.035)",
+    stroke: "rgba(180, 168, 255, 0.85)",
+    label:  "side view",
+    labelColor: "rgba(180, 168, 255, 0.95)",
+  },
 };
-const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags are treated as a slip
+const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags count as a bare click (skip)
 
 // Add-mode state machine. addModeClass: null = idle; else holds the class name
 // currently being staged. matchesStaged: true once S has populated matchSet for
@@ -1650,7 +1670,7 @@ function updateStatus() {
   }
 
   if (markMode) {
-    $modeHint.textContent = `MARK ${markMode} · drag a rectangle (Esc to cancel)`;
+    $modeHint.textContent = `MARK ${markMode} · drag a rectangle, Enter to keep, click to skip`;
   } else if (measureMode) {
     const n = measureState.picks.length;
     const m = measureState.chains.length;
@@ -1692,6 +1712,21 @@ $canvas.addEventListener("mousedown", (e) => {
     $canvas.classList.add("panning");
   } else if (e.button === 0) {
     const [wx, wy] = eventToWorld(e);
+    // Per-view × delete hitbox: takes precedence over every other left-click
+    // gesture (mark drag, measure pick, selection) so the user can always
+    // remove a specific view's rectangle from the canvas chrome.
+    if (sideLabelHitboxes.length) {
+      const rect = $canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      for (const h of sideLabelHitboxes) {
+        if (cssX >= h.cssLeft && cssX <= h.cssRight &&
+            cssY >= h.cssTop  && cssY <= h.cssBottom) {
+          clearSpecificView(h.view);
+          return;
+        }
+      }
+    }
     if (markMode) {
       // Mark-mode owns the canvas: left-press starts a one-shot rectangle
       // capture for the current side. No selection, no pickbox.
@@ -1794,22 +1829,18 @@ window.addEventListener("mouseup", (e) => {
     const x0 = Math.min(x1, x2), xMax = Math.max(x1, x2);
     const y0 = Math.min(y1, y2), yMax = Math.max(y1, y2);
     const area = (xMax - x0) * (yMax - y0);
+    markDrag = null;
     if (area < MARK_MIN_AREA) {
-      // Treat as a slip — drop the drag and stay on the same side.
-      markDrag = null;
-      render();
+      // Bare-click (mousedown→mouseup at same point) — skip the current
+      // view, leaving sideRects[markMode] as-is, and advance.
+      advanceMarkSlot();
       return;
     }
+    // Real drag — capture provisionally and wait for Enter to commit.
+    // The rect is visible in the overlay immediately; pressing Enter
+    // advances to the next slot, pressing Esc reverts the whole session.
     sideRects[markMode] = { x0, y0, x1: xMax, y1: yMax };
-    markDrag = null;
-    const captured = markMode;
-    advanceMarkAfterCapture();
-    // Persist after every captured rectangle so a partial session (e.g. only
-    // frontside redraw) still saves.
-    patchSideRegions().then(() => {
-      // No-op on success; failure already surfaces via setBaseStatus.
-      void captured;
-    });
+    render();
     return;
   }
   if (!drag) return;
@@ -2347,7 +2378,9 @@ window.addEventListener("keydown", (e) => {
     }
     if (markMode) {
       if (markDrag) { markDrag = null; render(); return; }
-      exitMarkMode();
+      // Cancel the entire session: revert any provisional rectangles
+      // drawn this session, exit without PATCHing the server.
+      exitMarkMode({ commit: false });
       return;
     }
     if (scanAllByHandle) { clearScanAll(); return; }
@@ -2399,6 +2432,16 @@ window.addEventListener("keydown", (e) => {
       scanCurrentSelection();
       e.preventDefault();
     }
+    return;
+  }
+
+  // Enter inside mark mode = commit current slot's rectangle (provisional
+  // or unchanged) and advance to the next slot. After the last slot the
+  // session ends and PATCHes the three rectangles in one request.
+  if (e.key === "Enter" && markMode) {
+    if (markDrag) { markDrag = null; }
+    advanceMarkSlot();
+    e.preventDefault();
     return;
   }
 
@@ -2514,7 +2557,7 @@ const $sidesBtn = document.getElementById("sides-btn");
 const $sidesMenu = document.getElementById("sides-menu");
 
 function drawSideRegionsOverlay(hairline) {
-  for (const side of ["frontside", "bottomside"]) {
+  for (const side of ["top_view", "bottom_view", "side_view"]) {
     const r = sideRects[side];
     if (!r) continue;
     const style = SIDE_STYLES[side];
@@ -2526,7 +2569,7 @@ function drawSideRegionsOverlay(hairline) {
     ctx.lineWidth = hairline * 1.5;
     ctx.strokeRect(x, y, w, h);
   }
-  // In-progress mark-mode drag — same style as the side we're currently
+  // In-progress mark-mode drag — same style as the view we're currently
   // capturing so the user sees the live preview in the right color.
   if (markMode && markDrag && markDrag.currentWorld) {
     const [x1, y1] = markDrag.startWorld;
@@ -2546,12 +2589,19 @@ function drawSideRegionsOverlay(hairline) {
 
 // Screen-space labels for the persistent side rectangles. Drawn after the
 // world-space ctx.restore() so text stays upright and a constant size.
+// Each committed view also gets an "×" delete glyph inside the label
+// background; its CSS-pixel hitbox is pushed into sideLabelHitboxes so
+// the mousedown handler can clear that specific view.
 function drawSideRegionLabels() {
+  sideLabelHitboxes.length = 0;
   ctx.save();
   ctx.font = `${12 * dpr}px ui-sans-serif, system-ui, sans-serif`;
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "center";
-  for (const side of ["frontside", "bottomside"]) {
+  const xGlyph = "×";
+  const xGlyphW = ctx.measureText(xGlyph).width;
+  const xGap = 6 * dpr;
+  for (const side of ["top_view", "bottom_view", "side_view"]) {
     const r = sideRects[side];
     if (!r) continue;
     const style = SIDE_STYLES[side];
@@ -2562,9 +2612,10 @@ function drawSideRegionLabels() {
     const m = ctx.measureText(style.label);
     const textW = m.width;
     const textH = 12 * dpr;
-    const bgX = sx - textW / 2 - padX;
+    const innerW = textW + xGap + xGlyphW;
+    const bgX = sx - innerW / 2 - padX;
     const bgY = syTop - gap - textH - padY * 2;
-    const bgW = textW + padX * 2;
+    const bgW = innerW + padX * 2;
     const bgH = textH + padY * 2;
     ctx.fillStyle = "rgba(10, 14, 22, 0.75)";
     ctx.fillRect(bgX, bgY, bgW, bgH);
@@ -2572,7 +2623,20 @@ function drawSideRegionLabels() {
     ctx.lineWidth = 1 * dpr;
     ctx.strokeRect(bgX, bgY, bgW, bgH);
     ctx.fillStyle = style.labelColor;
-    ctx.fillText(style.label, sx, bgY + bgH - padY);
+    const labelCx = bgX + padX + textW / 2;
+    const xCx = bgX + padX + textW + xGap + xGlyphW / 2;
+    ctx.fillText(style.label, labelCx, bgY + bgH - padY);
+    ctx.fillText(xGlyph, xCx, bgY + bgH - padY);
+    // Hitbox in CSS pixels (canvas coords are device pixels, scaled by dpr).
+    // Pad a few px so the click target is forgiving.
+    const tol = 4 * dpr;
+    sideLabelHitboxes.push({
+      view: side,
+      cssLeft:   (xCx - xGlyphW / 2 - tol) / dpr,
+      cssRight:  (xCx + xGlyphW / 2 + tol) / dpr,
+      cssTop:    (bgY + padY - tol) / dpr,
+      cssBottom: (bgY + bgH - padY + tol) / dpr,
+    });
   }
   // In-progress drag: label follows the live rectangle so the user sees
   // which side they're painting before they release.
@@ -2605,9 +2669,11 @@ function drawSideRegionLabels() {
 
 function enterMarkMode(queue) {
   if (addModeClass || measureMode) return false;
+  // Snapshot pre-session sideRects so Esc can revert any provisional drags.
+  sideRectsSnapshot = { ...sideRects };
   markQueue = queue.slice();
   markMode = markQueue.shift() ?? null;
-  if (!markMode) { exitMarkMode(); return false; }
+  if (!markMode) { exitMarkMode({ commit: false }); return false; }
   if ($sidesBtn) $sidesBtn.classList.add("active");
   markDrag = null;
   updateStatus();
@@ -2615,24 +2681,36 @@ function enterMarkMode(queue) {
   return true;
 }
 
-function exitMarkMode() {
+function exitMarkMode({ commit }) {
+  if (!commit && sideRectsSnapshot) {
+    // Revert: restore the three rectangles to their pre-session state.
+    sideRects.top_view = sideRectsSnapshot.top_view ?? null;
+    sideRects.bottom_view = sideRectsSnapshot.bottom_view ?? null;
+    sideRects.side_view = sideRectsSnapshot.side_view ?? null;
+  }
+  const shouldPatch = commit && !!sideRectsSnapshot;
+  sideRectsSnapshot = null;
   markMode = null;
   markQueue = [];
   markDrag = null;
   if ($sidesBtn) $sidesBtn.classList.remove("active");
   updateStatus();
   render();
+  if (shouldPatch) {
+    patchSideRegions();
+  }
 }
 
 function toggleMarkMode() {
-  if (markMode) { exitMarkMode(); return; }
-  enterMarkMode(["frontside", "bottomside"]);
+  if (markMode) { exitMarkMode({ commit: false }); return; }
+  enterMarkMode(["top_view", "bottom_view", "side_view"]);
 }
 
 async function patchSideRegions() {
   const body = {
-    frontside_rect: sideRects.frontside,
-    bottomside_rect: sideRects.bottomside,
+    top_view_rect: sideRects.top_view,
+    bottom_view_rect: sideRects.bottom_view,
+    side_view_rect: sideRects.side_view,
   };
   try {
     const res = await fetch(API.sideRegions(), {
@@ -2655,11 +2733,26 @@ async function patchSideRegions() {
   }
 }
 
-function advanceMarkAfterCapture() {
-  // Move to the next side in the queue, or exit mark mode if done.
+function clearSpecificView(view) {
+  // Clear one view's rectangle and persist immediately. Works inside or
+  // outside mark mode; when called during mark mode the snapshot is also
+  // cleared so Esc cannot restore what the user explicitly deleted.
+  if (!sideRects[view]) return;
+  sideRects[view] = null;
+  if (sideRectsSnapshot) sideRectsSnapshot[view] = null;
+  patchSideRegions();
+  render();
+}
+
+function advanceMarkSlot() {
+  // Move to the next slot in the queue, or commit + exit when done.
   markMode = markQueue.shift() ?? null;
-  if (!markMode) exitMarkMode();
-  else { updateStatus(); render(); }
+  if (!markMode) {
+    exitMarkMode({ commit: true });
+  } else {
+    updateStatus();
+    render();
+  }
 }
 
 if ($sidesBtn) {
@@ -2681,13 +2774,14 @@ if ($sidesMenu) {
     if (!btn) return;
     $sidesMenu.hidden = true;
     const action = btn.dataset.sidesAction;
-    if (action === "both") {
-      enterMarkMode(["frontside", "bottomside"]);
-    } else if (action === "frontside" || action === "bottomside") {
+    if (action === "all") {
+      enterMarkMode(["top_view", "bottom_view", "side_view"]);
+    } else if (action === "top_view" || action === "bottom_view" || action === "side_view") {
       enterMarkMode([action]);
     } else if (action === "clear") {
-      sideRects.frontside = null;
-      sideRects.bottomside = null;
+      sideRects.top_view = null;
+      sideRects.bottom_view = null;
+      sideRects.side_view = null;
       await patchSideRegions();
       render();
     }

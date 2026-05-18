@@ -21,14 +21,15 @@
   </header>
   <nav id="class-toolbar" aria-label="Object classes">
     <button id="chain-btn" class="tool-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
-    <button id="sides-btn" class="tool-btn" type="button" title="Mark frontside / bottomside regions · left-click to draw both, right-click for options (hotkey: R)">Sides</button>
+    <button id="sides-btn" class="tool-btn" type="button" title="Mark top / bottom / side view regions · left-click to draw all, right-click for options (hotkey: R)">Sides</button>
     <span class="toolbar-sep" aria-hidden="true"></span>
   </nav>
   <div id="sides-menu" class="popup-menu" hidden>
-    <button type="button" data-sides-action="both">Redraw both</button>
-    <button type="button" data-sides-action="frontside">Redraw frontside only</button>
-    <button type="button" data-sides-action="bottomside">Redraw bottomside only</button>
-    <button type="button" data-sides-action="clear">Clear both</button>
+    <button type="button" data-sides-action="all">Redraw all</button>
+    <button type="button" data-sides-action="top_view">Redraw top view only</button>
+    <button type="button" data-sides-action="bottom_view">Redraw bottom view only</button>
+    <button type="button" data-sides-action="side_view">Redraw side view only</button>
+    <button type="button" data-sides-action="clear">Clear all</button>
   </div>
   <main>
     <canvas id="dxf-canvas"></canvas>
