@@ -6,6 +6,7 @@ from app.matching import EntityShape
 from app.rule_check import (
     SMD_TO_SUBSTRATE_MAX_DIST,
     SUBSTRATE_TO_SMD_MIN_DIST,
+    _split_handle_prefix,
     check_rules,
 )
 
@@ -16,8 +17,53 @@ def _shape(handle, x, y):
     ])
 
 
-def _bundle(match_json, shapes):
-    return {"match_json": match_json, "entity_shapes": shapes}
+def _bundle(match_json, shapes, file_ids=None, dxf_paths=None):
+    """Build a single-file role bundle. Defaults preserve the pre-multi-DXF
+    shape so existing rule tests keep passing untouched; the optional
+    `file_ids` / `dxf_paths` knobs let new tests assert against the
+    expanded fields documented in the `design-rule-checking` spec."""
+    file_ids = file_ids if file_ids is not None else ["unit_test"]
+    dxf_paths = dxf_paths if dxf_paths is not None else ["unit_test.dxf"]
+    return {
+        "file_id": file_ids[0],
+        "dxf_path": dxf_paths[0],
+        "file_ids": list(file_ids),
+        "dxf_paths": list(dxf_paths),
+        "match_json": match_json,
+        "entity_shapes": shapes,
+    }
+
+
+def _multi_bundle(per_file):
+    """Build a multi-file role bundle that mirrors `run_product_rule_check`'s
+    merge: every handle in `match_json` and every key in `entity_shapes`
+    gets the `{file_id[:8]}:` prefix. `per_file` is a list of
+    `(match_json, shapes)` tuples — one per source DXF. Synthetic
+    file_ids are valid lowercase hex (`aaaa0001`, `aaaa0002`, …) so the
+    prefix matches `_split_handle_prefix`'s strict-hex contract; real
+    file_ids are SHA-256-derived and always hex."""
+    merged_mj: dict[str, list[list[str]]] = {}
+    merged_shapes: dict = {}
+    file_ids: list[str] = []
+    dxf_paths: list[str] = []
+    for i, (mj, shapes) in enumerate(per_file, start=1):
+        fid = f"aaaa{i:04x}"  # 8 lowercase-hex chars, matches the prod scheme
+        file_ids.append(fid)
+        dxf_paths.append(f"{fid}.dxf")
+        prefix = f"{fid[:8]}:"
+        for h, shape in shapes.items():
+            merged_shapes[prefix + h] = shape
+        for key, groups in mj.items():
+            ns_groups = [[prefix + h for h in g] for g in groups]
+            merged_mj.setdefault(key, []).extend(ns_groups)
+    return {
+        "file_id": file_ids[0],
+        "dxf_path": dxf_paths[0],
+        "file_ids": file_ids,
+        "dxf_paths": dxf_paths,
+        "match_json": merged_mj,
+        "entity_shapes": merged_shapes,
+    }
 
 
 def _check_envelope(result):
@@ -184,3 +230,67 @@ def test_rule3_handles_no_smds():
     assert r["Rule3"]["pass"] is False
     assert "no SMD" in r["Rule3"]["text"]
     assert r["Rule3"]["rules"] == []
+
+
+# ---- Handle-prefix split + multi-DXF bundle merge ----------------------
+# See the `design-rule-checking` capability spec, requirement
+# "Per-role bundle merging and handle prefix", for the contract these
+# tests pin down.
+
+def test_split_handle_prefix_round_trips_prefixed_handle():
+    assert _split_handle_prefix("a3f12b9c:7AF") == ("a3f12b9c", "7AF")
+
+
+def test_split_handle_prefix_returns_none_for_unprefixed_handle():
+    assert _split_handle_prefix("7AF") == (None, "7AF")
+
+
+def test_split_handle_prefix_requires_colon_separator():
+    # 8 hex chars without the colon are NOT a prefix — the separator is
+    # the contract invariant, not the hex shape.
+    assert _split_handle_prefix("a3f12b9c") == (None, "a3f12b9c")
+
+
+def test_multi_bundle_merges_two_files_with_distinct_prefixes():
+    """Two synthetic BD files contribute one substrate handle each;
+    the merged bundle must carry both handles, each under its own
+    `{file_id[:8]}:` prefix, in both match_json and entity_shapes."""
+    bundle = _multi_bundle([
+        ({"substrate.0": [["A"]]}, {"A": _shape("A", 0, 0)}),
+        ({"substrate.0": [["B"]]}, {"B": _shape("B", 100, 0)}),
+    ])
+    # File-list fields populated, singular fields default to the first.
+    assert bundle["file_ids"] == ["aaaa0001", "aaaa0002"]
+    assert bundle["file_id"] == "aaaa0001"
+    assert bundle["dxf_paths"] == ["aaaa0001.dxf", "aaaa0002.dxf"]
+    # Every handle in match_json is prefixed and resolvable in shapes.
+    flat_handles = [h for groups in bundle["match_json"]["substrate.0"] for h in groups]
+    assert flat_handles == ["aaaa0001:A", "aaaa0002:B"]
+    for h in flat_handles:
+        assert h in bundle["entity_shapes"]
+        prefix, raw = _split_handle_prefix(h)
+        assert prefix in {"aaaa0001", "aaaa0002"}
+        assert raw in {"A", "B"}
+    # check_rules treats the merged bundle as a normal role bundle —
+    # the prefix is opaque to every existing helper.
+    r = check_rules("p", {"BD": bundle})
+    _check_envelope(r)
+
+
+def test_single_file_bundle_carries_unprefixed_handles():
+    """`_bundle` (the default single-file helper) must not prefix
+    anything — that contract guarantees existing rule tests keep
+    passing untouched after the multi-DXF merge landed."""
+    bd = _bundle(
+        match_json={"substrate.0": [["S1"]], "smd_2t.0": [["A", "B", "C"]]},
+        shapes={
+            "S1": _shape("S1", 0, 0),
+            "A":  _shape("A", 100, 0),
+            "B":  _shape("B", 102, 0),
+            "C":  _shape("C", 104, 0),
+        },
+    )
+    assert bd["file_ids"] == ["unit_test"]
+    for h in bd["entity_shapes"]:
+        prefix, _ = _split_handle_prefix(h)
+        assert prefix is None  # no merge prefix on a single-file bundle

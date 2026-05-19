@@ -33,6 +33,7 @@ list and finds the global minimum-distance pair.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -78,6 +79,33 @@ def _all_handles_for_prefix(match_json: MatchJson, class_prefix: str) -> list[st
 
 def _count_for_prefix(match_json: MatchJson, class_prefix: str) -> int:
     return sum(1 for _ in _all_match_groups(match_json, class_prefix))
+
+
+# `{file_id[:8]}:` prefix added by `run_product_rule_check` when a role
+# holds ≥ 2 DXFs so handles from different files don't collide inside
+# the merged bundle. See the `design-rule-checking` capability spec —
+# "Per-role bundle merging and handle prefix" — for the full contract.
+_HANDLE_PREFIX_RE = re.compile(r"^([0-9a-f]{8}):(.+)$")
+
+
+def _split_handle_prefix(h: str) -> tuple[str | None, str]:
+    """Return `(file_id_prefix, raw_handle)` for a prefixed handle, or
+    `(None, h)` when the input carries no prefix.
+
+    The prefix is recognised only when the input starts with exactly 8
+    lowercase-hex chars followed by `:`. Strings that look hex-like but
+    lack the colon (e.g. an unprefixed handle that happens to be 8 hex
+    chars) return `(None, input)` — the colon separator is the contract
+    invariant, not the hex shape.
+
+    Rules that need to fan out per source DXF SHOULD go through this
+    helper rather than parsing the prefix inline; that keeps the
+    `app/rule_check.py` helpers' "handles are opaque strings" invariant
+    intact for every rule that doesn't care."""
+    m = _HANDLE_PREFIX_RE.match(h)
+    if m is None:
+        return (None, h)
+    return (m.group(1), m.group(2))
 
 
 # Geometric shortest-distance helpers (mirror canvas.js shortestSegmentBetween).
