@@ -20,30 +20,49 @@ entities) SHALL be emitted as a `circle` primitive carrying
 `center: [x, y]` and `r: float` instead of being flattened to a
 closed polyline.
 
+Closed sub-paths produced by `Frontend.draw_path` SHALL be probed by
+the circle detector **regardless of whether the sub-path carries
+curve segments**. When `sub.has_curves == True` the detector SHALL
+require at least `CIRCLE_MIN_VERTS = 8` candidate vertices; when
+`sub.has_curves == False` (pure line segments — typically a closed
+LWPOLYLINE / POLYLINE authored as an N-gon approximation of a
+circle, as commonly seen for BGA balls in some packaging DXFs) the
+detector SHALL require at least `CIRCLE_MIN_VERTS_NOCURVE = 11`
+candidate vertices. The higher no-curves threshold protects
+legitimate low-N polygon pads (squares, hexagons, octagons,
+dodecagons) whose radial variance can coincidentally fall under
+`CIRCLE_RADIAL_TOL`; the threshold is set to 11 because regular
+polygons used as deliberate pad shapes in IC packaging
+substantively use N ∈ {3, 4, 6, 8, 12} and never N=11.
+
 Filled circular regions reaching `Frontend.draw_filled_paths` (for
 example, a HATCH entity whose only boundary is a circular edge) SHALL
 likewise be emitted as a single `circle` primitive — `center` + `r`
 plus an additional `filled: true` flag — instead of as a
 `filled_polygon` carrying the flattened boundary ring, **provided
 the call satisfies all of**: exactly one input path, exactly one
-sub-path, `sub.is_closed`, `getattr(sub, "has_curves", False)`, and a
-positive detection from the same circle predicate used by
-`draw_path`. When any one of those conditions fails (multi-path
-HATCH, multi-sub-path HATCH with holes, polyline-only sub-path that
-happens to be near-circular, etc.), the system SHALL fall back to
-the existing `filled_polygon` emit.
+sub-path, `sub.is_closed`, and a positive detection from the same
+circle predicate used by `draw_path` (with the same dual-threshold:
+`CIRCLE_MIN_VERTS = 8` for `has_curves == True`,
+`CIRCLE_MIN_VERTS_NOCURVE = 11` for `has_curves == False`). When any
+one of those conditions fails (multi-path HATCH, multi-sub-path
+HATCH with holes, sub-path whose vertex count is below the
+applicable threshold, sub-path whose radial variance exceeds
+tolerance, etc.), the system SHALL fall back to the existing
+`filled_polygon` emit.
 
 Stroke-only circles emitted from `draw_path` SHALL continue to omit
 the `filled` field (equivalent to `filled: false`); the field is
 strictly additive and OPTIONAL on the `circle` primitive shape.
 
-The detection predicate SHALL require at least 8 candidate vertices
-and a radial variance `(rmax - rmin) / rmean ≤ 0.02`, identical for
-the `draw_path` and `draw_filled_paths` code paths. Each primitive
-SHALL carry the source DXF entity handle so the matching engine and
-frontend can resolve back to the original entity. When the chosen
-tolerance differs from `BASE_TOLERANCE`, the system SHALL emit one
-info-level log line recording the diagonal and the chosen tolerance.
+The detection predicate SHALL require a radial variance
+`(rmax - rmin) / rmean ≤ CIRCLE_RADIAL_TOL = 0.02`, identical for
+the `draw_path` and `draw_filled_paths` code paths and identical
+for the curves and no-curves cases. Each primitive SHALL carry the
+source DXF entity handle so the matching engine and frontend can
+resolve back to the original entity. When the chosen tolerance
+differs from `BASE_TOLERANCE`, the system SHALL emit one info-level
+log line recording the diagonal and the chosen tolerance.
 
 #### Scenario: Flatten the bundled sample
 - **WHEN** `flatten_for_render("data/test.dxf")` is called
@@ -82,10 +101,27 @@ info-level log line recording the diagonal and the chosen tolerance.
 - **AND** the result contains no `filled_polygon` primitive for that handle
 - **AND** the primitive's `decorative` flag is `true` (HATCH is in `DECORATIVE_DXFTYPES`)
 
-#### Scenario: A HATCH with a non-circular polyline boundary stays a filled_polygon
-- **WHEN** a DXF containing a HATCH whose boundary is a polyline-only path (`has_curves == False`) is flattened
-- **THEN** the result for that handle contains a `filled_polygon` primitive
-- **AND** does NOT contain a `circle` primitive, even if the polyline vertices happen to lie on a circle
+#### Scenario: A pure-line LWPOLYLINE approximating a circle becomes a circle primitive
+- **WHEN** a DXF containing a closed LWPOLYLINE with 24 vertices spaced uniformly on a circle (radius 0.15 mm, centre (3.0, 4.0)) is flattened
+- **THEN** the result contains exactly one primitive for the LWPOLYLINE's handle with `type == "circle"` and `filled` absent or falsey
+- **AND** the primitive's `center` and `r` match the source vertices within 1 % radial tolerance
+- **AND** the result contains no `polyline` primitive for that handle
+
+#### Scenario: A pure-line LWPOLYLINE at the boundary vertex count is promoted
+- **WHEN** a DXF containing a closed LWPOLYLINE with exactly 11 vertices uniformly on a circle is flattened
+- **THEN** the result contains a `circle` primitive for that handle
+- **AND** does NOT contain a `polyline` primitive for that handle
+
+#### Scenario: A pure-line LWPOLYLINE below the no-curves threshold stays a polyline
+- **WHEN** a DXF containing a closed LWPOLYLINE with 10 vertices uniformly on a circle (i.e., a decagon) is flattened
+- **THEN** the result contains a `polyline` primitive for that handle
+- **AND** does NOT contain a `circle` primitive (vertex count is below `CIRCLE_MIN_VERTS_NOCURVE`)
+
+#### Scenario: A HATCH bounded by a pure-line LWPOLYLINE circle becomes a filled circle primitive
+- **WHEN** a DXF containing a HATCH whose only boundary is a closed LWPOLYLINE with 24 vertices uniformly on a circle (radius 0.30 mm) is flattened
+- **THEN** the result contains exactly one primitive for the HATCH's handle with `type == "circle"` and `filled == true`
+- **AND** the primitive's `decorative` flag is `true`
+- **AND** the result contains no `filled_polygon` primitive for that handle
 
 #### Scenario: A multi-sub-path HATCH (e.g., annulus) stays a filled_polygon
 - **WHEN** a DXF containing a HATCH with an outer circular boundary and an inner circular hole is flattened

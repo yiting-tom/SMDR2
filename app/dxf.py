@@ -45,10 +45,18 @@ SCALE_FACTOR = 1e-5
 # Legacy alias kept for external imports / downstream readers.
 CURVE_FLATTENING_DISTANCE = BASE_TOLERANCE
 
-# Circle-detection thresholds. Kept in lockstep with the client-side
+# Circle-detection thresholds. `CIRCLE_MIN_VERTS` (curves case) and
+# `CIRCLE_RADIAL_TOL` are kept in lockstep with the client-side
 # `detectCircle` in app/static/measure_core.js so server emit and client
-# OSNAP/QUA snap agree on what counts as a circle.
+# OSNAP/QUA snap agree on what counts as a circle for sub-paths the
+# server did NOT pre-convert. `CIRCLE_MIN_VERTS_NOCURVE` is server-only:
+# it gates promotion of pure-line LWPOLYLINE / POLYLINE entities whose
+# vertices happen to lie on a circle (typical for BGA balls authored as
+# N-gons in some packaging DXFs). The higher floor protects deliberate
+# low-N polygon pads (N ∈ {3, 4, 6, 8, 12}) whose perfectly regular
+# radial layout would otherwise sail through `CIRCLE_RADIAL_TOL`.
 CIRCLE_MIN_VERTS = 8
+CIRCLE_MIN_VERTS_NOCURVE = 11
 CIRCLE_RADIAL_TOL = 0.02
 
 # DXF entity types that should be rendered but NOT participate in selection,
@@ -196,15 +204,23 @@ class JSONBackend(BackendInterface):
             points = _flatten_path(sub, self.flatten_tolerance)
             if len(points) < 2:
                 continue
-            # Closed curve sub-paths (CIRCLE, 360° ARC, etc.) that the radial
-            # test recognises are emitted as a `circle` primitive instead of
-            # a many-vertex closed polyline — saves ~30× on memory / bandwidth
-            # for BGA-ball-heavy packaging DXFs and lets the canvas draw via
-            # ctx.arc + sub-pixel LOD batching. `has_curves` gates against
-            # collapsing pure-LINE polylines that happen to approximate a
-            # circle (an N-gon SMD pad with N ≥ 8 must keep its corners).
-            if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
-                circle = _detect_circle_subpath(points)
+            # Closed sub-paths whose flattened vertices describe a circle
+            # within tolerance are emitted as a `circle` primitive instead
+            # of a many-vertex closed polyline — saves ~30× on memory /
+            # bandwidth for BGA-ball-heavy packaging DXFs and lets the
+            # canvas draw via ctx.arc + sub-pixel LOD batching. The
+            # vertex-count floor is dual: `CIRCLE_MIN_VERTS` (8) when
+            # ezdxf flattened a real curve (`has_curves`), and the
+            # higher `CIRCLE_MIN_VERTS_NOCURVE` (11) when the sub-path
+            # is pure line segments (typical for BGA balls authored as
+            # LWPOLYLINE N-gons). The higher floor for the no-curves
+            # case protects deliberate low-N polygon pads (N ∈
+            # {3, 4, 6, 8}) whose perfectly regular radial layout
+            # would otherwise sail through the radial test.
+            if bool(sub.is_closed):
+                has_curves = bool(getattr(sub, "has_curves", False))
+                min_verts = CIRCLE_MIN_VERTS if has_curves else CIRCLE_MIN_VERTS_NOCURVE
+                circle = _detect_circle_subpath(points, min_verts)
                 if circle is not None:
                     cx, cy = circle["center"]
                     r = circle["r"]
@@ -229,19 +245,27 @@ class JSONBackend(BackendInterface):
     ) -> None:
         common = _props(properties)
         paths_list = list(paths)
-        # Fast path: a single closed-curved sub-path that detects as a circle
-        # (e.g., HATCH bounded by a CIRCLE) collapses to a `circle` primitive
-        # so the canvas renderer can use ctx.arc + sub-pixel dot batching
-        # instead of filling an N-vertex polygon. Same `has_curves` gate as
-        # draw_path so a filled N-gon SMD pad keeps its corners.
+        # Fast path: a single closed sub-path that detects as a circle
+        # (e.g., HATCH bounded by a CIRCLE, or a HATCH bounded by an
+        # LWPOLYLINE N-gon approximating a circle) collapses to a
+        # `circle` primitive so the canvas renderer can use ctx.arc +
+        # sub-pixel dot batching instead of filling an N-vertex
+        # polygon. Same dual-threshold rule as draw_path:
+        # `CIRCLE_MIN_VERTS` (8) for `has_curves` sub-paths,
+        # `CIRCLE_MIN_VERTS_NOCURVE` (11) for pure-line sub-paths, so
+        # a filled N-gon SMD pad keeps its corners.
         if len(paths_list) == 1:
             subs = list(paths_list[0].sub_paths())
             if len(subs) == 1:
                 sub = subs[0]
-                if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
+                if bool(sub.is_closed):
                     pts = _flatten_path(sub, self.flatten_tolerance)
                     if len(pts) >= 3:
-                        circle = _detect_circle_subpath(pts)
+                        has_curves = bool(getattr(sub, "has_curves", False))
+                        min_verts = (
+                            CIRCLE_MIN_VERTS if has_curves else CIRCLE_MIN_VERTS_NOCURVE
+                        )
+                        circle = _detect_circle_subpath(pts, min_verts)
                         if circle is not None:
                             cx, cy = circle["center"]
                             r = circle["r"]
@@ -345,17 +369,22 @@ def _flatten_path(sub: NumpyPath2d, tolerance: float = BASE_TOLERANCE) -> list[l
     return [[float(v.x), float(v.y)] for v in sub.flattening(tolerance)]
 
 
-def _detect_circle_subpath(points: list[list[float]]) -> dict[str, Any] | None:
+def _detect_circle_subpath(
+    points: list[list[float]], min_verts: int = CIRCLE_MIN_VERTS
+) -> dict[str, Any] | None:
     """Return `{"center": [cx, cy], "r": float}` when `points` describe a
-    circle within tolerance, else None. Predicate matches the client-side
-    `detectCircle` so server emit and client OSNAP agree. Caller is expected
-    to gate this on `sub.is_closed and sub.has_curves` to avoid collapsing
-    real polylines whose vertex layout happens to be near-circular."""
-    if len(points) < CIRCLE_MIN_VERTS:
+    circle within tolerance, else None. The radial predicate matches the
+    client-side `detectCircle`. Caller is expected to gate on
+    `sub.is_closed` and to pick `min_verts` per the curves vs no-curves
+    rule: `CIRCLE_MIN_VERTS` (8) when ezdxf flattened a real curve
+    sub-path, `CIRCLE_MIN_VERTS_NOCURVE` (11) when the sub-path is pure
+    line segments — the higher floor keeps deliberate low-N polygon
+    pads from being eaten by the radial test."""
+    if len(points) < min_verts:
         return None
     first, last = points[0], points[-1]
     n = len(points) - 1 if first[0] == last[0] and first[1] == last[1] else len(points)
-    if n < CIRCLE_MIN_VERTS:
+    if n < min_verts:
         return None
     sx = sy = 0.0
     for i in range(n):

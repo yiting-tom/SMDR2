@@ -110,6 +110,121 @@ def test_hatch_bounded_by_circle_emits_filled_circle(tmp_path):
     assert cp.get("decorative") is True
 
 
+def _circular_polyline_pts(n: int, cx: float, cy: float, r: float) -> list[tuple[float, float]]:
+    import math as _math
+
+    return [
+        (cx + r * _math.cos(2 * _math.pi * i / n), cy + r * _math.sin(2 * _math.pi * i / n))
+        for i in range(n)
+    ]
+
+
+def test_pure_line_polyline_circle_emits_circle(tmp_path):
+    """A closed LWPOLYLINE with N=24 vertices uniformly on a circle (pure
+    line segments — typical BGA-ball-as-polygon authoring) SHALL collapse
+    to a `circle` primitive carrying `center` + `r`, not a polyline."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=24, cx=3.0, cy=4.0, r=0.15)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "ball_polyline.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle, "expected at least one primitive for the LWPOLYLINE"
+    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
+    polyline_prims = [p for p in prims_for_handle if p["type"] == "polyline"]
+    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
+    assert not polyline_prims, "circular LWPOLYLINE must not also emit a polyline"
+    cp = circle_prims[0]
+    cx, cy = cp["center"]
+    assert abs(cx - 3.0) < 1e-3 and abs(cy - 4.0) < 1e-3
+    assert abs(cp["r"] - 0.15) / 0.15 < 0.01
+    # Stroke-only (came through draw_path) — `filled` is absent or falsey.
+    assert not cp.get("filled")
+
+
+def test_pure_line_polyline_circle_at_threshold_emits_circle(tmp_path):
+    """N=11 is the boundary; the LWPOLYLINE must still promote to circle."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=11, cx=0.0, cy=0.0, r=0.25)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "ball_11.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle
+    types = {p["type"] for p in prims_for_handle}
+    assert "circle" in types, "N=11 circular LWPOLYLINE must promote to circle"
+    assert "polyline" not in types
+
+
+def test_pure_line_polyline_circle_below_threshold_stays_polyline(tmp_path):
+    """N=10 is below `CIRCLE_MIN_VERTS_NOCURVE`; the polyline must stay a
+    polyline even though its vertices lie on a circle within tolerance.
+    Guards against eating deliberate decagonal / octagonal / hexagonal
+    pads."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=10, cx=0.0, cy=0.0, r=0.25)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "decagon.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle
+    types = {p["type"] for p in prims_for_handle}
+    assert "circle" not in types, "N=10 < threshold; must NOT promote to circle"
+    assert "polyline" in types
+
+
+def test_hatch_bounded_by_polyline_circle_emits_filled_circle(tmp_path):
+    """A HATCH whose only boundary is a 24-vertex closed LWPOLYLINE on a
+    circle (no curve edges) SHALL collapse to a single `{type:"circle",
+    filled:true}` primitive — the same fast path that already covers
+    HATCH bounded by a CIRCLE / 360° ARC."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    hatch = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    pts = _circular_polyline_pts(n=24, cx=2.0, cy=-1.0, r=0.30)
+    poly_path = hatch.paths.add_polyline_path(pts, is_closed=True)
+    assert poly_path is not None
+
+    dxf_path = tmp_path / "filled_polyline_circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == hatch.dxf.handle]
+    assert prims_for_handle, "expected at least one primitive for the HATCH"
+    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
+    filled_polys = [p for p in prims_for_handle if p["type"] == "filled_polygon"]
+    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
+    assert not filled_polys, "polyline-bounded filled circle must not fall back to filled_polygon"
+    cp = circle_prims[0]
+    assert cp.get("filled") is True
+    cx, cy = cp["center"]
+    assert abs(cx - 2.0) < 1e-3 and abs(cy - (-1.0)) < 1e-3
+    assert abs(cp["r"] - 0.30) / 0.30 < 0.01
+    # HATCH is decorative; inheritance must survive the polyline → circle
+    # promotion just as it does for the CIRCLE-bounded case.
+    assert cp.get("decorative") is True
+
+
 def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     """An 8-vertex closed POLYLINE that is NOT a circular approximation must
     remain a polyline — guards against the circle detector eating real
