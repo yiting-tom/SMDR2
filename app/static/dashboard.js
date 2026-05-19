@@ -443,7 +443,13 @@ function showRuleResults(product, data) {
       subList.appendChild(li);
     } else {
       subs.forEach((sub, idx) => {
-        const file = product.files_by_role[sub.part];
+        // Prefer `sub.file_id` (set by every origin-scoped rule) so
+        // multi-DXF roles route to the DXF whose geometry the sub-rule
+        // actually references. Falls back to the primary file for the
+        // role when the rule emits no `file_id` (e.g. legacy data).
+        const siblings = product.files_by_role_all?.[sub.part] ?? [];
+        const file = (sub.file_id && siblings.find(f => f.id === sub.file_id))
+                  || product.files_by_role[sub.part];
         const li = document.createElement("li");
         const viewBtn = file
           ? `<a class="view-link" href="/viewer/${file.id}?rule=${encodeURIComponent(name)}&idx=${idx}">View in ${sub.part} →</a>`

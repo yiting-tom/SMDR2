@@ -5,28 +5,53 @@ TBD - created by archiving change initial-build. Update Purpose after archive.
 ## Requirements
 ### Requirement: RuleChecking JSON output shape
 
-`check_rules(dxf_path, match_json, entity_shapes=None)` SHALL return a
-dict keyed by rule name; each value SHALL be a dict with the keys
-`checkRule` (string description), `pass` (bool), and `handleIds` (list
-of DXF entity handles relevant to the rule). The shape SHALL match the
-contract of the downstream design rule checker.
+The function `check_rules(product_id, dxfs_by_role)` SHALL return a
+dict keyed by rule name. Each value SHALL be a dict with the keys
+`pass` (bool), `text` (string, the overall rule description / failure
+reason), and `rules` (list of zero or more sub-rules).
+
+Each sub-rule SHALL carry `part` (`"SBT"` | `"BD"` | `"POD"` |
+`"RING"`), `from` (list of source DXF handles, raw / unprefixed),
+`to` (list of target handles, raw / unprefixed), and `text`
+(per-sub-rule message). Origin-scoped rules (every rule that can name
+one source DXF — i.e. all built-in mock rules today) SHALL also
+emit `file_id` carrying the full id of the DXF the sub-rule's
+geometry lives in. The viewer and dashboard SHALL route on
+`file_id` to pick which DXF to open / focus; `from` and `to` SHALL
+resolve directly against that DXF's raw handle index, no prefix
+parsing required by the consumer. Each sub-rule SHALL be a dict with the keys `part`
+(`"SBT"` | `"BD"` | `"POD"` | `"RING"` — the role whose viewer
+should render the annotation), `from` (list of source handles), `to`
+(list of target handles), and `text` (per-sub-rule message; for
+geometric rules this SHALL begin with an origin label of the form
+`[<view>]` / `[file=<prefix>]` / `[<view> | file=<prefix>]` so the
+coordinate space being checked is visible).
+
+The viewer SHALL draw the shortest segment between any vertex pair
+across `from` and `to`; `from` / `to` are lists rather than scalars
+so a future rule MAY reference a group of entities on either side.
 
 #### Scenario: Output is a dict of rule payloads
-- **WHEN** `check_rules("ignored.dxf", {})` is called
-- **THEN** the result is a dict where every value has keys `checkRule`, `pass`, `handleIds`
-- **AND** `pass` is a `bool` and `handleIds` is a `list`
+- **WHEN** `check_rules("p", {})` is called
+- **THEN** the result is a dict where every value has keys `pass`, `text`, `rules`
+- **AND** `pass` is a `bool`, `text` is a `str`, and `rules` is a `list`
+- **AND** every entry in `rules` has the keys `part`, `from`, `to`, `text` with the documented types
 
 ### Requirement: Mock Rule1 — substrate-to-first-SMD distance
 
-The mock checker SHALL implement Rule1: the distance between the
-substrate's combined centroid and the first SMD match's combined
-centroid SHALL exceed 5 mm. `handleIds` SHALL contain the substrate's
-handle(s) plus all entities of the first SMD match.
+The mock checker SHALL implement Rule1: for every `(view, file_prefix)`
+origin that contains BOTH a substrate match and an SMD-2T match in the
+BD bundle, the shortest distance between the first substrate group
+and the first SMD-2T group of that origin SHALL exceed 5 mm. Each
+origin SHALL produce one sub-rule with `from` = substrate handles,
+`to` = SMD-2T handles, and a `text` prefixed with the origin label
+(`[top_view]`, `[bottom_view | file=aaaa0001]`, …). The rule SHALL
+pass only when every checked origin passes.
 
 #### Scenario: Far-apart substrate and SMD passes
 - **WHEN** the substrate is at (0,0) and the first SMD is at (100,0)
 - **THEN** Rule1 passes
-- **AND** `handleIds` contains the substrate and SMD entity handles
+- **AND** the sub-rule's `from` carries the substrate handles and `to` carries the first SMD's handles
 
 #### Scenario: Close substrate and SMD fails
 - **WHEN** the distance between substrate and first SMD is below 5 mm
@@ -34,8 +59,18 @@ handle(s) plus all entities of the first SMD match.
 - **AND** the description text contains the threshold value
 
 #### Scenario: Missing substrate fails Rule1
-- **WHEN** the Match JSON has no `substrate.*` entries
+- **WHEN** the Match JSON has no `substrate.*` / `<view>.substrate.*` entries
 - **THEN** Rule1 fails with a description explaining what is missing
+
+#### Scenario: Substrate and SMD-2T live in different views
+- **WHEN** the BD bundle has substrate only in `top_view.substrate.*` and SMD-2T only in `bottom_view.smd_2t.*`
+- **THEN** Rule1 fails with text indicating no shared view/DXF was found
+- **AND** no sub-rule is emitted (no geometrically valid pair exists)
+
+#### Scenario: Multi-view BD emits one sub-rule per shared origin
+- **WHEN** the BD bundle has both substrate and SMD-2T in `top_view` AND in `bottom_view`
+- **THEN** Rule1 emits exactly two sub-rules, one tagged with `top_view` and one with `bottom_view`
+- **AND** the rule passes only if both pairs exceed the threshold
 
 ### Requirement: Rule check API and persistence
 
@@ -54,6 +89,69 @@ same path SHALL return the most recently persisted result.
 #### Scenario: Rule check before Save Match fails clearly
 - **WHEN** the user invokes rule check on a file with no saved Match JSON
 - **THEN** the API returns 400 with a message indicating Match JSON is missing
+
+### Requirement: External DRC handoff bundle format
+
+SMDR2 SHALL package every product's DRC inputs into a self-describing
+**handoff bundle** the external rule-checking team consumes — a
+directory (or zip) containing one `manifest.json` at the root plus
+the DXF and Match JSON files referenced from it. (Production rule
+checking is performed by a separate team; this requirement defines
+the contract at that boundary.)
+
+`manifest.json` SHALL conform to
+`openspec/specs/design-rule-checking/drc-manifest.schema.json`
+(JSON Schema draft 2020-12). The top-level object SHALL carry:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `bundle_version` | semver string | yes | Manifest contract version. Consumers MUST refuse a major version they do not understand. Initial value: `"1.0.0"`. |
+| `product_id` | string | yes | SMDR2 internal product id, opaque to the consumer. |
+| `product_name` | string | no | Human-readable name for cross-referencing reports. |
+| `exported_at` | ISO 8601 string | no | Bundle generation time, second precision or finer. |
+| `files` | array of `file_entry` | yes | Every (DXF, Match JSON) pair in the bundle. |
+
+Every `file_entry` SHALL carry exactly these four keys:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `role` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` | Functional role this DXF plays. The same role MAY appear in multiple entries — that is the multi-DXF case. |
+| `file_id` | lowercase-hex string | SMDR2's content-hash-derived file identifier. The first 8 hex chars are the canonical short form used internally. |
+| `dxf` | bundle-relative POSIX path | The DXF file. MUST resolve to a regular file inside the bundle. |
+| `match_json` | bundle-relative POSIX path | The Match JSON for this DXF. Keys are `<class>.<index>` or `<view>.<class>.<index>` (see "RuleChecking JSON output shape" requirement above for `<view>` values). |
+
+Each Match JSON in the bundle SHALL be the file's own per-DXF Match
+JSON exactly as persisted at `data/match/{file_id}.json` — **not**
+the merged role-bundle form produced internally by
+`run_product_rule_check`. Handles SHALL NOT carry the
+`<file_id[:8]>:` prefix that the internal merge applies; the external
+team's per-file consumption keeps every DXF in its own coordinate
+space without needing to know the prefix scheme.
+
+Within-file view scoping (top/bottom/side) SHALL remain encoded in
+the Match JSON key prefix; no separate side-region rect data is
+required in the bundle.
+
+#### Scenario: Single-DXF-per-role product
+- **WHEN** a product has exactly one DXF under each of `SBT`, `BD`, `POD`, `RING`
+- **THEN** `manifest.files` has length 4
+- **AND** each role appears in exactly one entry
+- **AND** every `dxf` and `match_json` path resolves to a file inside the bundle
+
+#### Scenario: Multi-DXF-per-role product
+- **WHEN** a product has two DXFs under `BD` (e.g., top + bottom siblings) and one each under `SBT`, `POD`, `RING`
+- **THEN** `manifest.files` has length 5
+- **AND** exactly two entries carry `role: "BD"` with different `file_id` values
+- **AND** each entry's `match_json` is the per-DXF Match JSON with raw, unprefixed handles
+
+#### Scenario: Match JSON handles are not pre-merged
+- **WHEN** a consumer reads any Match JSON referenced from a `file_entry`
+- **THEN** every handle in every match group SHALL be a raw DXF handle
+- **AND** no handle SHALL begin with `^[0-9a-f]{8}:` (the internal merge prefix)
+
+#### Scenario: Major version mismatch is refused
+- **WHEN** a consumer reads a manifest whose `bundle_version` major component does not match a major version it implements
+- **THEN** the consumer SHALL refuse to process the bundle and SHALL surface a version-mismatch error to its operator
 
 ### Requirement: Rule panel hover and pinned highlight
 
@@ -92,7 +190,7 @@ resulting bundle dict SHALL carry these keys:
 | `dxf_path` | `str` | First dxf_path in `dxf_paths` (first-file fallback) |
 | `file_ids` | `list[str]` | Every file_id in this role, in `_group_files_by_role` order (multi → top → bottom → side) |
 | `dxf_paths` | `list[str]` | Parallel to `file_ids` — the on-disk DXF path for each |
-| `match_json` | `dict[str, list[list[str]]]` | Concatenation of every per-file Match JSON read from `data/match/{file_id}.json`, merged under the same `<class>.<index>` keys |
+| `match_json` | `dict[str, list[list[str]]]` | Concatenation of every per-file Match JSON read from `data/match/{file_id}.json`, merged under the same keys. Each key is either `<class>.<index>` (instance bbox-center outside every side-region rect, or the file has no side regions) or `<view>.<class>.<index>` where `<view>` ∈ {`top_view`, `bottom_view`, `side_view`} (assigned by `app/side_regions.py:split_matches_by_side`). Rule helpers SHALL recognise both shapes. |
 | `entity_shapes` | `dict[str, EntityShape]` | Union of every per-file `entity_shapes` dict |
 
 The handle-prefix invariant SHALL hold:
@@ -110,12 +208,20 @@ The handle-prefix invariant SHALL hold:
 
 Rule logic and the helper functions in `app/rule_check.py`
 (`_first_match_handles`, `_all_match_groups`, `_all_handles_for_prefix`,
-`_count_for_prefix`, `_shortest_distance`) SHALL treat handles as
-opaque strings — they SHALL NOT inspect, parse, or branch on the
-prefix. Rules that genuinely need file-of-origin SHALL go through the
+`_count_for_prefix`, `_iter_class_groups`, `_shortest_distance`) SHALL
+treat handles as opaque strings — they SHALL NOT inspect, parse, or
+branch on the prefix. Rules that genuinely need file-of-origin SHALL go through the
 documented helper `_split_handle_prefix(h) -> tuple[str | None, str]`
 (returns `(prefix_8_chars, raw_handle)` for prefixed handles,
 `(None, h)` for unprefixed).
+
+Geometric rules SHALL scope distance comparisons by
+`(view, file_prefix)` origin via `_iter_class_groups(match_json, class)`,
+which yields `((view, file_prefix), handles)` for every match group of
+the given class. Comparing two shapes from different origins is not
+defined (different coordinate spaces on the page, or different DXFs)
+and SHALL be reported as a no-pair / no-substrate failure rather than
+silently merging the shapes.
 
 `_split_handle_prefix` SHALL recognise a prefix only when the leading
 characters match `^[0-9a-f]{8}:` exactly. Strings that look like a

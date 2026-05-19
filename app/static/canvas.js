@@ -1350,17 +1350,34 @@ function renderRuleSidebar(role) {
   highlightFocusedInSidebar();
 }
 
+// Pick the DXF the sub-rule's geometry actually lives in. When the
+// backend tags the sub-rule with `file_id` (multi-DXF roles do, every
+// new rule SHOULD) we route on that exactly — otherwise the primary
+// file for the role is good enough (single-DXF case).
+function resolveSubRuleFile(sub) {
+  const siblings = currentProductInfo?.files_by_role_all?.[sub.part] ?? [];
+  if (sub.file_id) {
+    const match = siblings.find(f => f.id === sub.file_id);
+    if (match) return match;
+  }
+  return currentProductInfo?.files_by_role?.[sub.part] ?? null;
+}
+
 function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
   const li = document.createElement("li");
   li.dataset.ruleName = ruleName;
   li.dataset.idx = String(idx);
-  const sibling = currentProductInfo?.files_by_role?.[sub.part];
+  const targetFile = resolveSubRuleFile(sub);
+  // "Local focus" only when the sub-rule's geometry is on THIS DXF.
+  // For multi-DXF roles `sub.part === currentRole` isn't enough — two
+  // BD siblings share a role but live in separate coordinate spaces.
+  const isLocal = !!targetFile && targetFile.id === FILE_ID;
 
   let hintHtml = "";
-  if (sub.part === currentRole) {
+  if (isLocal) {
     li.classList.add("same-role");
     hintHtml = `<span class="nav-hint">show</span>`;
-  } else if (sibling) {
+  } else if (targetFile) {
     li.classList.add("other-role");
     hintHtml = `<span class="nav-hint">→ ${escapeHtml(sub.part)} viewer</span>`;
   } else {
@@ -1374,11 +1391,11 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
     hintHtml;
 
   li.addEventListener("click", () => {
-    if (sub.part === currentRole) {
+    if (isLocal) {
       focusSubRule(ruleName, idx, rulePass, sub);
       highlightFocusedInSidebar();
-    } else if (sibling) {
-      location.href = `/viewer/${sibling.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
+    } else if (targetFile) {
+      location.href = `/viewer/${targetFile.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
     }
   });
   return li;
