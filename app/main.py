@@ -56,6 +56,7 @@ from app.matching import (
     find_matches_from_pointsets,
 )
 from app.products import PRODUCT_STORE, VALID_ROLES, Product
+from app.drc_bundle import build_bundle
 from app.rule_check import check_rules
 from app.side_regions import normalise_rect, split_matches_by_side
 from app.storage import (
@@ -987,3 +988,39 @@ async def get_product_rule_check(product_id: str) -> dict:
         "pass_count": n_pass,
         "fail_count": len(result) - n_pass,
     }
+
+
+# ---- DRC handoff bundle (external rule-check team consumes this) --------
+@app.get("/api/products/{product_id}/drc-bundle")
+async def get_drc_bundle(product_id: str) -> Response:
+    """Return a zip bundle of every role-attached DXF + per-file Match
+    JSON + a manifest the external rule-checking team consumes. The
+    Match JSONs are shipped raw (no `<file_id[:8]>:` merge prefix);
+    each DXF stays in its own coordinate space.
+
+    Preconditions match `POST .../rule-check`: 404 on unknown product,
+    400 when no role-attached DXFs exist or any file still needs Save
+    Match. The bundle format itself is pinned by
+    `openspec/specs/design-rule-checking/drc-manifest.schema.json`.
+    """
+    product = PRODUCT_STORE.get(product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    files = [f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role]
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="no DXFs uploaded to this product yet",
+        )
+    missing = [f.dxf_role for f in files if not f.match_saved]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
+        )
+    zip_bytes, filename = build_bundle(product, files)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
