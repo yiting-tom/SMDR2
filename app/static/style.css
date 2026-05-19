@@ -814,6 +814,25 @@ body.dashboard main.dashboard-main {
   background: transparent;
 }
 
+/* Developer mode toggle (dashboard header, top-right) */
+body.dashboard header .spacer { flex: 1; }
+#dev-mode-toggle {
+  background: transparent;
+  color: #9aa5b1;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.2rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#dev-mode-toggle:hover { border-color: #ffb84d; color: #ffb84d; }
+#dev-mode-toggle[aria-pressed="true"] {
+  color: #ffb84d;
+  border-color: #ffb84d;
+  background: rgba(255, 184, 77, 0.08);
+}
+
 #new-product-btn {
   background: transparent;
   color: #69f0ae;

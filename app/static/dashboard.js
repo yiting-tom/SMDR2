@@ -17,11 +17,38 @@ const $newProductName = document.getElementById("new-product-name");
 const $newProductLibrary = document.getElementById("new-product-library");
 const $newProductCreate = document.getElementById("new-product-create");
 const $fileInput = document.getElementById("file-input");
+const $devModeToggle = document.getElementById("dev-mode-toggle");
 
 let libraries = [];
 let products = [];
 let pollTimer = null;
 let pendingSlot = null;   // when user clicks a slot or picks file: { productId, role }
+
+// ---- developer mode -----------------------------------------------------
+// Persistent toggle (localStorage) that reveals dev-only download
+// affordances on every product card / file row. OFF by default; when
+// OFF the affordances aren't mounted at all (no greyed-out clutter).
+const DEV_MODE_KEY = "smdr2.dashboard.devMode";
+function getDevMode() { return localStorage.getItem(DEV_MODE_KEY) === "1"; }
+function setDevMode(on) {
+  if (on) localStorage.setItem(DEV_MODE_KEY, "1");
+  else    localStorage.removeItem(DEV_MODE_KEY);
+}
+
+// Generic browser-side download: wraps a Blob in a transient <a download>,
+// clicks it, and revokes the object URL. Used by both the per-file Match
+// JSON download and the per-product DRC bundle download so the filename
+// is controlled uniformly (browsers would otherwise render JSON inline).
+function downloadAsFile(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 // ---- helpers -------------------------------------------------------------
 function escapeHtml(s) {
@@ -167,9 +194,66 @@ function productCard(p) {
   }
   rcBtn.addEventListener("click", () => runRuleCheck(p));
   footer.appendChild(rcBtn);
+  // Dev mode: Download All Match — the DRC handoff bundle (zip of
+  // every role-attached DXF + per-file Match JSON + manifest.json).
+  // Disabled (not hidden) when the product isn't ready_for_rule_check
+  // so dev users see the affordance with an explanatory tooltip.
+  if (getDevMode()) {
+    const dlAll = document.createElement("button");
+    dlAll.type = "button";
+    dlAll.className = "rule-check-btn";
+    dlAll.textContent = "Download All Match";
+    dlAll.disabled = !p.ready_for_rule_check;
+    if (!p.ready_for_rule_check) {
+      const remaining = prog.total === 0
+        ? "upload at least one DXF first"
+        : `${prog.total - prog.saved} file(s) still need Save Match`;
+      dlAll.title = remaining;
+    } else {
+      dlAll.title = "Download every DXF + Match JSON + manifest.json as a zip";
+    }
+    dlAll.addEventListener("click", () => downloadAllMatch(p));
+    footer.appendChild(dlAll);
+  }
   card.appendChild(footer);
 
   return card;
+}
+
+// ---- developer-mode download handlers -----------------------------------
+async function downloadMatchJson(file) {
+  $status.textContent = `downloading match JSON for ${file.name}…`;
+  try {
+    const r = await fetch(`/api/files/${file.id}/match-json`);
+    if (!r.ok) {
+      $status.textContent = `download failed: ${r.status}`;
+      return;
+    }
+    downloadAsFile(await r.blob(), `match-${file.id}.json`);
+    $status.textContent = `downloaded match-${file.id}.json`;
+  } catch (e) {
+    $status.textContent = `download failed: ${e.message}`;
+  }
+}
+
+async function downloadAllMatch(product) {
+  $status.textContent = `building DRC bundle for "${product.name}"…`;
+  try {
+    const r = await fetch(`/api/products/${product.id}/drc-bundle`);
+    if (!r.ok) {
+      let msg = `bundle download failed: ${r.status}`;
+      try {
+        const body = await r.json();
+        if (typeof body?.detail === "string") msg = `bundle download failed: ${body.detail}`;
+      } catch { /* not JSON */ }
+      $status.textContent = msg;
+      return;
+    }
+    downloadAsFile(await r.blob(), `drc-bundle-${product.id}.zip`);
+    $status.textContent = `downloaded drc-bundle-${product.id}.zip`;
+  } catch (e) {
+    $status.textContent = `bundle download failed: ${e.message}`;
+  }
 }
 
 function slotCell(product, role) {
@@ -302,6 +386,19 @@ function buildFileActions(product, role, f, compact) {
   replace.title = "Replace this DXF";
   replace.addEventListener("click", () => pickFile(product.id, role, f.id));
   actions.appendChild(replace);
+  // Dev mode: Download Match JSON. Hidden entirely unless dev mode is on
+  // AND the file has a saved Match JSON to download (endpoint would 404
+  // otherwise). Filename `match-<file_id>.json` matches the on-disk
+  // storage convention so file ids in dev tools are easy to cross-ref.
+  if (getDevMode() && f.match_saved) {
+    const dl = document.createElement("button");
+    dl.className = "replace-btn";
+    dl.type = "button";
+    dl.textContent = "Download Match";
+    dl.title = "Download this file's Match JSON";
+    dl.addEventListener("click", () => downloadMatchJson(f));
+    actions.appendChild(dl);
+  }
   // The delete control is only useful when there are siblings to keep;
   // for the single-file slot, "Replace" already covers the swap path.
   if (compact) {
@@ -523,8 +620,21 @@ function startPollingIfBusy() {
   pollTimer = setTimeout(tick, 1500);
 }
 
+// ---- developer mode wiring ----------------------------------------------
+function syncDevModeButton() {
+  const on = getDevMode();
+  $devModeToggle.setAttribute("aria-pressed", on ? "true" : "false");
+  $devModeToggle.textContent = on ? "Developer Mode: ON" : "Developer Mode";
+}
+$devModeToggle.addEventListener("click", () => {
+  setDevMode(!getDevMode());
+  syncDevModeButton();
+  renderProducts();   // remount cards so dev-only buttons appear / disappear
+});
+
 // ---- bootstrap -----------------------------------------------------------
 (async () => {
+  syncDevModeButton();
   await loadLibraries();
   await refresh();
   startPollingIfBusy();
