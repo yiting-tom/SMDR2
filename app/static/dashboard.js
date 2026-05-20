@@ -147,6 +147,49 @@ async function refresh() {
   renderProducts();
 }
 
+// ---- customer fold state -------------------------------------------------
+// Dashboard groups product cards by library_id (== customer). Fold state is
+// stored as the set of *folded* library_ids so brand-new libraries default
+// to folded without us having to write at registration time. Absence of the
+// key in sessionStorage means "every section folded" (first-load default).
+const FOLD_KEY = "smdr2.dashboard.foldedCustomers";
+
+function loadFoldedSet() {
+  try {
+    const raw = sessionStorage.getItem(FOLD_KEY);
+    if (raw == null) return null;  // null = "no record yet" → treat as all-folded
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+function saveFoldedSet(set) {
+  sessionStorage.setItem(FOLD_KEY, JSON.stringify([...set]));
+}
+
+function groupProductsByLibrary(prods) {
+  const byLib = new Map();
+  for (const p of prods) {
+    if (!byLib.has(p.library_id)) byLib.set(p.library_id, []);
+    byLib.get(p.library_id).push(p);
+  }
+  const groups = [];
+  for (const [lid, items] of byLib) {
+    const lib = libraries.find(l => l.id === lid) ?? { id: lid, name: lid };
+    groups.push({ library: lib, products: items });
+  }
+  // Alphabetical (case-insensitive) by library name; library_id as deterministic tiebreak.
+  groups.sort((a, b) => {
+    const an = (a.library.name || "").toLowerCase();
+    const bn = (b.library.name || "").toLowerCase();
+    if (an < bn) return -1;
+    if (an > bn) return 1;
+    return a.library.id < b.library.id ? -1 : a.library.id > b.library.id ? 1 : 0;
+  });
+  return groups;
+}
+
 function renderProducts() {
   $list.innerHTML = "";
   if (!products.length) {
@@ -154,7 +197,68 @@ function renderProducts() {
     return;
   }
   $empty.hidden = true;
-  for (const p of products) $list.appendChild(productCard(p));
+
+  const stored = loadFoldedSet();
+  const groups = groupProductsByLibrary(products);
+  for (const g of groups) {
+    // First-load default (no sessionStorage record) → fold every section.
+    const folded = stored === null ? true : stored.has(g.library.id);
+    $list.appendChild(customerSection(g.library, g.products, folded));
+  }
+}
+
+function customerSection(lib, prods, folded) {
+  const section = document.createElement("section");
+  section.className = "customer-section";
+  section.dataset.libraryId = lib.id;
+  section.dataset.folded = folded ? "true" : "false";
+
+  const header = document.createElement("header");
+  header.className = "customer-section__header";
+  header.setAttribute("role", "button");
+  header.setAttribute("tabindex", "0");
+  header.setAttribute("aria-expanded", folded ? "false" : "true");
+  const countLabel = prods.length === 1 ? "1 product" : `${prods.length} products`;
+  header.innerHTML =
+    `<span class="customer-section__chevron">${folded ? "▸" : "▾"}</span>` +
+    `<span class="customer-section__name">${escapeHtml(lib.name || lib.id)}</span>` +
+    `<span class="customer-section__count">(${countLabel})</span>`;
+  header.addEventListener("click", () => toggleCustomerFold(section));
+  header.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();  // Space would otherwise scroll the page
+      toggleCustomerFold(section);
+    }
+  });
+  section.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "customer-section__body";
+  for (const p of prods) body.appendChild(productCard(p));
+  section.appendChild(body);
+
+  return section;
+}
+
+function toggleCustomerFold(section) {
+  const isFolded = section.dataset.folded === "true";
+  const next = !isFolded;
+  section.dataset.folded = next ? "true" : "false";
+  const header = section.querySelector(".customer-section__header");
+  header.setAttribute("aria-expanded", next ? "false" : "true");
+  header.querySelector(".customer-section__chevron").textContent = next ? "▸" : "▾";
+
+  // Persist: load whatever is there (null → empty set, which will then
+  // imply the *other* sections become expanded; we want to write an
+  // explicit set so future loads stop defaulting all-folded).
+  const stored = loadFoldedSet() ?? new Set(
+    [...$list.querySelectorAll(".customer-section")]
+      .filter(s => s !== section && s.dataset.folded === "true")
+      .map(s => s.dataset.libraryId)
+  );
+  if (next) stored.add(section.dataset.libraryId);
+  else stored.delete(section.dataset.libraryId);
+  saveFoldedSet(stored);
 }
 
 function productCard(p) {
