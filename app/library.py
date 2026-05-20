@@ -153,10 +153,12 @@ CREATE TABLE IF NOT EXISTS libraries (
 );
 
 CREATE TABLE IF NOT EXISTS classes (
-    library_id  TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    rank        INTEGER NOT NULL,
-    created_at  REAL NOT NULL,
+    library_id     TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    rank           INTEGER NOT NULL,
+    created_at     REAL NOT NULL,
+    match_strategy TEXT NOT NULL DEFAULT 'chamfer',
+    bbox_ratio     REAL,
     PRIMARY KEY (library_id, name),
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
@@ -277,6 +279,18 @@ class Store:
                 ALTER TABLE classes__new RENAME TO classes;
             """)
 
+        # Per-class match strategy + bbox_ratio. Both columns are additive;
+        # NULL bbox_ratio is the explicit "use default" signal, only honored
+        # when match_strategy == 'signature'.
+        if not has_col("classes", "match_strategy"):
+            self.conn.execute(
+                "ALTER TABLE classes ADD COLUMN match_strategy TEXT NOT NULL DEFAULT 'chamfer'"
+            )
+        if not has_col("classes", "bbox_ratio"):
+            self.conn.execute(
+                "ALTER TABLE classes ADD COLUMN bbox_ratio REAL"
+            )
+
         # Legacy snake_case class names → new canonical IDs. Rewrite both the
         # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
         # rows that would collide with an already-existing (library_id, NEW)
@@ -372,6 +386,23 @@ class Store:
                 (library_id, name, library_id, time.time()),
             )
 
+    def update_class_strategy(
+        self,
+        library_id: str,
+        name: str,
+        strategy: str,
+        bbox_ratio: float | None,
+    ) -> bool:
+        """Atomically set (match_strategy, bbox_ratio) for a class.
+        Returns True when the (library_id, name) row exists."""
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE classes SET match_strategy = ?, bbox_ratio = ? "
+                "WHERE library_id = ? AND name = ?",
+                (strategy, bbox_ratio, library_id, name),
+            )
+            return cur.rowcount > 0
+
     def insert_template(self, library_id: str, t: Template) -> None:
         with self.lock, self.conn:
             self.conn.execute(
@@ -402,14 +433,23 @@ class Store:
             )
             return cur.rowcount > 0
 
-    def load_library(self, library_id: str) -> tuple[list[str], dict[str, list[Template]]]:
+    def load_library(
+        self, library_id: str
+    ) -> tuple[list[str], dict[str, dict], dict[str, list[Template]]]:
         with self.lock:
             class_rows = self.conn.execute(
-                "SELECT name FROM classes WHERE library_id = ? "
+                "SELECT name, match_strategy, bbox_ratio FROM classes WHERE library_id = ? "
                 "ORDER BY rank ASC, created_at ASC",
                 (library_id,),
             ).fetchall()
             classes = [r["name"] for r in class_rows]
+            configs: dict[str, dict] = {
+                r["name"]: {
+                    "match_strategy": r["match_strategy"] or "chamfer",
+                    "bbox_ratio": r["bbox_ratio"],
+                }
+                for r in class_rows
+            }
             templates: dict[str, list[Template]] = {c: [] for c in classes}
 
             tmpl_rows = self.conn.execute(
@@ -439,7 +479,7 @@ class Store:
                     entity_kinds=entity_kinds,
                 )
                 templates.setdefault(r["class_name"], []).append(t)
-            return classes, templates
+            return classes, configs, templates
 
 
 class Library:
@@ -453,8 +493,9 @@ class Library:
     ) -> None:
         self.library_id = library_id
         self.store = store
-        classes, templates = store.load_library(library_id)
+        classes, configs, templates = store.load_library(library_id)
         self._classes: list[str] = classes
+        self._configs: dict[str, dict] = configs
         self._templates: dict[str, list[Template]] = templates
         for c in defaults:
             if c not in self._templates:
@@ -469,7 +510,36 @@ class Library:
             return
         self._classes.append(name)
         self._templates[name] = []
+        self._configs[name] = {"match_strategy": "chamfer", "bbox_ratio": None}
         self.store.upsert_class(self.library_id, name)
+
+    def strategy_of(self, name: str) -> tuple[str, float | None]:
+        """Per-class (match_strategy, bbox_ratio). Falls back to
+        ('chamfer', None) when the class is unknown (so callers can
+        always assume a safe default and don't need a None-guard)."""
+        cfg = self._configs.get(name)
+        if cfg is None:
+            return ("chamfer", None)
+        return (cfg.get("match_strategy") or "chamfer", cfg.get("bbox_ratio"))
+
+    def set_strategy(
+        self,
+        name: str,
+        strategy: str,
+        bbox_ratio: float | None,
+    ) -> bool:
+        """Persist a class's matching strategy. Returns False when the
+        class doesn't exist."""
+        if name not in self._templates:
+            return False
+        self._configs[name] = {
+            "match_strategy": strategy,
+            "bbox_ratio": bbox_ratio,
+        }
+        self.store.update_class_strategy(
+            self.library_id, name, strategy, bbox_ratio
+        )
+        return True
 
     def add_template(self, template: Template) -> None:
         if template.class_name not in self._templates:
@@ -484,7 +554,16 @@ class Library:
         return len(self._templates.get(class_name, []))
 
     def summary(self) -> list[dict]:
-        return [{"name": c, "count": self.count(c)} for c in self._classes]
+        out = []
+        for c in self._classes:
+            cfg = self._configs.get(c, {})
+            out.append({
+                "name": c,
+                "count": self.count(c),
+                "match_strategy": cfg.get("match_strategy") or "chamfer",
+                "bbox_ratio": cfg.get("bbox_ratio"),
+            })
+        return out
 
     def find_template(self, template_id: str) -> Template | None:
         for templates in self._templates.values():

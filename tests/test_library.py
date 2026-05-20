@@ -84,6 +84,88 @@ def test_template_from_entities_validates_nonempty():
         Template.from_entities("SMD-2T", [[]])
 
 
+# ---- per-class match strategy + bbox_ratio -------------------------------
+def test_new_class_defaults_to_chamfer(tmp_db):
+    """Newly-seeded classes start at match_strategy='chamfer' / bbox_ratio=None
+    so existing matching behavior is unchanged after upgrade."""
+    lib = _default_lib(tmp_db)
+    for c in DEFAULT_CLASSES:
+        strategy, bbox_ratio = lib.strategy_of(c)
+        assert strategy == "chamfer"
+        assert bbox_ratio is None
+    # summary surfaces both fields on every entry
+    by_name = {e["name"]: e for e in lib.summary()}
+    for c in DEFAULT_CLASSES:
+        assert by_name[c]["match_strategy"] == "chamfer"
+        assert by_name[c]["bbox_ratio"] is None
+
+
+def test_set_strategy_round_trips_signature(tmp_db):
+    lib = _default_lib(tmp_db)
+    assert lib.set_strategy("Substrate", "signature", 0.05)
+    assert lib.strategy_of("Substrate") == ("signature", 0.05)
+    # Reload from store: value sticks.
+    lib2 = _default_lib(tmp_db)
+    assert lib2.strategy_of("Substrate") == ("signature", 0.05)
+
+
+def test_set_strategy_unknown_class_returns_false(tmp_db):
+    lib = _default_lib(tmp_db)
+    assert lib.set_strategy("DoesNotExist", "signature", 0.05) is False
+
+
+def test_migration_adds_strategy_columns(tmp_db):
+    """Pre-change DB (classes table without match_strategy / bbox_ratio
+    columns) gets both columns added on next Store() open. Existing rows
+    end up at chamfer / NULL."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_db))
+    conn.executescript(
+        """
+        CREATE TABLE libraries (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        );
+        CREATE TABLE classes (
+            library_id  TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            rank        INTEGER NOT NULL,
+            created_at  REAL NOT NULL,
+            PRIMARY KEY (library_id, name)
+        );
+        CREATE TABLE templates (
+            id                 TEXT PRIMARY KEY,
+            library_id         TEXT NOT NULL,
+            class_name         TEXT NOT NULL,
+            entity_point_sets  TEXT NOT NULL,
+            centroid_x         REAL NOT NULL,
+            centroid_y         REAL NOT NULL,
+            bbox_xmin          REAL NOT NULL,
+            bbox_ymin          REAL NOT NULL,
+            bbox_xmax          REAL NOT NULL,
+            bbox_ymax          REAL NOT NULL,
+            created_at         REAL NOT NULL
+        );
+        INSERT INTO libraries (id, name, created_at) VALUES ('default', 'Default', 0);
+        INSERT INTO classes (library_id, name, rank, created_at)
+            VALUES ('default', 'Substrate', 0, 0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    lib = _default_lib(tmp_db)
+    cols = [
+        r["name"]
+        for r in lib.store.conn.execute("PRAGMA table_info(classes)")
+    ]
+    assert "match_strategy" in cols
+    assert "bbox_ratio" in cols
+    assert lib.strategy_of("Substrate") == ("chamfer", None)
+
+
 def test_all_templates_returns_indexed_tuples(tmp_db):
     lib = _default_lib(tmp_db)
     t1 = _make_template("SMD-2T")

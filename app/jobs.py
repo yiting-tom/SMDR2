@@ -116,15 +116,22 @@ def _preprocess_worker(
     shapes = build_entity_shapes(primitives, handle_index)
 
     # 4. Pre-match against this file's library (read fresh from SQLite).
+    # Per-class (match_strategy, bbox_ratio) governs which matcher pipeline
+    # runs for each class's templates.
     store = Store(DB_PATH)
-    _, templates_by_class = store.load_library(library_id)
+    _, configs_by_class, templates_by_class = store.load_library(library_id)
     by_class: dict[str, list[str]] = {}
     for cls_name, templates in templates_by_class.items():
+        cfg = configs_by_class.get(cls_name) or {}
+        strategy = cfg.get("match_strategy") or "chamfer"
+        bbox_ratio = cfg.get("bbox_ratio")
         seen: set[str] = set()
         for tmpl in templates:
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
+                strategy=strategy,
+                bbox_ratio=bbox_ratio,
             )
             for m in result.matches:
                 for h in m.handles:

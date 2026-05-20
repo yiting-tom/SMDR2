@@ -348,3 +348,141 @@ def test_pca_singular_values_ordered():
     # σ₁ ≥ σ₂ always.
     s = shape("s", RECT)
     assert s.pca_sigma1 >= s.pca_sigma2 >= 0.0
+
+
+# ---- signature-mode matching (per-class strategy) -----------------------
+# Substrate-style: same bbox + path length + aspect, very different vertex
+# distributions. Chamfer flunks this (the 11-vert and 7-vert polylines hit
+# different arclength positions after resample); signature mode accepts it.
+SUBSTRATE_11 = [
+    (0.0, 0.0), (5.0, 0.0), (12.5, 0.0), (20.0, 0.0), (25.0, 0.0),
+    (25.0, 6.0), (25.0, 12.0), (15.0, 12.0), (5.0, 12.0),
+    (0.0, 12.0), (0.0, 6.0), (0.0, 0.0),
+]
+SUBSTRATE_7 = [
+    (0.0, 0.0), (12.5, 0.0), (25.0, 0.0),
+    (25.0, 12.0), (12.5, 12.0), (0.0, 12.0), (0.0, 0.0),
+]
+
+
+def test_signature_mode_matches_same_bbox_different_vertex_count():
+    """Two 25×12 substrates with same bbox / path / aspect but different
+    vertex layouts. Signature mode must match them and emit zero
+    near-misses (match-or-nothing semantics)."""
+    template = SUBSTRATE_11
+    candidate = translate(SUBSTRATE_7, 100, 0)  # different location, same shape
+    drawing = {
+        "t": shape("t", template),
+        "c": shape("c", candidate),
+    }
+    sig = find_matches_from_pointsets(
+        [template], drawing,
+        strategy="signature", bbox_ratio=0.05,
+    )
+    matched = {m.handles[0] for m in sig.matches}
+    assert "c" in matched
+    assert not sig.near_misses, "signature mode emits match-or-nothing"
+
+
+def test_signature_mode_matches_where_chamfer_fails():
+    """The motivating case: a near-identical substrate whose chamfer
+    score lands above the global tolerance (so chamfer mode parks it in
+    near-misses), but whose bbox + path + aspect agree to well within
+    5 %. Signature mode is the entire reason this change exists — it
+    must match the pair here."""
+    # Template: 25×12 rect.
+    template = [(0.0, 0.0), (25.0, 0.0), (25.0, 12.0), (0.0, 12.0), (0.0, 0.0)]
+    # Candidate: 25×12.4 rect — y-extent stretched by 3.3 %, well within
+    # 5 % bbox_ratio and the global σ-ratio tolerance. The chamfer
+    # pipeline computes a non-zero point-to-point distance (~0.19 mm in
+    # this configuration) that exceeds `TOLERANCE_ABS = 0.05`, so chamfer
+    # mode lands the candidate in near-misses.
+    candidate = translate(
+        [(0.0, 0.0), (25.0, 0.0), (25.0, 12.4), (0.0, 12.4), (0.0, 0.0)],
+        100, 0,
+    )
+    drawing = {
+        "t": shape("t", template),
+        "c": shape("c", candidate),
+    }
+    sig = find_matches_from_pointsets(
+        [template], drawing,
+        strategy="signature", bbox_ratio=0.05,
+    )
+    assert "c" in {m.handles[0] for m in sig.matches}
+    # And chamfer mode does NOT match this candidate.
+    chf = find_matches_from_pointsets([template], drawing)
+    chf_handles = {m.handles[0] for m in chf.matches}
+    assert "c" not in chf_handles
+    near = {n.handles[0] for n in chf.near_misses}
+    assert "c" in near
+
+
+def test_signature_mode_rejects_wrong_sized_candidate():
+    """A 15% larger candidate must NOT match under bbox_ratio=0.05 and must
+    NOT appear in near_misses (signature mode emits match-or-nothing)."""
+    template = SUBSTRATE_11
+    larger = translate(scale(SUBSTRATE_7, 1.15), 100, 0)
+    drawing = {
+        "t": shape("t", template),
+        "big": shape("big", larger),
+    }
+    out = find_matches_from_pointsets(
+        [template], drawing,
+        strategy="signature", bbox_ratio=0.05,
+    )
+    handles = {m.handles[0] for m in out.matches}
+    assert "big" not in handles
+    assert not out.near_misses
+
+
+@pytest.mark.parametrize("angle", [30, 45, 137, 270])
+def test_signature_mode_accepts_rotation(angle):
+    template = SUBSTRATE_11
+    rotated = translate(rotate(SUBSTRATE_7, angle), 100, 0)
+    drawing = {
+        "t": shape("t", template),
+        "r": shape("r", rotated),
+    }
+    out = find_matches_from_pointsets(
+        [template], drawing,
+        strategy="signature", bbox_ratio=0.05,
+    )
+    assert "r" in {m.handles[0] for m in out.matches}
+
+
+def test_signature_mode_accepts_mirror():
+    template = SUBSTRATE_11
+    mirrored = translate(mirror_x(SUBSTRATE_7), 100, 0)
+    drawing = {
+        "t": shape("t", template),
+        "m": shape("m", mirrored),
+    }
+    out = find_matches_from_pointsets(
+        [template], drawing,
+        strategy="signature", bbox_ratio=0.05,
+    )
+    assert "m" in {m.handles[0] for m in out.matches}
+
+
+def test_signature_mode_multi_entity_template_falls_back_to_chamfer():
+    """When a multi-entity template is passed with strategy='signature',
+    the matcher SHALL run the chamfer pipeline (single-entity
+    short-circuit is irrelevant here). The behavior must equal what the
+    same call produces under strategy='chamfer'."""
+    pointsets = [RECT, translate(RECT, 5, 0)]  # two entities = multi
+    drawing = {
+        "a": shape("a", RECT),
+        "b": shape("b", translate(RECT, 5, 0)),
+    }
+    sig = find_matches_from_pointsets(pointsets, drawing, strategy="signature")
+    chf = find_matches_from_pointsets(pointsets, drawing, strategy="chamfer")
+    # Same matches under either flag — signature was silently bypassed.
+    assert sorted(m.handles for m in sig.matches) == sorted(m.handles for m in chf.matches)
+
+
+def test_default_strategy_is_chamfer():
+    """Calling without a strategy kwarg keeps every existing behavior."""
+    drawing = {"t": shape("t", RECT), "a": shape("a", translate(RECT, 10, 0))}
+    out = find_matches(["t"], drawing)
+    assert {m.handles[0] for m in out.matches} == {"a"}

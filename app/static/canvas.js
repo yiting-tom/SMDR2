@@ -2023,7 +2023,66 @@ async function fetchClasses() {
   const res = await fetch(API.classes());
   const data = await res.json();
   classes = data.classes;
+  if (data.library_id) window.__libraryId = data.library_id;
   renderClassToolbar();
+}
+
+async function editClassStrategy(cls) {
+  const libId = window.__libraryId || null;
+  if (!libId) {
+    setBaseStatus("library id unknown; can't edit strategy");
+    return;
+  }
+  const currentStrategy = cls.match_strategy || "chamfer";
+  const strategyRaw = prompt(
+    `Match strategy for class "${cls.name}":\n` +
+    `  "chamfer" — per-vertex chamfer distance (default, BGA / SMD)\n` +
+    `  "signature" — bbox + aspect + vertex-count (substrate / lid)\n` +
+    `Enter "chamfer" or "signature":`,
+    currentStrategy,
+  );
+  if (strategyRaw === null) return;  // cancelled
+  const strategy = strategyRaw.trim().toLowerCase();
+  if (strategy !== "chamfer" && strategy !== "signature") {
+    setBaseStatus(`unknown strategy "${strategyRaw}" (use chamfer or signature)`);
+    return;
+  }
+  const body = { strategy };
+  if (strategy === "signature") {
+    const defaultRatio = cls.bbox_ratio != null ? cls.bbox_ratio : 0.05;
+    const ratioRaw = prompt(
+      `bbox_ratio for "${cls.name}" (±fraction agreement on bbox extent).\n` +
+      `Empty = 0.05 (5%, recommended for substrate). Range: (0, 1].`,
+      String(defaultRatio),
+    );
+    if (ratioRaw === null) return;  // cancelled
+    const trimmed = ratioRaw.trim();
+    if (trimmed !== "") {
+      const v = Number(trimmed);
+      if (!Number.isFinite(v) || v <= 0 || v > 1) {
+        setBaseStatus(`bbox_ratio must be in (0, 1] (got "${ratioRaw}")`);
+        return;
+      }
+      body.bbox_ratio = v;
+    }
+  }
+  const url = `/api/libraries/${encodeURIComponent(libId)}/classes/${encodeURIComponent(cls.name)}/strategy`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    setBaseStatus(`set strategy failed: ${res.status}`);
+    return;
+  }
+  await fetchClasses();
+  const saved = await res.json();
+  setBaseStatus(
+    saved.match_strategy === "signature"
+      ? `${cls.name} → signature (bbox_ratio=${saved.bbox_ratio})`
+      : `${cls.name} → chamfer (default)`,
+  );
 }
 
 // Less-common classes hidden from the toolbar by default to keep it tight.
@@ -2062,7 +2121,25 @@ function renderClassToolbar() {
       btn.classList.add(matchesStaged ? "staged" : "active");
     }
     btn.innerHTML = `<span class="name">${cls.name}</span>`;
+    const isSig = cls.match_strategy === "signature";
+    if (isSig) {
+      const tag = document.createElement("span");
+      tag.className = "class-strategy-tag";
+      tag.textContent = cls.bbox_ratio != null
+        ? `sig·${Math.round(cls.bbox_ratio * 100)}%`
+        : "sig";
+      btn.appendChild(tag);
+    }
+    btn.title = isSig
+      ? `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+        `signature-only match (bbox/aspect/vertex-count) at ±${(cls.bbox_ratio ?? 0.05) * 100}% — right-click to edit`
+      : `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+        `chamfer match (default) — right-click to switch to signature mode`;
     btn.addEventListener("click", () => enterAddMode(cls.name));
+    btn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      editClassStrategy(cls);
+    });
     $classToolbar.appendChild(btn);
   });
   // Only show the toggle if there's something to hide/reveal at all.
@@ -2110,10 +2187,12 @@ async function scanCurrentSelection() {
   setBaseStatus(`scanning…`);
   const t0 = performance.now();
   try {
+    const reqBody = { handles: [...selection] };
+    if (addModeClass) reqBody.class_name = addModeClass;
     const res = await fetch(API.match(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ handles: [...selection] }),
+      body: JSON.stringify(reqBody),
     });
     if (!res.ok) {
       const err = await res.text();

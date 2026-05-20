@@ -17,6 +17,7 @@ MVP approach:
 
 from __future__ import annotations
 
+import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -26,6 +27,9 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from app.library import Template
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---- Tunables -----------------------------------------------------------
@@ -355,8 +359,31 @@ def align_score(
     return float(best), float(scale)
 
 
+# Default bbox_ratio that signature-mode classes get when the user enables
+# the strategy without naming a value. Tighter than the global pre-filter
+# ratios (0.20) because chamfer is no longer downstream to catch wrong
+# shapes — the dimensional gate IS the verdict.
+SIGNATURE_DEFAULT_BBOX_RATIO = 0.05
+
+
 # ---- Signature pre-filter -------------------------------------------------
-def signatures_compatible(a: EntityShape, b: EntityShape) -> bool:
+def signatures_compatible(
+    a: EntityShape,
+    b: EntityShape,
+    *,
+    path_length_ratio: float = PATH_LENGTH_RATIO,
+    radius_ratio: float = RADIUS_RATIO,
+) -> bool:
+    """Cheap dimensional + aspect agreement test. Returns True when `a` and
+    `b` are within size and aspect tolerance.
+
+    The two dimensional gates accept per-call overrides so signature-mode
+    classes can tighten them (e.g., 0.05) without changing the global
+    defaults that chamfer-mode classes rely on as a pre-filter. The
+    σ-ratio aspect gate is intentionally not overridable here — its
+    discrimination is qualitative (rect vs square, thin vs blob), not
+    size-tolerant.
+    """
     # vertex_count is no longer a gate: same-shape entities with very
     # different vertex counts (e.g. mirrored substrate stored as 11 vs 65
     # verts) are genuine matches now that the matcher resamples to a
@@ -367,12 +394,12 @@ def signatures_compatible(a: EntityShape, b: EntityShape) -> bool:
     # Path length — cheapest scalar, runs first.
     if a.path_length > 0 and b.path_length > 0:
         pl_ratio = a.path_length / b.path_length
-        if pl_ratio < (1 - PATH_LENGTH_RATIO) or pl_ratio > (1 + PATH_LENGTH_RATIO):
+        if pl_ratio < (1 - path_length_ratio) or pl_ratio > (1 + path_length_ratio):
             return False
     # Max-distance-from-centroid (rotation-invariant linear bound).
     if a.radius > 0 and b.radius > 0:
         r_ratio = a.radius / b.radius
-        if r_ratio < (1 - RADIUS_RATIO) or r_ratio > (1 + RADIUS_RATIO):
+        if r_ratio < (1 - radius_ratio) or r_ratio > (1 + radius_ratio):
             return False
     # Principal-axis aspect ratio σ₂/σ₁ — rotation-/mirror-/scale-invariant.
     # Discriminates rect-vs-square at equal perimeter (σ-ratio ≈0.5 vs ≈1.0)
@@ -389,16 +416,38 @@ def find_matches(
     drawing_shapes: dict[str, EntityShape],
     tolerance: float = TOLERANCE_ABS,
     n_jobs: int | None = None,
+    *,
+    strategy: str = "chamfer",
+    bbox_ratio: float | None = None,
 ) -> MatchOutput:
     """Find all matches of `template_handles` (as defined inside drawing_shapes)
     elsewhere in the drawing. Returns both confirmed matches and near-misses
     (candidates that passed the cheap pre-filters but failed alignment).
+
+    `strategy` selects the matching pipeline:
+    - "chamfer" (default): existing pipeline — signature pre-filter, scale
+      window, PCA-aligned chamfer ≤ tolerance.
+    - "signature": signature gate alone, with `bbox_ratio` (or
+      `SIGNATURE_DEFAULT_BBOX_RATIO`) replacing both `PATH_LENGTH_RATIO`
+      and `RADIUS_RATIO` for that call. Single-entity templates only —
+      multi-entity templates silently fall back to chamfer.
     """
     n_jobs = N_JOBS if n_jobs is None else n_jobs
     template_handle_set = set(template_handles)
     template_shapes = [drawing_shapes[h] for h in template_handles if h in drawing_shapes]
     if not template_shapes:
         return MatchOutput(matches=[], near_misses=[])
+
+    if strategy == "signature" and len(template_shapes) == 1:
+        eff = bbox_ratio if bbox_ratio is not None else SIGNATURE_DEFAULT_BBOX_RATIO
+        return _match_signature_mode(
+            template_shapes[0], drawing_shapes, template_handle_set, eff,
+        )
+    if strategy == "signature" and len(template_shapes) > 1:
+        logger.info(
+            "matcher: signature strategy requested for multi-entity template "
+            "(n=%d); falling back to chamfer pipeline.", len(template_shapes),
+        )
 
     if len(template_shapes) == 1:
         tpl = template_shapes[0]
@@ -409,12 +458,42 @@ def find_matches(
     return _match_multi(template_shapes, drawing_shapes, template_handle_set, tolerance)
 
 
+def _match_signature_mode(
+    template: EntityShape,
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+    bbox_ratio: float,
+) -> MatchOutput:
+    """Single-entity signature-only matching.
+
+    A candidate is a match iff `signatures_compatible(template, candidate,
+    path_length_ratio=bbox_ratio, radius_ratio=bbox_ratio)` returns True.
+    Returns score=0.0, scale=candidate.radius / template.radius. No
+    near-misses are emitted under this mode.
+    """
+    matches: list[MatchResult] = []
+    for handle, shape in drawing.items():
+        if handle in skip:
+            continue
+        if not signatures_compatible(
+            template, shape,
+            path_length_ratio=bbox_ratio, radius_ratio=bbox_ratio,
+        ):
+            continue
+        scale = (shape.radius / template.radius) if template.radius > 0 else 1.0
+        matches.append(MatchResult(handles=[handle], score=0.0, scale=scale))
+    return MatchOutput(matches=matches, near_misses=[])
+
+
 def find_matches_from_pointsets(
     entity_point_sets: list[list[tuple[float, float]]],
     drawing_shapes: dict[str, EntityShape],
     tolerance: float = TOLERANCE_ABS,
     n_jobs: int | None = None,
     entity_kinds: list[str | None] | None = None,
+    *,
+    strategy: str = "chamfer",
+    bbox_ratio: float | None = None,
 ) -> MatchOutput:
     """Match a Template (stored as per-entity point sets) against a drawing.
 
@@ -427,6 +506,10 @@ def find_matches_from_pointsets(
     When provided AND the template is a single entity with kind `"circle"`,
     we take the radius-bucket fast path. Legacy templates without kinds fall
     back to the generic pipeline.
+
+    `strategy` / `bbox_ratio` mirror `find_matches`: signature-mode is
+    available for single-entity templates only; multi-entity templates
+    silently fall back to chamfer.
     """
     n_jobs = N_JOBS if n_jobs is None else n_jobs
     if entity_kinds is None:
@@ -443,6 +526,16 @@ def find_matches_from_pointsets(
     if not template_shapes:
         return MatchOutput(matches=[], near_misses=[])
     skip: set[str] = set()
+    if strategy == "signature" and len(template_shapes) == 1:
+        eff = bbox_ratio if bbox_ratio is not None else SIGNATURE_DEFAULT_BBOX_RATIO
+        return _match_signature_mode(
+            template_shapes[0], drawing_shapes, skip, eff,
+        )
+    if strategy == "signature" and len(template_shapes) > 1:
+        logger.info(
+            "matcher: signature strategy requested for multi-entity template "
+            "(n=%d); falling back to chamfer pipeline.", len(template_shapes),
+        )
     if len(template_shapes) == 1:
         tpl = template_shapes[0]
         if tpl.kind == "circle" and tpl.radius > 0:

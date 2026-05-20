@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import shutil
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -647,6 +648,53 @@ async def classes_by_library(library_id: str) -> dict:
     return {"library_id": library_id, "classes": LIBRARIES.get(library_id).summary()}
 
 
+# Default `bbox_ratio` applied when the client sets a class to signature
+# mode without naming a value. Mirrors `matching.SIGNATURE_DEFAULT_BBOX_RATIO`
+# so the chosen number stays consistent between matcher and API surface.
+SIGNATURE_DEFAULT_BBOX_RATIO = 0.05
+
+
+class ClassStrategyRequest(BaseModel):
+    strategy: str
+    bbox_ratio: float | None = None
+
+
+@app.put("/api/libraries/{library_id}/classes/{class_name}/strategy")
+async def set_class_strategy(
+    library_id: str, class_name: str, req: ClassStrategyRequest,
+) -> dict:
+    if not LIBRARIES.exists(library_id):
+        raise HTTPException(status_code=404, detail="library not found")
+    if req.strategy not in ("chamfer", "signature"):
+        raise HTTPException(
+            status_code=400,
+            detail="strategy must be 'chamfer' or 'signature'",
+        )
+    if req.strategy == "chamfer":
+        # bbox_ratio is meaningless under chamfer; always clear it.
+        bbox_ratio: float | None = None
+    else:
+        if req.bbox_ratio is None:
+            bbox_ratio = SIGNATURE_DEFAULT_BBOX_RATIO
+        else:
+            v = req.bbox_ratio
+            if not math.isfinite(v) or v <= 0 or v > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="bbox_ratio must be in (0, 1] or null",
+                )
+            bbox_ratio = v
+    lib = LIBRARIES.get(library_id)
+    if not lib.set_strategy(class_name, req.strategy, bbox_ratio):
+        raise HTTPException(status_code=404, detail="class not found")
+    return {
+        "library_id": library_id,
+        "class_name": class_name,
+        "match_strategy": req.strategy,
+        "bbox_ratio": bbox_ratio,
+    }
+
+
 @app.get("/api/classes")
 async def classes_default(file_id: str | None = None,
                           library_id: str | None = None) -> dict:
@@ -729,18 +777,29 @@ async def primitives(file_id: str) -> dict:
 
 class MatchRequest(BaseModel):
     handles: list[str]
+    # Optional class hint for add-mode preview: the viewer sends the active
+    # add-mode class so the live scan uses the same (strategy, bbox_ratio)
+    # that scan-all will use after commit.
+    class_name: str | None = None
 
 
 @app.post("/api/files/{file_id}/match")
 async def match(file_id: str, req: MatchRequest) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
-    _resolve_file(file_id)
+    rec = _resolve_file(file_id)
     _, shapes = _shapes_for(file_id)
     missing = [h for h in req.handles if h not in shapes]
     if missing:
         raise HTTPException(status_code=400, detail=f"unknown handles: {missing[:5]}")
-    out = find_matches(req.handles, shapes)
+    strategy = "chamfer"
+    bbox_ratio: float | None = None
+    if req.class_name:
+        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(req.class_name)
+    out = find_matches(
+        req.handles, shapes,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
     return {
         "matches": [{"handles": r.handles, "score": r.score, "scale": r.scale} for r in out.matches],
         "near_misses": [
@@ -793,11 +852,13 @@ async def scan_all(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     by_class: dict[str, list[str]] = {}
     for cls_name in lib.classes:
+        strategy, bbox_ratio = lib.strategy_of(cls_name)
         seen: set[str] = set()
         for tmpl in lib.templates_of(cls_name):
             out = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
+                strategy=strategy, bbox_ratio=bbox_ratio,
             )
             for m in out.matches:
                 for h in m.handles:
@@ -835,10 +896,12 @@ async def save_match_json(file_id: str) -> dict:
     total_matches = 0
     side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 0}
     for cls_name in lib.classes:
+        strategy, bbox_ratio = lib.strategy_of(cls_name)
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
+                strategy=strategy, bbox_ratio=bbox_ratio,
             )
             # Display name (Substrate, BGABall, …) stays canonical in the UI;
             # match-JSON keys use the snake_case variant so downstream

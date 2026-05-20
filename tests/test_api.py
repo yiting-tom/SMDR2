@@ -356,3 +356,101 @@ def test_delete_file_404_when_not_in_product():
         pid = _new_product(client, "delete-404")
         r = client.delete(f"/api/products/{pid}/files/no-such-file")
         assert r.status_code == 404
+
+
+# ---- per-class match strategy API ---------------------------------------
+def _fresh_library(client, name: str) -> str:
+    r = client.post("/api/libraries", json={"name": name})
+    assert r.status_code == 200
+    return r.json()["id"]
+
+
+def test_class_listing_includes_strategy_fields():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "strategy-listing")
+        r = client.get(f"/api/libraries/{lib_id}/classes")
+        assert r.status_code == 200
+        classes = r.json()["classes"]
+        assert classes, "library should be seeded with default classes"
+        for c in classes:
+            assert c["match_strategy"] == "chamfer"
+            assert c["bbox_ratio"] is None
+
+
+def test_set_strategy_signature_defaults_bbox_ratio_to_005():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "strategy-default-ratio")
+        r = client.put(
+            f"/api/libraries/{lib_id}/classes/Substrate/strategy",
+            json={"strategy": "signature"},
+        )
+        assert r.status_code == 200
+        assert r.json()["match_strategy"] == "signature"
+        assert r.json()["bbox_ratio"] == 0.05
+        sub = next(
+            c for c in client.get(f"/api/libraries/{lib_id}/classes").json()["classes"]
+            if c["name"] == "Substrate"
+        )
+        assert sub["match_strategy"] == "signature"
+        assert sub["bbox_ratio"] == 0.05
+
+
+def test_set_strategy_signature_with_explicit_bbox_ratio():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "strategy-explicit-ratio")
+        r = client.put(
+            f"/api/libraries/{lib_id}/classes/Substrate/strategy",
+            json={"strategy": "signature", "bbox_ratio": 0.1},
+        )
+        assert r.status_code == 200
+        assert r.json()["bbox_ratio"] == 0.1
+
+
+def test_flip_back_to_chamfer_clears_bbox_ratio():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "strategy-clear")
+        url = f"/api/libraries/{lib_id}/classes/Substrate/strategy"
+        client.put(url, json={"strategy": "signature", "bbox_ratio": 0.05})
+        r = client.put(url, json={"strategy": "chamfer"})
+        assert r.status_code == 200
+        assert r.json()["match_strategy"] == "chamfer"
+        assert r.json()["bbox_ratio"] is None
+
+
+def test_set_strategy_rejects_invalid_values():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "strategy-invalid")
+        url = f"/api/libraries/{lib_id}/classes/Substrate/strategy"
+        # Unknown strategy value
+        assert client.put(url, json={"strategy": "fuzzy"}).status_code == 400
+        # bbox_ratio out of (0, 1] under signature
+        for bad in (0, -0.1, 1.5):
+            r = client.put(url, json={"strategy": "signature", "bbox_ratio": bad})
+            assert r.status_code == 400, f"bbox_ratio={bad!r} should 400"
+
+
+def test_set_strategy_unknown_library_or_class_404s():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.put(
+            "/api/libraries/no-such-lib/classes/Substrate/strategy",
+            json={"strategy": "signature"},
+        )
+        assert r.status_code == 404
+        lib_id = _fresh_library(client, "strategy-no-class")
+        r2 = client.put(
+            f"/api/libraries/{lib_id}/classes/DoesNotExist/strategy",
+            json={"strategy": "signature"},
+        )
+        assert r2.status_code == 404
