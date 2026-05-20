@@ -23,7 +23,7 @@ def test_classes_endpoint_lists_defaults(monkeypatch, tmp_path):
         classes = r.json()["classes"]
         names = {c["name"] for c in classes}
         # Default classes should be present.
-        assert {"SMD-2T", "BGABall", "Substrate"}.issubset(names)
+        assert {"SMD-2T", "C4Ball", "BGABall", "Substrate"}.issubset(names)
 
 
 def test_files_endpoint_returns_a_list():

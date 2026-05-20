@@ -453,7 +453,9 @@ const DOT_THRESHOLD_CSS_PX = 3.0;
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
 // dark background and for mutual distinguishability. SMD-2T/3T/8T/14T share
 // a red family so the eye groups SMD variants together; LidOuter/LidInner/Lid
-// share a purple family for the same reason.
+// share a purple family for the same reason; C4Ball and BGABall share the
+// exact same orange (both are ball-type interconnect — user chose visual
+// unification over per-class distinction).
 const CLASS_COLORS = {
   "SMD-2T":       "#ff5252",  // red
   "SMD-3T":       "#ff8a80",  // light red
@@ -464,6 +466,7 @@ const CLASS_COLORS = {
   "LidOuter":     "#ba68c8",  // purple
   "LidInner":     "#f06292",  // pink
   "Lid":          "#9575cd",  // muted purple
+  "C4Ball":       "#ffab40",  // orange — shares BGABall color (both are ball-type interconnect)
   "BGABall":      "#ffab40",  // orange
   "Protrusion":   "#80d8ff",  // light blue — distinct from SMD reds / BGA orange
   "Pin-1":        "#f48fb1",  // soft pink

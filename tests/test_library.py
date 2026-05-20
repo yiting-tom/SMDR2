@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.library import (
+    CLASS_JSON_KEY,
     DEFAULT_CLASSES,
     DEFAULT_LIBRARY_ID,
     Library,
@@ -210,3 +211,90 @@ def test_create_library_seeds_default_classes(tmp_db):
     reg = LibraryRegistry(Store(tmp_db))
     new_lib = reg.create("New Lib")
     assert set(new_lib.classes) >= set(DEFAULT_CLASSES)
+
+
+# ---- C4Ball canonical-class ordering --------------------------------------
+def test_c4ball_ordered_immediately_before_bgaball(tmp_db):
+    """C4Ball and BGABall are both ball-type interconnect; the canonical
+    order groups them together with C4Ball first."""
+    lib = _default_lib(tmp_db)
+    assert "C4Ball" in lib.classes
+    c4_idx = lib.classes.index("C4Ball")
+    bga_idx = lib.classes.index("BGABall")
+    assert c4_idx + 1 == bga_idx, (
+        f"expected C4Ball directly before BGABall, "
+        f"got positions {c4_idx} and {bga_idx}"
+    )
+
+
+def test_c4ball_json_key_mapping():
+    assert CLASS_JSON_KEY["C4Ball"] == "c4_ball"
+
+
+def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
+    """A library that pre-dates the C4Ball addition (15 canonical classes,
+    no C4Ball row) SHALL gain C4Ball on next Store boot and SHALL re-rank
+    it to sit immediately before BGABall — mirrors the existing
+    FiducialCircle/Cross seeding behavior."""
+    import sqlite3
+    import time
+
+    # Hand-build a DB whose `default` library has every default class
+    # EXCEPT C4Ball. Same shape as the live schema; we skip the C4Ball
+    # row so the migration has work to do.
+    conn = sqlite3.connect(str(tmp_db))
+    conn.executescript(
+        """
+        CREATE TABLE libraries (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        );
+        CREATE TABLE classes (
+            library_id     TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            rank           INTEGER NOT NULL,
+            created_at     REAL NOT NULL,
+            match_strategy TEXT NOT NULL DEFAULT 'chamfer',
+            bbox_ratio     REAL,
+            PRIMARY KEY (library_id, name)
+        );
+        CREATE TABLE templates (
+            id                 TEXT PRIMARY KEY,
+            library_id         TEXT NOT NULL,
+            class_name         TEXT NOT NULL,
+            entity_point_sets  TEXT NOT NULL,
+            centroid_x         REAL NOT NULL,
+            centroid_y         REAL NOT NULL,
+            bbox_xmin          REAL NOT NULL,
+            bbox_ymin          REAL NOT NULL,
+            bbox_xmax          REAL NOT NULL,
+            bbox_ymax          REAL NOT NULL,
+            created_at         REAL NOT NULL,
+            entity_kinds       TEXT
+        );
+        INSERT INTO libraries (id, name, created_at) VALUES ('default', 'Default', 0);
+        """
+    )
+    # Seed the pre-C4Ball canonical 15 — everything except C4Ball, in canonical
+    # rank order. We derive the list from the current DEFAULT_CLASSES so the
+    # test stays correct if more classes get added later.
+    legacy_classes = [c for c in DEFAULT_CLASSES if c != "C4Ball"]
+    now = time.time()
+    for rank, name in enumerate(legacy_classes):
+        conn.execute(
+            "INSERT INTO classes (library_id, name, rank, created_at, match_strategy, bbox_ratio) "
+            "VALUES ('default', ?, ?, ?, 'chamfer', NULL)",
+            (name, rank, now),
+        )
+    conn.commit()
+    conn.close()
+
+    lib = _default_lib(tmp_db)
+    assert "C4Ball" in lib.classes
+    c4_idx = lib.classes.index("C4Ball")
+    bga_idx = lib.classes.index("BGABall")
+    assert c4_idx + 1 == bga_idx, (
+        f"after migration expected C4Ball directly before BGABall, "
+        f"got positions {c4_idx} and {bga_idx}"
+    )
