@@ -1404,6 +1404,99 @@ body.dashboard header .spacer { flex: 1; }
   cursor: not-allowed;
 }
 
+/* ---- Dev parameter modal ---------------------------------------------- */
+#dev-params-toggle {
+  background: transparent;
+  border: 1px solid #3a4a5a;
+  color: #c8d4e0;
+  padding: 0.25rem 0.55rem;
+  margin-left: 0.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+#dev-params-toggle:hover { border-color: #4a6080; background: #1a2530; }
+#dev-params-toggle[hidden] { display: none; }
+
+.dev-params-banner {
+  background: #2a2014;
+  border: 1px solid #6a4a1a;
+  color: #f0c878;
+  padding: 0.5rem 0.7rem;
+  border-radius: 4px;
+  margin: 0 0 0.8rem 0;
+  font-size: 0.84rem;
+}
+.dev-params-group {
+  margin-bottom: 1.2rem;
+}
+.dev-params-group h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #c8d4e0;
+  border-bottom: 1px solid #2a3340;
+  padding-bottom: 0.25rem;
+}
+.dev-params-row {
+  display: grid;
+  grid-template-columns: 13rem 7rem 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 0.8rem;
+  row-gap: 0.15rem;
+  align-items: center;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid #1a2530;
+}
+.dev-params-name {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 0.85rem;
+  color: #c8d4e0;
+  grid-row: 1;
+}
+.dev-params-mod {
+  color: #f0c878;
+  margin-left: 0.25rem;
+}
+.dev-params-row input[type=number] {
+  background: #0d1219;
+  border: 1px solid #2a3340;
+  color: #e0e6ec;
+  padding: 0.3rem 0.45rem;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.85rem;
+  width: 6.5rem;
+  grid-row: 1;
+}
+.dev-params-row input[type=number]:focus {
+  outline: none;
+  border-color: #4a6080;
+}
+.dev-params-help {
+  font-size: 0.74rem;
+  color: #6d7c8a;
+  grid-column: 3;
+  grid-row: 1;
+}
+.dev-params-desc {
+  font-size: 0.78rem;
+  color: #8d9aa6;
+  grid-column: 2 / 4;
+  grid-row: 2;
+}
+.dev-params-error {
+  grid-column: 2 / 4;
+  grid-row: 3;
+  color: #ff7a7a;
+  font-size: 0.78rem;
+}
+.dev-params-loading {
+  color: #8d9aa6;
+  font-style: italic;
+}
+
 /* ---- Viewer: layer-visibility floating panel --------------------------- */
 .floating-panel {
   position: absolute;

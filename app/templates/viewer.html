@@ -18,6 +18,8 @@
     <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">📏 Measure</button>
     <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Visibility</button>
     <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">📋 Rules</button>
+    <button id="dev-params-toggle" type="button" hidden
+            title="Adjust matching tunables (dev mode only)">⚙</button>
   </header>
   <nav id="class-toolbar" aria-label="Object classes">
     <button id="chain-btn" class="tool-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
@@ -63,6 +65,30 @@
       <span id="cursor-coords">—</span>
     </footer>
   </main>
+
+  <!-- Developer matching-parameters modal (Dev Mode only) -->
+  <div id="dev-params-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Matching parameters">
+      <header class="modal-header">
+        <h2>Matching parameters</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body">
+        <p class="dev-params-banner">
+          In-memory only — restart clears every override. Do not change values
+          while a match is running. DXF params live on the dashboard.
+        </p>
+        <div id="dev-params-body"></div>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" id="dev-params-reset" class="link-btn">Reset to defaults</button>
+        <span class="spacer"></span>
+        <button type="button" id="dev-params-apply" class="primary">Apply</button>
+      </footer>
+    </div>
+  </div>
 
   <div id="library-modal" class="modal" hidden>
     <div class="modal-bg" data-close></div>

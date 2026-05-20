@@ -58,7 +58,7 @@ CURVE_FLATTENING_DISTANCE = BASE_TOLERANCE
 # radial layout would otherwise sail through `CIRCLE_RADIAL_TOL`.
 CIRCLE_MIN_VERTS = 8
 CIRCLE_MIN_VERTS_NOCURVE = 11
-CIRCLE_RADIAL_TOL = 0.02
+CIRCLE_RADIAL_TOL = 0.0001
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
@@ -545,7 +545,7 @@ def render_layer_svg(
     bbox: tuple[float, float, float, float] | None,
     *,
     skip_decorative: bool = True,
-    max_prims: int = MAX_PRIMS_PER_THUMB,
+    max_prims: int | None = None,
     background: str = "#212830",
 ) -> str:
     """Render a compact SVG preview of one layer's primitives.
@@ -556,6 +556,8 @@ def render_layer_svg(
     primitive in its own color — matching what the user sees in the
     canvas viewer. Dense layers are evenly subsampled.
     """
+    if max_prims is None:
+        max_prims = MAX_PRIMS_PER_THUMB
     if bbox is None:
         # Degenerate file: emit an empty 1×1 viewport so consumers always
         # get a parseable SVG.

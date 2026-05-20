@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 # ---- Tunables -----------------------------------------------------------
-SCALE_MIN = 0.95
-SCALE_MAX = 1.05
-TOLERANCE_ABS = 0.05            # ε for chamfer (world units / mm)
-VERTEX_COUNT_RATIO = 0.25       # candidate must be within ±25% vertex count
+SCALE_MIN = 0.9999
+SCALE_MAX = 1.0001
+TOLERANCE_ABS = 0.01            # ε for chamfer (world units / mm)
+VERTEX_COUNT_RATIO = 0.3       # candidate must be within ±25% vertex count
 PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
 RADIUS_RATIO = 0.20             # ±20% max-radius-from-centroid (rotation-invariant)
 SIGMA_RATIO_TOL = 0.15          # absolute Δ on σ₂/σ₁ ∈ [0,1] — principal-axis aspect
@@ -52,7 +52,7 @@ SIGMA_RATIO_TOL = 0.15          # absolute Δ on σ₂/σ₁ ∈ [0,1] — princ
 # the noise span was 4.5e-11 mm — straddling the 10⁻¹⁰ boundary. At digit 6
 # the same data collapses to a single bucket while still distinguishing
 # real design steps (1 nm) well below human-meaningful resolution.
-CIRCLE_RADIUS_KEY_DIGITS = 6
+CIRCLE_RADIUS_KEY_DIGITS = 4
 # Canonical density (point count) every non-CIRCLE template + candidate gets
 # resampled to before centroid / PCA / scale / Chamfer. Matches the
 # upper-bound density `collect_entity_points` uses for synthesised circles,
@@ -371,8 +371,8 @@ def signatures_compatible(
     a: EntityShape,
     b: EntityShape,
     *,
-    path_length_ratio: float = PATH_LENGTH_RATIO,
-    radius_ratio: float = RADIUS_RATIO,
+    path_length_ratio: float | None = None,
+    radius_ratio: float | None = None,
 ) -> bool:
     """Cheap dimensional + aspect agreement test. Returns True when `a` and
     `b` are within size and aspect tolerance.
@@ -383,7 +383,14 @@ def signatures_compatible(
     σ-ratio aspect gate is intentionally not overridable here — its
     discrimination is qualitative (rect vs square, thin vs blob), not
     size-tolerant.
+
+    Defaults resolve to the module-level `PATH_LENGTH_RATIO` / `RADIUS_RATIO`
+    at call time (not at def time), so dev-mode overrides flow through.
     """
+    if path_length_ratio is None:
+        path_length_ratio = PATH_LENGTH_RATIO
+    if radius_ratio is None:
+        radius_ratio = RADIUS_RATIO
     # vertex_count is no longer a gate: same-shape entities with very
     # different vertex counts (e.g. mirrored substrate stored as 11 vs 65
     # verts) are genuine matches now that the matcher resamples to a
@@ -414,7 +421,7 @@ def signatures_compatible(
 def find_matches(
     template_handles: list[str],
     drawing_shapes: dict[str, EntityShape],
-    tolerance: float = TOLERANCE_ABS,
+    tolerance: float | None = None,
     n_jobs: int | None = None,
     *,
     strategy: str = "chamfer",
@@ -432,6 +439,8 @@ def find_matches(
       and `RADIUS_RATIO` for that call. Single-entity templates only —
       multi-entity templates silently fall back to chamfer.
     """
+    if tolerance is None:
+        tolerance = TOLERANCE_ABS
     n_jobs = N_JOBS if n_jobs is None else n_jobs
     template_handle_set = set(template_handles)
     template_shapes = [drawing_shapes[h] for h in template_handles if h in drawing_shapes]
@@ -488,7 +497,7 @@ def _match_signature_mode(
 def find_matches_from_pointsets(
     entity_point_sets: list[list[tuple[float, float]]],
     drawing_shapes: dict[str, EntityShape],
-    tolerance: float = TOLERANCE_ABS,
+    tolerance: float | None = None,
     n_jobs: int | None = None,
     entity_kinds: list[str | None] | None = None,
     *,
@@ -511,6 +520,8 @@ def find_matches_from_pointsets(
     available for single-entity templates only; multi-entity templates
     silently fall back to chamfer.
     """
+    if tolerance is None:
+        tolerance = TOLERANCE_ABS
     n_jobs = N_JOBS if n_jobs is None else n_jobs
     if entity_kinds is None:
         kinds_iter: list[str | None] = [None] * len(entity_point_sets)

@@ -12,6 +12,8 @@
     <span class="spacer"></span>
     <button id="dev-mode-toggle" type="button" aria-pressed="false"
             title="Reveal developer-only download affordances">Developer Mode</button>
+    <button id="dev-params-toggle" type="button" hidden
+            title="Adjust matching / DXF tunables (dev mode only)">⚙</button>
   </header>
 
   <main class="dashboard-main">
@@ -84,6 +86,31 @@
         <button type="button" data-layer-none class="link-btn">Select none</button>
         <span class="spacer"></span>
         <button type="button" data-layer-confirm class="primary">Use selected</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Developer parameter overrides modal (Dev Mode only) -->
+  <div id="dev-params-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Developer parameters">
+      <header class="modal-header">
+        <h2>Developer parameters</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body">
+        <p class="dev-params-banner">
+          In-memory only — restart clears every override. Do not change values
+          while jobs are running.
+        </p>
+        <div id="dev-params-body"></div>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" id="dev-params-reset" class="link-btn">Reset to defaults</button>
+        <button type="button" id="dev-params-reprocess" class="link-btn">Re-preprocess all files</button>
+        <span class="spacer"></span>
+        <button type="button" id="dev-params-apply" class="primary">Apply</button>
       </footer>
     </div>
   </div>

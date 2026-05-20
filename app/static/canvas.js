@@ -23,6 +23,7 @@ import {
   resolveSnap as _resolveSnapCore,
   applyOrtho as _applyOrthoCore,
 } from "./measure_core.js";
+import { mountDevParamsModal } from "./dev_params.js";
 
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
@@ -3225,6 +3226,21 @@ $visibilityBtn.addEventListener("click", () => {
 $visibilityClose.addEventListener("click", () => { $visibilityPanel.hidden = true; });
 $visibilityAll.addEventListener("click", showAllLayers);
 $visibilityInvert.addEventListener("click", invertLayerVisibility);
+
+// ---- developer matching-parameter modal --------------------------------
+// Matching-only on the viewer; DXF params and Re-preprocess live on the
+// dashboard. The gear shows itself iff dev mode is on in localStorage
+// (set by the dashboard's Developer Mode toggle — there's no toggle on
+// the viewer page).
+mountDevParamsModal({
+  toggleId: "dev-params-toggle",
+  modalId: "dev-params-modal",
+  bodyId: "dev-params-body",
+  applyId: "dev-params-apply",
+  resetId: "dev-params-reset",
+  moduleFilter: "matching",
+  statusEl: $status,
+});
 
 // ---- bootstrap -----------------------------------------------------------
 async function load() {

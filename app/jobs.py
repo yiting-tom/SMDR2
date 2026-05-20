@@ -66,12 +66,21 @@ def _preprocess_worker(
     library_id: str,
     selected_layers: list[str] | None = None,
     transient_primitives: str | None = None,
+    dev_overrides_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly.
     from app.dxf import filter_primitives, flatten_for_render
     from app.library import Store, build_handle_index
     from app.matching import build_entity_shapes, find_matches_from_pointsets
     from app.storage import DB_PATH
+
+    # Dev-mode tunable overrides made in the parent process don't reach
+    # this worker (separate Python interpreter); the parent passes its
+    # active snapshot here and we re-apply before any matching / parsing
+    # touches the now-default module attributes.
+    if dev_overrides_snapshot:
+        from app.dev_overrides import apply_snapshot
+        apply_snapshot(dev_overrides_snapshot)
 
     # 1. Get primitives — reuse Phase 1's transient cache if present, else
     #    re-parse the DXF.
@@ -164,6 +173,16 @@ def _preprocess_worker(
 
 
 # ---- Job orchestration ----------------------------------------------------
+def _current_dev_overrides() -> dict[str, Any]:
+    """Snapshot of active dev overrides for handoff to a worker process.
+
+    Lazy import keeps the override module out of the bootstrap path for
+    deployments that never touch it.
+    """
+    from app.dev_overrides import snapshot_non_default
+    return snapshot_non_default()
+
+
 def submit_preprocess(
     file_id: str,
     library_id: str = "default",
@@ -193,6 +212,7 @@ def submit_preprocess(
         library_id,
         list(selected_layers) if selected_layers is not None else None,
         str(transient),
+        _current_dev_overrides() or None,
     )
     fut.add_done_callback(lambda f: _on_preprocess_done(job_id, f))
     with _lock:
@@ -347,6 +367,102 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
         job["completed_at"] = time.time()
         job["result"] = result
     FILE_STORE.update_status(file_id, AWAITING_LAYERS)
+
+
+# ---- Re-process-all (dev mode) -------------------------------------------
+# Spec: POST /api/dev/reprocess-all returns ONE job_id whose progress
+# (`total` / `done`) covers every file in storage. We fan out one
+# `_preprocess_worker` future per file, share a parent job dict for
+# reporting, and bump `done` from each child's completion callback.
+# Match JSONs are not touched — only parsed/{file_id}.json and
+# prematch/{file_id}.json get rewritten.
+_REPROCESS_SKIP_STATUSES = frozenset({
+    "discovering_layers",
+    "awaiting_layers",
+    "error",
+})
+
+
+def submit_reprocess_all() -> str:
+    """Re-preprocess every eligible file in storage with current overrides.
+
+    Returns one parent job_id; `_jobs[job_id]` exposes
+    `total`, `done`, `skipped`, `errors`. Eligible = a file that has
+    completed Phase 1 layer selection (status is past
+    `awaiting_layers`). Errored or still-discovering files are counted
+    in `skipped` and don't get a worker dispatched.
+    """
+    from app.files import FILE_STORE
+    parent_id = str(uuid.uuid4())
+    files = FILE_STORE.list_all()
+    eligible = [r for r in files if r.status not in _REPROCESS_SKIP_STATUSES]
+    skipped = len(files) - len(eligible)
+    now = time.time()
+    with _lock:
+        _jobs[parent_id] = {
+            "id": parent_id,
+            "kind": "reprocess-all",
+            "status": "running" if eligible else "done",
+            "submitted_at": now,
+            "started_at": now,
+            "completed_at": None if eligible else now,
+            "total": len(eligible),
+            "done": 0,
+            "skipped": skipped,
+            "errors": [],
+        }
+    if not eligible:
+        return parent_id
+
+    overrides_snap = _current_dev_overrides() or None
+    for rec in eligible:
+        fut = _get_executor().submit(
+            _preprocess_worker,
+            rec.id,
+            str(upload_path(rec.id)),
+            str(parsed_path(rec.id)),
+            str(prematch_path(rec.id)),
+            rec.library_id,
+            list(rec.selected_layers) if rec.selected_layers is not None else None,
+            None,
+            overrides_snap,
+        )
+        fut.add_done_callback(
+            lambda f, fid=rec.id, pid=parent_id: _on_reprocess_step_done(pid, fid, f)
+        )
+    return parent_id
+
+
+def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
+    from app.files import FILE_STORE
+    try:
+        result = fut.result()
+    except Exception as exc:
+        tb = traceback.format_exc()
+        FILE_STORE.update_status(file_id, "error", error=f"{exc}\n{tb}")
+        with _lock:
+            job = _jobs.get(parent_id)
+            if job is not None:
+                job["errors"].append({"file_id": file_id, "error": str(exc)})
+                job["done"] += 1
+                if job["done"] >= job["total"]:
+                    job["status"] = "done"
+                    job["completed_at"] = time.time()
+        return
+    FILE_STORE.update_parsed(
+        file_id,
+        primitive_count=result["primitive_count"],
+        bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
+        background=result["background"],
+        insunits=result.get("insunits"),
+    )
+    with _lock:
+        job = _jobs.get(parent_id)
+        if job is not None:
+            job["done"] += 1
+            if job["done"] >= job["total"]:
+                job["status"] = "done"
+                job["completed_at"] = time.time()
 
 
 # ---- Reads ----------------------------------------------------------------

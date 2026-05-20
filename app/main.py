@@ -1132,3 +1132,35 @@ async def get_drc_bundle(product_id: str) -> Response:
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ---- Developer-mode parameter overrides ---------------------------------
+# Process-wide, in-memory only. See `app/dev_overrides.py` and the
+# `expose-dev-parameter-overrides` OpenSpec change for the contract.
+@app.get("/api/dev/settings")
+async def dev_settings_get() -> dict:
+    from app import dev_overrides
+    return {"settings": dev_overrides.read_state()}
+
+
+@app.post("/api/dev/settings")
+async def dev_settings_post(payload: dict) -> dict:
+    from app import dev_overrides
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="expected JSON object")
+    # Reset path takes precedence and ignores any other keys in the body —
+    # `{"reset": true}` is the canonical wipe.
+    if payload.get("reset") is True:
+        return {"settings": dev_overrides.reset()}
+    overrides = {k: v for k, v in payload.items() if k != "reset"}
+    try:
+        state = dev_overrides.apply(overrides)
+    except dev_overrides.ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"errors": exc.errors})
+    return {"settings": state}
+
+
+@app.post("/api/dev/reprocess-all")
+async def dev_reprocess_all() -> dict:
+    job_id = jobs.submit_reprocess_all()
+    return {"job_id": job_id}

@@ -3,6 +3,7 @@
 // Match JSON saved.
 
 import { openLayerModal } from "./layer_modal.js";
+import { mountDevParamsModal } from "./dev_params.js";
 
 // SBT/BD/POD always render as single-role slots. The 4th grid cell is
 // a split pair: RING on the left, LID on the right (mutually exclusive
@@ -771,12 +772,47 @@ function syncDevModeButton() {
   const on = getDevMode();
   $devModeToggle.setAttribute("aria-pressed", on ? "true" : "false");
   $devModeToggle.textContent = on ? "Developer Mode: ON" : "Developer Mode";
+  devParams.syncToggleVisibility();
 }
 $devModeToggle.addEventListener("click", () => {
   setDevMode(!getDevMode());
   syncDevModeButton();
   renderProducts();   // remount cards so dev-only buttons appear / disappear
 });
+
+// ---- dev parameter modal -------------------------------------------------
+// DXF group only on the dashboard — matching params live on the viewer
+// page next to where users actually iterate on matches. Re-preprocess
+// is exposed here because it operates on the full file store, which is
+// the dashboard's concern, not a single file's.
+const devParams = mountDevParamsModal({
+  toggleId: "dev-params-toggle",
+  modalId: "dev-params-modal",
+  bodyId: "dev-params-body",
+  applyId: "dev-params-apply",
+  resetId: "dev-params-reset",
+  reprocessId: "dev-params-reprocess",
+  moduleFilter: "dxf",
+  statusEl: $status,
+  onJobStart: pollReprocessJob,
+});
+
+async function pollReprocessJob(jobId) {
+  $status.textContent = `Re-preprocessing all files (job ${jobId.slice(0, 8)}…)`;
+  const tick = async () => {
+    const r = await fetch(`/api/jobs/${jobId}`);
+    if (!r.ok) { $status.textContent = `reprocess job lost: ${r.status}`; return; }
+    const job = await r.json();
+    const done = job.done ?? 0;
+    const total = job.total ?? 0;
+    $status.textContent = job.status === "done"
+      ? `Re-preprocess done (${done}/${total}, ${job.skipped || 0} skipped, ${job.errors?.length || 0} errors)`
+      : `Re-preprocessing ${done}/${total}…`;
+    if (job.status !== "done") setTimeout(tick, 1500);
+    else await refresh();
+  };
+  tick();
+}
 
 // ---- bootstrap -----------------------------------------------------------
 (async () => {
