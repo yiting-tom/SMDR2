@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from app.library import (
     CLASS_JSON_KEY,
+    CLASS_VIEW_CONSTRAINTS,
     DEFAULT_CLASSES,
     DEFAULT_LIBRARY_ID,
     Library,
     LibraryRegistry,
     Store,
     Template,
+    is_allowed_view,
 )
 
 
@@ -298,3 +300,33 @@ def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
         f"after migration expected C4Ball directly before BGABall, "
         f"got positions {c4_idx} and {bga_idx}"
     )
+
+
+# ---- Per-class view constraints -------------------------------------------
+def test_class_view_constraints_seed_entries():
+    assert CLASS_VIEW_CONSTRAINTS["C4Ball"] == frozenset({"top_view"})
+    assert CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view", "side_view"})
+
+
+def test_is_allowed_view_unconstrained_class():
+    """Classes absent from the registry admit every position including None."""
+    for v in ("top_view", "bottom_view", "side_view", None):
+        assert is_allowed_view("Substrate", v) is True
+        assert is_allowed_view("SMD-2T", v) is True
+        # A made-up class name (custom user class) also passes through.
+        assert is_allowed_view("MyMarker", v) is True
+
+
+def test_is_allowed_view_c4ball():
+    assert is_allowed_view("C4Ball", "top_view") is True
+    assert is_allowed_view("C4Ball", "bottom_view") is False
+    assert is_allowed_view("C4Ball", "side_view") is False
+    # Strict mode: unassigned never allowed for a constrained class.
+    assert is_allowed_view("C4Ball", None) is False
+
+
+def test_is_allowed_view_bgaball():
+    assert is_allowed_view("BGABall", "bottom_view") is True
+    assert is_allowed_view("BGABall", "side_view") is True
+    assert is_allowed_view("BGABall", "top_view") is False
+    assert is_allowed_view("BGABall", None) is False

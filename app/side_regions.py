@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping, Optional, TypedDict
 
+from app.library import is_allowed_view
+
 
 class Rect(TypedDict):
     x0: float
@@ -82,21 +84,36 @@ def split_matches_by_side(
     top_view: Optional[Mapping[str, float]],
     bottom_view: Optional[Mapping[str, float]],
     side_view: Optional[Mapping[str, float]],
+    class_name: str,
 ) -> tuple[dict[str, list[list[str]]], dict[str, int]]:
     """Group a single template's match instances by side prefix.
 
     Returns ``(out, counts)`` where:
     - ``out`` maps ``"<prefix>.<base_key>"`` (or ``base_key`` for unassigned)
       to a list of handle-lists, preserving instance order within each side.
-    - ``counts`` is ``{"top_view": N, "bottom_view": M, "side_view": K, "unassigned": U}``.
+    - ``counts`` is ``{"top_view": N, "bottom_view": M, "side_view": K,
+      "unassigned": U, "dropped": D}``; the ``dropped`` bucket counts
+      instances filtered out by the class-view constraint registry, the
+      other four buckets count surviving instances only.
+
+    ``class_name`` is the **display ID** of the class this template
+    belongs to (e.g., ``"BGABall"``, ``"Substrate"``). Instances of
+    constrained classes (those listed in
+    :data:`library.CLASS_VIEW_CONSTRAINTS`) whose computed prefix is
+    not in the allowed set — including the "unassigned" position —
+    are dropped, not emitted under any key.
 
     Each match instance is expected to expose a ``.handles`` attribute (a
     ``MatchResult`` from :mod:`app.matching`).
     """
     out: dict[str, list[list[str]]] = {}
-    counts = {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 0}
+    counts = {"top_view": 0, "bottom_view": 0, "side_view": 0,
+              "unassigned": 0, "dropped": 0}
     for m in matches:
         prefix = side_prefix_for(m.handles, shapes, top_view, bottom_view, side_view)
+        if not is_allowed_view(class_name, prefix):
+            counts["dropped"] += 1
+            continue
         key = f"{prefix}.{base_key}" if prefix else base_key
         out.setdefault(key, []).append(list(m.handles))
         counts[prefix if prefix else "unassigned"] += 1

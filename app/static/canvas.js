@@ -477,6 +477,88 @@ const CLASS_COLORS = {
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
 
+// Per-class view constraints — JS mirror of library.CLASS_VIEW_CONSTRAINTS.
+// Some IC-packaging classes only physically appear in specific views:
+// C4 bumps in top_view, BGA balls in bottom_view / side_view. The Scan
+// All overlay and the match-JSON serialiser both filter constrained
+// classes whose containment falls outside the allowed set, including
+// the "unassigned" position (no view rect covers the instance).
+//
+// MUST stay in sync with app/library.py — tests/test_canvas_constants.py
+// parses the literal between the BEGIN/END sentinel comments to verify.
+// CLASS_VIEW_CONSTRAINTS_BEGIN
+const CLASS_VIEW_CONSTRAINTS = {
+  "C4Ball":  ["top_view"],
+  "BGABall": ["bottom_view", "side_view"],
+};
+// CLASS_VIEW_CONSTRAINTS_END
+
+function isAllowedView(className, view) {
+  const allowed = CLASS_VIEW_CONSTRAINTS[className];
+  if (!allowed) return true;
+  return view !== null && allowed.includes(view);
+}
+
+// Classify a world-space point against the file's view rectangles
+// using the same top_view > bottom_view > side_view priority as
+// app.side_regions.side_prefix_for. Returns the matched view name
+// or null (unassigned).
+function viewForPoint(x, y) {
+  const r = (rect) =>
+    rect !== null && pointInRect(x, y, rect.x0, rect.y0, rect.x1, rect.y1);
+  if (r(sideRects.top_view))    return "top_view";
+  if (r(sideRects.bottom_view)) return "bottom_view";
+  if (r(sideRects.side_view))   return "side_view";
+  return null;
+}
+
+// Apply CLASS_VIEW_CONSTRAINTS to a freshly-built scan-all map pair,
+// mutating both in place. Drops handles whose class is constrained and
+// whose bbox-center isn't in the allowed view set; decrements byClass
+// counts accordingly so the status line shows post-filter totals.
+//
+// Multi-primitive handles get their combined bbox computed by union'ing
+// the per-primitive primBBoxes; single-primitive handles (the common
+// case for C4Ball / BGABall circles) trivially get their own bbox.
+function applyViewConstraintsToScanAll(byHandle, byClass) {
+  if (!Object.keys(CLASS_VIEW_CONSTRAINTS).length) return;
+  // Group bbox by handle (only handles that need filtering).
+  const constrainedHandles = new Set();
+  for (const [h, cls] of byHandle) {
+    if (CLASS_VIEW_CONSTRAINTS[cls]) constrainedHandles.add(h);
+  }
+  if (!constrainedHandles.size) return;
+  // Union primBBoxes per handle for constrained handles only.
+  const handleBBox = new Map(); // handle → [xmin, ymin, xmax, ymax]
+  for (let i = 0; i < primitives.length; i++) {
+    const h = primitives[i].handle;
+    if (!constrainedHandles.has(h)) continue;
+    const b = primBBoxes[i];
+    const ex = handleBBox.get(h);
+    if (!ex) {
+      handleBBox.set(h, [b[0], b[1], b[2], b[3]]);
+    } else {
+      if (b[0] < ex[0]) ex[0] = b[0];
+      if (b[1] < ex[1]) ex[1] = b[1];
+      if (b[2] > ex[2]) ex[2] = b[2];
+      if (b[3] > ex[3]) ex[3] = b[3];
+    }
+  }
+  for (const h of constrainedHandles) {
+    const cls = byHandle.get(h);
+    const bbox = handleBBox.get(h);
+    if (!bbox) continue;  // handle has no primitive (shouldn't happen)
+    const cx = (bbox[0] + bbox[2]) * 0.5;
+    const cy = (bbox[1] + bbox[3]) * 0.5;
+    const view = viewForPoint(cx, cy);
+    if (!isAllowedView(cls, view)) {
+      byHandle.delete(h);
+      byClass[cls] = (byClass[cls] ?? 1) - 1;
+      if (byClass[cls] <= 0) delete byClass[cls];
+    }
+  }
+}
+
 // scan-all overlay state: handle → class_name (for fast render lookup)
 let scanAllByHandle = null;   // null = inactive; Map<handle, className> when active
 let scanAllSummary = null;    // { byClass: {name: count}, total }
@@ -2315,12 +2397,14 @@ async function runScanAll() {
       byClass[cls] = handles.length;
       for (const h of handles) byHandle.set(h, cls);
     }
+    applyViewConstraintsToScanAll(byHandle, byClass);
+    const filteredTotal = byHandle.size;
     scanAllByHandle = byHandle;
-    scanAllSummary = { byClass, total: data.total };
+    scanAllSummary = { byClass, total: filteredTotal };
     const dt = (performance.now() - t0).toFixed(0);
     const breakdown = Object.entries(byClass)
       .map(([c, n]) => `${c}:${n}`).join(" ");
-    setBaseStatus(`scan-all: ${data.total} hits in ${dt}ms · ${breakdown || "(empty library)"}`);
+    setBaseStatus(`scan-all: ${filteredTotal} hits in ${dt}ms · ${breakdown || "(empty library)"}`);
     updateStatus();
     render();
   } catch (e) {
@@ -2600,8 +2684,9 @@ async function loadPrematch() {
     byClass[cls] = handles.length;
     for (const h of handles) byHandle.set(h, cls);
   }
+  applyViewConstraintsToScanAll(byHandle, byClass);
   scanAllByHandle = byHandle;
-  scanAllSummary = { byClass, total: data.total };
+  scanAllSummary = { byClass, total: byHandle.size };
   $scanAllBtn.classList.add("active");
   render();
 }

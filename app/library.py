@@ -93,6 +93,40 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
 }
 
 
+# Per-class view constraints. Some IC-packaging classes are physically
+# restricted to a subset of views (C4 bumps face the chip's top side;
+# BGA balls face the package bottom or appear in cross-section). The
+# match-JSON serialiser and the viewer's Scan All overlay both consult
+# is_allowed_view() below to drop instances that violate this rule.
+#
+# Absent key = class is unconstrained (all views including "unassigned"
+# permitted). Present key = strict mode: only the listed views are
+# allowed, and the "unassigned" position (no view rect covers the
+# instance) is never allowed.
+#
+# JS canvas.js MUST keep an in-sync mirror of this constant between its
+# CLASS_VIEW_CONSTRAINTS_BEGIN / _END sentinel comments. The drift-guard
+# test in tests/test_canvas_constants.py enforces consistency.
+# CLASS_VIEW_CONSTRAINTS_BEGIN
+CLASS_VIEW_CONSTRAINTS: dict[str, frozenset[str]] = {
+    "C4Ball":  frozenset({"top_view"}),
+    "BGABall": frozenset({"bottom_view", "side_view"}),
+}
+# CLASS_VIEW_CONSTRAINTS_END
+
+
+def is_allowed_view(class_name: str, view: str | None) -> bool:
+    """True when a (class_name, view) pair is permitted under
+    CLASS_VIEW_CONSTRAINTS. Unconstrained classes (key absent) admit
+    every view including None. Constrained classes admit only views in
+    their allow-set and never None (strict mode: an unassigned match
+    of a constrained class is physically impossible)."""
+    allowed = CLASS_VIEW_CONSTRAINTS.get(class_name)
+    if allowed is None:
+        return True
+    return view is not None and view in allowed
+
+
 DEFAULT_LIBRARY_ID = "default"
 DEFAULT_LIBRARY_NAME = "Default"
 

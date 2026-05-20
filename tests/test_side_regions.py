@@ -163,13 +163,18 @@ def test_split_matches_splits_instances_across_three_views():
     bottom = {"x0": 40, "y0": 40, "x1": 60, "y1": 60}
     side = {"x0": 190, "y0": 190, "x1": 210, "y1": 210}
     matches = [_mr(["T1"]), _mr(["B1"]), _mr(["T2"]), _mr(["S1"])]
-    out, counts = split_matches_by_side("smd.0", matches, shapes, top, bottom, side)
+    out, counts = split_matches_by_side(
+        "smd.0", matches, shapes, top, bottom, side, class_name="SMD-2T",
+    )
     assert out == {
         "top_view.smd.0": [["T1"], ["T2"]],
         "bottom_view.smd.0": [["B1"]],
         "side_view.smd.0": [["S1"]],
     }
-    assert counts == {"top_view": 2, "bottom_view": 1, "side_view": 1, "unassigned": 0}
+    assert counts == {
+        "top_view": 2, "bottom_view": 1, "side_view": 1,
+        "unassigned": 0, "dropped": 0,
+    }
 
 
 def test_split_matches_only_side_view_set():
@@ -177,20 +182,26 @@ def test_split_matches_only_side_view_set():
     shapes = {"S": _shape("S", [(5, 5)])}
     side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     out, counts = split_matches_by_side(
-        "smd.0", [_mr(["S"])], shapes, None, None, side,
+        "smd.0", [_mr(["S"])], shapes, None, None, side, class_name="SMD-2T",
     )
     assert out == {"side_view.smd.0": [["S"]]}
-    assert counts == {"top_view": 0, "bottom_view": 0, "side_view": 1, "unassigned": 0}
+    assert counts == {
+        "top_view": 0, "bottom_view": 0, "side_view": 1,
+        "unassigned": 0, "dropped": 0,
+    }
 
 
 def test_split_matches_keeps_unassigned_unprefixed():
     # No rectangles set → every instance falls under base_key, no prefix.
     shapes = {"H": _shape("H", [(5, 5)])}
     out, counts = split_matches_by_side(
-        "smd.0", [_mr(["H"])], shapes, None, None, None,
+        "smd.0", [_mr(["H"])], shapes, None, None, None, class_name="SMD-2T",
     )
     assert out == {"smd.0": [["H"]]}
-    assert counts == {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 1}
+    assert counts == {
+        "top_view": 0, "bottom_view": 0, "side_view": 0,
+        "unassigned": 1, "dropped": 0,
+    }
 
 
 def test_split_matches_partial_outside_region_is_unassigned():
@@ -203,12 +214,16 @@ def test_split_matches_partial_outside_region_is_unassigned():
     side = {"x0": 70, "y0": 70, "x1": 80, "y1": 80}
     out, counts = split_matches_by_side(
         "smd.0", [_mr(["T"]), _mr(["Z"])], shapes, top, bottom, side,
+        class_name="SMD-2T",
     )
     assert out == {
         "top_view.smd.0": [["T"]],
         "smd.0": [["Z"]],
     }
-    assert counts == {"top_view": 1, "bottom_view": 0, "side_view": 0, "unassigned": 1}
+    assert counts == {
+        "top_view": 1, "bottom_view": 0, "side_view": 0,
+        "unassigned": 1, "dropped": 0,
+    }
 
 
 def test_split_matches_all_three_overlap_resolves_to_top():
@@ -218,9 +233,14 @@ def test_split_matches_all_three_overlap_resolves_to_top():
     bottom = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     matches = [_mr([f"H{i}"]) for i in range(3)]
-    out, counts = split_matches_by_side("smd.0", matches, shapes, top, bottom, side)
+    out, counts = split_matches_by_side(
+        "smd.0", matches, shapes, top, bottom, side, class_name="SMD-2T",
+    )
     assert out == {"top_view.smd.0": [["H0"], ["H1"], ["H2"]]}
-    assert counts == {"top_view": 3, "bottom_view": 0, "side_view": 0, "unassigned": 0}
+    assert counts == {
+        "top_view": 3, "bottom_view": 0, "side_view": 0,
+        "unassigned": 0, "dropped": 0,
+    }
 
 
 def test_split_matches_preserves_instance_order_within_side():
@@ -229,7 +249,137 @@ def test_split_matches_preserves_instance_order_within_side():
     }
     top = {"x0": -1, "y0": 0, "x1": 10, "y1": 2}
     matches = [_mr([f"H{i}"]) for i in range(5)]
-    out, _ = split_matches_by_side("smd.0", matches, shapes, top, None, None)
+    out, _ = split_matches_by_side(
+        "smd.0", matches, shapes, top, None, None, class_name="SMD-2T",
+    )
     assert out == {
         "top_view.smd.0": [["H0"], ["H1"], ["H2"], ["H3"], ["H4"]],
     }
+
+
+# ---- Class-view constraint filter ----------------------------------------
+def test_c4ball_in_top_view_is_kept():
+    """C4Ball matches inside top_view survive the filter."""
+    shapes = {"T": _shape("T", [(5, 5)])}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    out, counts = split_matches_by_side(
+        "c4_ball.0", [_mr(["T"])], shapes, top, None, None, class_name="C4Ball",
+    )
+    assert out == {"top_view.c4_ball.0": [["T"]]}
+    assert counts["top_view"] == 1
+    assert counts["dropped"] == 0
+
+
+def test_c4ball_in_bottom_view_is_dropped():
+    """C4Ball in bottom_view violates physics — drop, not relabel."""
+    shapes = {"B": _shape("B", [(55, 55)])}
+    bottom = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
+    out, counts = split_matches_by_side(
+        "c4_ball.0", [_mr(["B"])], shapes, None, bottom, None, class_name="C4Ball",
+    )
+    assert out == {}
+    assert counts["bottom_view"] == 0
+    assert counts["dropped"] == 1
+
+
+def test_c4ball_in_side_view_is_dropped():
+    shapes = {"S": _shape("S", [(205, 205)])}
+    side = {"x0": 200, "y0": 200, "x1": 210, "y1": 210}
+    out, counts = split_matches_by_side(
+        "c4_ball.0", [_mr(["S"])], shapes, None, None, side, class_name="C4Ball",
+    )
+    assert out == {}
+    assert counts["dropped"] == 1
+
+
+def test_c4ball_unassigned_is_dropped():
+    """No view rect → C4Ball is unassigned → strict mode drops it."""
+    shapes = {"H": _shape("H", [(5, 5)])}
+    out, counts = split_matches_by_side(
+        "c4_ball.0", [_mr(["H"])], shapes, None, None, None, class_name="C4Ball",
+    )
+    assert out == {}
+    assert counts["unassigned"] == 0
+    assert counts["dropped"] == 1
+
+
+def test_bgaball_in_bottom_view_is_kept():
+    shapes = {"B": _shape("B", [(55, 55)])}
+    bottom = {"x0": 50, "y0": 50, "x1": 60, "y1": 60}
+    out, counts = split_matches_by_side(
+        "bga_ball.0", [_mr(["B"])], shapes, None, bottom, None, class_name="BGABall",
+    )
+    assert out == {"bottom_view.bga_ball.0": [["B"]]}
+    assert counts["bottom_view"] == 1
+    assert counts["dropped"] == 0
+
+
+def test_bgaball_in_side_view_is_kept():
+    shapes = {"S": _shape("S", [(205, 205)])}
+    side = {"x0": 200, "y0": 200, "x1": 210, "y1": 210}
+    out, counts = split_matches_by_side(
+        "bga_ball.0", [_mr(["S"])], shapes, None, None, side, class_name="BGABall",
+    )
+    assert out == {"side_view.bga_ball.0": [["S"]]}
+    assert counts["side_view"] == 1
+    assert counts["dropped"] == 0
+
+
+def test_bgaball_in_top_view_is_dropped():
+    shapes = {"T": _shape("T", [(5, 5)])}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    out, counts = split_matches_by_side(
+        "bga_ball.0", [_mr(["T"])], shapes, top, None, None, class_name="BGABall",
+    )
+    assert out == {}
+    assert counts["top_view"] == 0
+    assert counts["dropped"] == 1
+
+
+def test_bgaball_unassigned_is_dropped():
+    shapes = {"H": _shape("H", [(5, 5)])}
+    out, counts = split_matches_by_side(
+        "bga_ball.0", [_mr(["H"])], shapes, None, None, None, class_name="BGABall",
+    )
+    assert out == {}
+    assert counts["dropped"] == 1
+
+
+def test_unconstrained_class_unaffected_by_filter():
+    """SMD-2T has no entry in CLASS_VIEW_CONSTRAINTS — every position is
+    valid, including unassigned. Verifies the absent-key fall-through."""
+    shapes = {
+        "T": _shape("T", [(5, 5)]),
+        "Z": _shape("Z", [(500, 500)]),  # outside all rects
+    }
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    out, counts = split_matches_by_side(
+        "smd.0", [_mr(["T"]), _mr(["Z"])], shapes,
+        top, None, None, class_name="SMD-2T",
+    )
+    assert out == {
+        "top_view.smd.0": [["T"]],
+        "smd.0": [["Z"]],
+    }
+    assert counts["top_view"] == 1
+    assert counts["unassigned"] == 1
+    assert counts["dropped"] == 0
+
+
+def test_mixed_classes_independent_filters():
+    """Across one call we don't mix classes (split_matches_by_side is per
+    class+template). But verify counts are reset properly each call."""
+    shapes = {"T": _shape("T", [(5, 5)])}
+    top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
+    # C4Ball in top_view → kept
+    _, c4_counts = split_matches_by_side(
+        "c4_ball.0", [_mr(["T"])], shapes, top, None, None, class_name="C4Ball",
+    )
+    # BGABall in top_view → dropped
+    _, bga_counts = split_matches_by_side(
+        "bga_ball.0", [_mr(["T"])], shapes, top, None, None, class_name="BGABall",
+    )
+    assert c4_counts["dropped"] == 0
+    assert c4_counts["top_view"] == 1
+    assert bga_counts["dropped"] == 1
+    assert bga_counts["top_view"] == 0

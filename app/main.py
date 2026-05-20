@@ -43,6 +43,7 @@ from app.files import (
 )
 from app.library import (
     CLASS_JSON_KEY,
+    CLASS_VIEW_CONSTRAINTS,
     DEFAULT_LIBRARY_ID,
     LIBRARIES,
     Template,
@@ -919,8 +920,24 @@ async def save_match_json(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     out: dict[str, list[list[str]]] = {}
     total_matches = 0
-    side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 0}
+    side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0,
+                   "unassigned": 0, "dropped": 0}
+    # Map view name → the file's rect for that view, for the
+    # skip-when-impossible guard below.
+    rect_for = {
+        "top_view": rec.top_view_rect,
+        "bottom_view": rec.bottom_view_rect,
+        "side_view": rec.side_view_rect,
+    }
     for cls_name in lib.classes:
+        # Skip-when-impossible: if this class has a view constraint and
+        # none of its allowed view rectangles is set on the file, every
+        # produced match would be dropped by the filter inside
+        # split_matches_by_side. Skipping the matcher call is a pure
+        # perf optimisation — the result is byte-identical either way.
+        allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
+        if allowed is not None and not any(rect_for[v] is not None for v in allowed):
+            continue
         strategy, bbox_ratio = lib.strategy_of(cls_name)
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
             result = find_matches_from_pointsets(
@@ -936,9 +953,12 @@ async def save_match_json(file_id: str) -> dict:
             # Each match instance is classified by which view rect it
             # falls inside, producing keys like top_view.smd_2t.0; matches
             # outside every rect collapse to the unprefixed base_key.
+            # Constrained-class matches (C4Ball/BGABall) that land in a
+            # disallowed view or unassigned are dropped by the filter.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
                 rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
+                class_name=cls_name,
             )
             for k, v in grouped.items():
                 out.setdefault(k, []).extend(v)
