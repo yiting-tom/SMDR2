@@ -63,6 +63,38 @@ removes the bias.
 - Algebraic LS bias is irrelevant at our vertex-count and radial-tolerance
   regime (see Non-Goals).
 
+**Translate to local frame before solving**.
+
+- Discovered during shake-out (commit `b97de10`): packaging DXFs sit
+  at large absolute coordinates (10⁴–10⁵ mm) and the raw-coordinate
+  Kåsa solve has matrix condition number ~10²¹ — the radius came back
+  ~14× too big on a 100 km × 0.3 mm ball. Solving in the cloud's local
+  frame (translate by vertex-centroid before, add the offset back
+  after) reduces the spread of matrix entries to the cloud's diameter
+  and keeps conditioning benign. Mathematically equivalent (circle
+  fitting is translation-invariant), numerically critical.
+
+**Two safety bounds in addition to the existing radial-variance test**.
+
+- `rmean > max_extent` (cloud-bbox larger dimension): bounds the LS
+  result against the data itself. A genuine closed circle has
+  `rmean ≈ extent / 2`; if rmean exceeds the bbox the LS solve fit a
+  near-line / shallow-arc as a giant circle. The existing radial
+  variance test wouldn't catch this because the points DO sit on that
+  giant circle (within 2 % of its huge radius). Rejecting here keeps
+  the sub-path as a polyline / filled_polygon.
+- `min_extent / max_extent < 0.9` (bbox not square): catches a
+  surprising rectangular-lid failure mode. A 30×20 mm rectangle drawn
+  with 12 vertices (4 corners + 8 edge midpoints) has 4 corners at one
+  fixed distance from centroid and 8 midpoints at another fixed
+  distance — and for certain aspect ratios these two values pool to a
+  variance under 2 %. The detector then emits a `circle` primitive
+  whose radius is the corner-to-centroid distance, visibly oversized
+  next to the rectangular lid. A true circle has a square bbox; the
+  aspect gate rejects rectangles. 10 % slack absorbs the
+  discretisation of a finite-N inscribed polygon (a 12-gon's bbox
+  isn't perfectly square depending on rotation).
+
 **Singular-matrix fallback returns centroid** (over: raise / skip).
 
 - A singular 3×3 means the vertices are collinear (or numerically

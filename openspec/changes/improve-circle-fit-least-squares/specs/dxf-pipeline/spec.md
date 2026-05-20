@@ -40,17 +40,34 @@ Other decorative entity types (TEXT, MTEXT, DIMENSION) SHALL continue
 to be rendered with `decorative: true`.
 
 The circle detector SHALL estimate the circle's centre by Kåsa
-algebraic least-squares fitting — minimise Σᵢ
-(xᵢ² + yᵢ² + D·xᵢ + E·yᵢ + F)² over D, E, F via the closed-form 3×3
-normal equations, then take `(cx, cy) = (−D/2, −E/2)`. When the
+algebraic least-squares fitting performed in the cloud's local frame:
+translate the vertices by their centroid `(cx₀, cy₀) = (Σx/n, Σy/n)`
+before solving, then add the centroid offset back to the result.
+Local-frame solving is mathematically equivalent to the raw-coordinate
+form (circle fitting is translation-invariant) but is required for
+numerical stability when the cloud sits at large absolute coordinates
+(packaging DXFs routinely live at 10⁴–10⁵ mm; raw-coordinate solves
+return a radius an order of magnitude too large in that regime). The
+LS solve minimises Σᵢ (xᵢ² + yᵢ² + D·xᵢ + E·yᵢ + F)² in the local
+frame; the centre is `(cx, cy) = (cx₀ − D/2, cy₀ − E/2)`. When the
 normal-equation matrix is numerically singular (collinear or
 near-collinear vertices), the detector SHALL fall back to the
-centroid-based estimate `(Σx/n, Σy/n)`. After resolving the centre,
-the detector SHALL recompute per-vertex distances
-`rᵢ = hypot(xᵢ − cx, yᵢ − cy)` and accept the sub-path iff
-`(rmax − rmin) / rmean ≤ CIRCLE_RADIAL_TOL = 0.02`. The emitted
-primitive's `r` field SHALL be `rmean` (mean per-vertex distance to
-the resolved centre).
+centroid `(cx₀, cy₀)`.
+
+After the centre is resolved, the detector SHALL recompute per-vertex
+distances `rᵢ = hypot(xᵢ − cx, yᵢ − cy)` and SHALL reject the
+sub-path when any of:
+
+- `rmean > max(extent_x, extent_y)` of the vertex bbox (LS fit a
+  near-line as a giant circle), OR
+- `min(extent_x, extent_y) / max(extent_x, extent_y) < 0.9`
+  (bbox is far from square — rectangular outline), OR
+- `(rmax − rmin) / rmean > CIRCLE_RADIAL_TOL = 0.02` (vertices not
+  on a circle within tolerance).
+
+When all three gates pass, the detector SHALL emit a `circle`
+primitive whose `r` field is `rmean` (mean per-vertex distance to the
+resolved centre).
 
 Stroke-only circles emitted from `draw_path` SHALL continue to omit
 the `filled` field (equivalent to `filled: false`); the field is
@@ -117,6 +134,23 @@ one info-level log line recording the diagonal and the chosen tolerance.
 - **THEN** the result contains a `circle` primitive for that handle
 - **AND** the primitive's `center` matches `(5.0, −3.0)` within `1e-3 × r` (the LS fit removes the centroid bias toward the dense arc)
 - **AND** the primitive's `r` matches `0.5` within 1 % radial tolerance
+
+#### Scenario: Circle at large absolute coordinates fits accurately
+- **WHEN** a DXF containing a closed 12-vertex LWPOLYLINE uniformly on a circle (centre (100_000.0, 0.0), radius 0.3 mm) is flattened
+- **THEN** the result contains a `circle` primitive for that handle
+- **AND** the primitive's `center` matches `(100_000.0, 0.0)` within `1e-6 × r + 1e-3` mm absolute (the local-frame translation keeps the LS solve numerically stable)
+- **AND** the primitive's `r` matches `0.3` within 1 % (i.e., NOT ~14× too big as the raw-coordinate solve would produce)
+
+#### Scenario: Lid-style rectangle is not promoted to a circle
+- **WHEN** a DXF containing a closed LWPOLYLINE describing a 30 × 20 mm rectangle with 12 vertices (4 corners + 8 edge midpoints) is flattened
+- **THEN** the bbox-aspect gate rejects the sub-path (min/max extent = 20/30 = 0.667 < 0.9)
+- **AND** the result contains a `polyline` primitive for that handle
+- **AND** does NOT contain a `circle` primitive (even if the corners + midpoints happen to share a tight radial variance)
+
+#### Scenario: Near-line sub-path is not promoted to a giant circle
+- **WHEN** a DXF containing a closed 12-vertex sub-path whose vertices lie on a very shallow arc of a huge radius circle (so the LS solve would fit a circle whose `rmean` dwarfs the cloud's bbox) is flattened
+- **THEN** the radius-bound safety gate rejects the sub-path (`rmean > max_extent`)
+- **AND** the result does NOT contain a `circle` primitive for that handle
 
 #### Scenario: A true polyline stays a polyline
 - **WHEN** a DXF containing an 8-vertex closed POLYLINE that is NOT a circular approximation is flattened

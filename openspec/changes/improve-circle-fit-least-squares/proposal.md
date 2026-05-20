@@ -21,18 +21,34 @@ vertex spacing.
 
 - `_detect_circle_subpath` SHALL replace the centroid-as-centre with a
   Kåsa algebraic least-squares fit:
+  - **Translate the vertex cloud to its own centroid first**, solve LS
+    in that local frame, then add the centroid offset back. Critical:
+    without local-frame translation the Kåsa normal-equation matrix is
+    dominated by `Σx² ≈ n·cx0²` when the cloud sits at large absolute
+    coordinates (packaging DXFs routinely live at 10⁴–10⁵ mm); a 100 km
+    × 0.3 mm BGA ball gives matrix condition number ~10²¹ and the
+    naive solve returns a radius ~14× too big.
   - Minimise Σᵢ (xᵢ² + yᵢ² + D·xᵢ + E·yᵢ + F)² over D, E, F via the
     closed-form 3×3 normal-equation solution.
-  - Centre `(cx, cy) = (-D/2, -E/2)`.
-  - Radius `r = √((D² + E²)/4 − F)` (used as the seed; the radial-variance
-    test still recomputes per-vertex distances).
-- When the 3×3 normal-equation matrix is singular (collinear vertices,
-  degenerate input, |determinant| below a small epsilon), the function
-  SHALL fall back to the centroid-based estimate so degenerate sub-paths
-  produce the same answer as today.
+  - Centre `(cx, cy) = centroid + (-D/2, -E/2)`.
+  - Radius is taken as `rmean = mean(hypot(xᵢ − cx, yᵢ − cy))` after
+    the centre is resolved (consistent with the historical `r` field).
+- When the 3×3 normal-equation matrix is singular (`numpy.linalg.solve`
+  raises `LinAlgError` — collinear vertices, degenerate input), the
+  function SHALL fall back to the centroid-based estimate so
+  degenerate sub-paths produce the same answer as before this change.
+- **Defense-in-depth safety bounds** SHALL reject pathological fits
+  that pass the radial-variance test but are visibly wrong:
+  - `rmean > max(extent_x, extent_y)` → reject (LS fit a near-line as
+    a giant circle; emitted primitive would be larger than the data).
+  - `min(extent_x, extent_y) / max(extent_x, extent_y) < 0.9` →
+    reject (bbox is not square; rectangular lid-style polylines whose
+    4 corners + edge midpoints land at coincidentally-equal centroid
+    distances were getting promoted to inscribed circles).
 - The radial-variance predicate stays unchanged: after the centre is
-  resolved (LS or fallback), recompute `r_i = hypot(xᵢ − cx, yᵢ − cy)`
-  for each vertex and apply `(rmax − rmin) / rmean ≤ CIRCLE_RADIAL_TOL = 0.02`.
+  resolved (LS or fallback) and the safety bounds clear, recompute
+  `r_i = hypot(xᵢ − cx, yᵢ − cy)` for each vertex and apply
+  `(rmax − rmin) / rmean ≤ CIRCLE_RADIAL_TOL = 0.02`.
 - The two min-verts thresholds (`CIRCLE_MIN_VERTS = 8`,
   `CIRCLE_MIN_VERTS_NOCURVE = 11`) and the radial tolerance stay the
   same. No new public constants. No new public functions.
