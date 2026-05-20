@@ -70,7 +70,7 @@ def _preprocess_worker(
     # Imports inside so spawned workers re-import cleanly.
     from app.dxf import filter_primitives, flatten_for_render
     from app.library import Store, build_handle_index
-    from app.matching import build_entity_shapes, find_matches_from_pointsets
+    from app.matching import TOLERANCE_ABS, build_entity_shapes, find_matches_from_pointsets
     from app.storage import DB_PATH
 
     # 1. Get primitives — reuse Phase 1's transient cache if present, else
@@ -116,14 +116,18 @@ def _preprocess_worker(
     shapes = build_entity_shapes(primitives, handle_index)
 
     # 4. Pre-match against this file's library (read fresh from SQLite).
+    # Per-class tolerance overrides the global default when set; NULL falls
+    # back to `matching.TOLERANCE_ABS`.
     store = Store(DB_PATH)
-    _, templates_by_class = store.load_library(library_id)
+    _, tolerances_by_class, templates_by_class = store.load_library(library_id)
     by_class: dict[str, list[str]] = {}
     for cls_name, templates in templates_by_class.items():
+        cls_tol = tolerances_by_class.get(cls_name)
         seen: set[str] = set()
         for tmpl in templates:
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
+                tolerance=cls_tol if cls_tol is not None else TOLERANCE_ABS,
                 entity_kinds=tmpl.entity_kinds,
             )
             for m in result.matches:

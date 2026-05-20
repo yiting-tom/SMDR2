@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS classes (
     name        TEXT NOT NULL,
     rank        INTEGER NOT NULL,
     created_at  REAL NOT NULL,
+    tolerance   REAL,
     PRIMARY KEY (library_id, name),
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
@@ -269,6 +270,7 @@ class Store:
                     name        TEXT NOT NULL,
                     rank        INTEGER NOT NULL,
                     created_at  REAL NOT NULL,
+                    tolerance   REAL,
                     PRIMARY KEY (library_id, name)
                 );
                 INSERT INTO classes__new (library_id, name, rank, created_at)
@@ -276,6 +278,15 @@ class Store:
                 DROP TABLE classes;
                 ALTER TABLE classes__new RENAME TO classes;
             """)
+
+        # classes.tolerance — per-class chamfer override (NULL = use the
+        # global TOLERANCE_ABS default in app/matching.py). Added late so
+        # existing libraries get NULL on every row, preserving pre-change
+        # matching behaviour.
+        if not has_col("classes", "tolerance"):
+            self.conn.execute(
+                "ALTER TABLE classes ADD COLUMN tolerance REAL"
+            )
 
         # Legacy snake_case class names → new canonical IDs. Rewrite both the
         # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
@@ -372,6 +383,18 @@ class Store:
                 (library_id, name, library_id, time.time()),
             )
 
+    def update_class_tolerance(
+        self, library_id: str, name: str, tolerance: float | None
+    ) -> bool:
+        """Set or clear the per-class chamfer tolerance. Returns True when
+        the (library_id, name) row exists."""
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE classes SET tolerance = ? WHERE library_id = ? AND name = ?",
+                (tolerance, library_id, name),
+            )
+            return cur.rowcount > 0
+
     def insert_template(self, library_id: str, t: Template) -> None:
         with self.lock, self.conn:
             self.conn.execute(
@@ -402,14 +425,19 @@ class Store:
             )
             return cur.rowcount > 0
 
-    def load_library(self, library_id: str) -> tuple[list[str], dict[str, list[Template]]]:
+    def load_library(
+        self, library_id: str
+    ) -> tuple[list[str], dict[str, float | None], dict[str, list[Template]]]:
         with self.lock:
             class_rows = self.conn.execute(
-                "SELECT name FROM classes WHERE library_id = ? "
+                "SELECT name, tolerance FROM classes WHERE library_id = ? "
                 "ORDER BY rank ASC, created_at ASC",
                 (library_id,),
             ).fetchall()
             classes = [r["name"] for r in class_rows]
+            tolerances: dict[str, float | None] = {
+                r["name"]: r["tolerance"] for r in class_rows
+            }
             templates: dict[str, list[Template]] = {c: [] for c in classes}
 
             tmpl_rows = self.conn.execute(
@@ -439,7 +467,7 @@ class Store:
                     entity_kinds=entity_kinds,
                 )
                 templates.setdefault(r["class_name"], []).append(t)
-            return classes, templates
+            return classes, tolerances, templates
 
 
 class Library:
@@ -453,8 +481,9 @@ class Library:
     ) -> None:
         self.library_id = library_id
         self.store = store
-        classes, templates = store.load_library(library_id)
+        classes, tolerances, templates = store.load_library(library_id)
         self._classes: list[str] = classes
+        self._tolerances: dict[str, float | None] = tolerances
         self._templates: dict[str, list[Template]] = templates
         for c in defaults:
             if c not in self._templates:
@@ -469,7 +498,22 @@ class Library:
             return
         self._classes.append(name)
         self._templates[name] = []
+        self._tolerances[name] = None
         self.store.upsert_class(self.library_id, name)
+
+    def tolerance_of(self, name: str) -> float | None:
+        """Per-class chamfer override (drawing units) or `None` to use
+        the global `app.matching.TOLERANCE_ABS` default."""
+        return self._tolerances.get(name)
+
+    def set_tolerance(self, name: str, value: float | None) -> bool:
+        """Persist `value` as the class's chamfer override. Returns False
+        when the class doesn't exist in this library."""
+        if name not in self._templates:
+            return False
+        self._tolerances[name] = value
+        self.store.update_class_tolerance(self.library_id, name, value)
+        return True
 
     def add_template(self, template: Template) -> None:
         if template.class_name not in self._templates:
@@ -484,7 +528,10 @@ class Library:
         return len(self._templates.get(class_name, []))
 
     def summary(self) -> list[dict]:
-        return [{"name": c, "count": self.count(c)} for c in self._classes]
+        return [
+            {"name": c, "count": self.count(c), "tolerance": self._tolerances.get(c)}
+            for c in self._classes
+        ]
 
     def find_template(self, template_id: str) -> Template | None:
         for templates in self._templates.values():

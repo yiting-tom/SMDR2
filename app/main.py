@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import shutil
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -50,6 +51,7 @@ from app.library import (
     collect_entity_points,
 )
 from app.matching import (
+    TOLERANCE_ABS,
     EntityShape,
     build_entity_shapes,
     find_matches,
@@ -647,6 +649,40 @@ async def classes_by_library(library_id: str) -> dict:
     return {"library_id": library_id, "classes": LIBRARIES.get(library_id).summary()}
 
 
+# Upper bound on the per-class tolerance the API will accept. Any realistic
+# class scale (BGA ball ~0.3 mm to substrate ~30 mm) sits well under this;
+# the cap exists to catch fat-fingered "5000" inputs rather than to limit
+# legitimate use.
+TOLERANCE_MAX = 100.0
+
+
+class ClassToleranceRequest(BaseModel):
+    tolerance: float | None
+
+
+@app.put("/api/libraries/{library_id}/classes/{class_name}/tolerance")
+async def set_class_tolerance(
+    library_id: str, class_name: str, req: ClassToleranceRequest,
+) -> dict:
+    if not LIBRARIES.exists(library_id):
+        raise HTTPException(status_code=404, detail="library not found")
+    if req.tolerance is not None:
+        v = req.tolerance
+        if not math.isfinite(v) or v <= 0 or v > TOLERANCE_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"tolerance must be > 0 and ≤ {TOLERANCE_MAX}, or null",
+            )
+    lib = LIBRARIES.get(library_id)
+    if not lib.set_tolerance(class_name, req.tolerance):
+        raise HTTPException(status_code=404, detail="class not found")
+    return {
+        "library_id": library_id,
+        "class_name": class_name,
+        "tolerance": req.tolerance,
+    }
+
+
 @app.get("/api/classes")
 async def classes_default(file_id: str | None = None,
                           library_id: str | None = None) -> dict:
@@ -729,18 +765,27 @@ async def primitives(file_id: str) -> dict:
 
 class MatchRequest(BaseModel):
     handles: list[str]
+    # Optional class-tolerance hint for add-mode preview: when the user is
+    # in "+ <class>" mode the viewer sends the active class so the live
+    # scan uses the same tolerance scan-all will use after commit.
+    class_name: str | None = None
 
 
 @app.post("/api/files/{file_id}/match")
 async def match(file_id: str, req: MatchRequest) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
-    _resolve_file(file_id)
+    rec = _resolve_file(file_id)
     _, shapes = _shapes_for(file_id)
     missing = [h for h in req.handles if h not in shapes]
     if missing:
         raise HTTPException(status_code=400, detail=f"unknown handles: {missing[:5]}")
-    out = find_matches(req.handles, shapes)
+    tol = TOLERANCE_ABS
+    if req.class_name:
+        cls_tol = LIBRARIES.get(rec.library_id).tolerance_of(req.class_name)
+        if cls_tol is not None:
+            tol = cls_tol
+    out = find_matches(req.handles, shapes, tolerance=tol)
     return {
         "matches": [{"handles": r.handles, "score": r.score, "scale": r.scale} for r in out.matches],
         "near_misses": [
@@ -793,10 +838,13 @@ async def scan_all(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     by_class: dict[str, list[str]] = {}
     for cls_name in lib.classes:
+        cls_tol = lib.tolerance_of(cls_name)
+        eff_tol = cls_tol if cls_tol is not None else TOLERANCE_ABS
         seen: set[str] = set()
         for tmpl in lib.templates_of(cls_name):
             out = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
+                tolerance=eff_tol,
                 entity_kinds=tmpl.entity_kinds,
             )
             for m in out.matches:
@@ -835,9 +883,12 @@ async def save_match_json(file_id: str) -> dict:
     total_matches = 0
     side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0, "unassigned": 0}
     for cls_name in lib.classes:
+        cls_tol = lib.tolerance_of(cls_name)
+        eff_tol = cls_tol if cls_tol is not None else TOLERANCE_ABS
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
+                tolerance=eff_tol,
                 entity_kinds=tmpl.entity_kinds,
             )
             # Display name (Substrate, BGABall, …) stays canonical in the UI;

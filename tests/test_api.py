@@ -356,3 +356,94 @@ def test_delete_file_404_when_not_in_product():
         pid = _new_product(client, "delete-404")
         r = client.delete(f"/api/products/{pid}/files/no-such-file")
         assert r.status_code == 404
+
+
+# ---- per-class tolerance API --------------------------------------------
+def _fresh_library(client, name: str) -> str:
+    """Create a new library so tolerance edits don't leak into the shared
+    default library used across the test session."""
+    r = client.post("/api/libraries", json={"name": name})
+    assert r.status_code == 200
+    return r.json()["id"]
+
+
+def test_class_listing_includes_tolerance_field():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "tol-listing")
+        r = client.get(f"/api/libraries/{lib_id}/classes")
+        assert r.status_code == 200
+        classes = r.json()["classes"]
+        assert classes, "library should be seeded with default classes"
+        for c in classes:
+            assert "tolerance" in c
+            assert c["tolerance"] is None  # NULL on fresh seed
+
+
+def test_set_tolerance_round_trips_via_listing():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "tol-roundtrip")
+        r = client.put(
+            f"/api/libraries/{lib_id}/classes/Substrate/tolerance",
+            json={"tolerance": 0.5},
+        )
+        assert r.status_code == 200
+        assert r.json()["tolerance"] == 0.5
+        # Listing reflects the set value
+        classes = client.get(f"/api/libraries/{lib_id}/classes").json()["classes"]
+        sub = next(c for c in classes if c["name"] == "Substrate")
+        assert sub["tolerance"] == 0.5
+        # Clear → NULL
+        r2 = client.put(
+            f"/api/libraries/{lib_id}/classes/Substrate/tolerance",
+            json={"tolerance": None},
+        )
+        assert r2.status_code == 200
+        sub2 = next(
+            c for c in client.get(f"/api/libraries/{lib_id}/classes").json()["classes"]
+            if c["name"] == "Substrate"
+        )
+        assert sub2["tolerance"] is None
+
+
+def test_set_tolerance_rejects_invalid_values():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "tol-invalid")
+        url = f"/api/libraries/{lib_id}/classes/Substrate/tolerance"
+        # Negative, zero, over-cap all rejected at the application layer.
+        # (inf / nan can't be expressed in valid JSON so the transport
+        # already rejects them; `math.isfinite` in the handler is
+        # defense-in-depth and not testable here.)
+        for bad in (-0.1, 0, 200.0):
+            r = client.put(url, json={"tolerance": bad})
+            assert r.status_code == 400, f"tolerance={bad!r} should 400, got {r.status_code}"
+        r = client.put(url, json={"tolerance": "loose"})
+        assert r.status_code == 422  # Pydantic type coercion failure
+
+
+def test_set_tolerance_unknown_library_404s():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.put(
+            "/api/libraries/no-such-lib/classes/Substrate/tolerance",
+            json={"tolerance": 0.5},
+        )
+        assert r.status_code == 404
+
+
+def test_set_tolerance_unknown_class_404s():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        lib_id = _fresh_library(client, "tol-no-class")
+        r = client.put(
+            f"/api/libraries/{lib_id}/classes/DoesNotExist/tolerance",
+            json={"tolerance": 0.5},
+        )
+        assert r.status_code == 404
