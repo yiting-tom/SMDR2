@@ -73,41 +73,51 @@ def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
         assert abs(r - 0.5) / 0.5 < 0.01
 
 
-def test_hatch_bounded_by_circle_emits_filled_circle(tmp_path):
-    """A HATCH whose only boundary is a circular edge must collapse to a
-    single `{type:"circle", filled:true}` primitive — not a many-vertex
-    filled_polygon. This is what lets the canvas dot-batch fast-render path
-    apply to filled balls / pads instead of stroking N tiny line segments
-    per circle."""
+def test_hatch_emits_no_primitives(tmp_path):
+    """HATCH entities are stripped from modelspace before flatten, so every
+    HATCH variant — circle-bounded, polyline-bounded, multi-sub-path with
+    holes — emits zero primitives. Non-HATCH siblings flatten normally."""
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
     msp = doc.modelspace()
-    hatch = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
-    edge_path = hatch.paths.add_edge_path()
-    edge_path.add_arc(center=(2.0, -1.0), radius=0.3, start_angle=0, end_angle=360, ccw=True)
 
-    dxf_path = tmp_path / "filled_circle.dxf"
+    # (a) HATCH bounded by a circular edge
+    h_circle = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    h_circle.paths.add_edge_path().add_arc(
+        center=(2.0, -1.0), radius=0.3, start_angle=0, end_angle=360, ccw=True
+    )
+
+    # (b) HATCH bounded by a 24-vertex closed LWPOLYLINE on a circle
+    h_poly = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    poly_pts = _circular_polyline_pts(n=24, cx=5.0, cy=0.0, r=0.30)
+    h_poly.paths.add_polyline_path(poly_pts, is_closed=True)
+
+    # (c) HATCH with two sub-paths (annulus: outer circle + inner hole)
+    h_annulus = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    h_annulus.paths.add_edge_path().add_arc(
+        center=(10.0, 0.0), radius=0.50, start_angle=0, end_angle=360, ccw=True
+    )
+    h_annulus.paths.add_edge_path().add_arc(
+        center=(10.0, 0.0), radius=0.25, start_angle=0, end_angle=360, ccw=False
+    )
+
+    # A non-HATCH sibling that must still flatten
+    line = msp.add_line((0, 0), (10, 0))
+
+    dxf_path = tmp_path / "hatches.dxf"
     doc.saveas(str(dxf_path))
 
     out = flatten_for_render(str(dxf_path))
-    prims_for_handle = [p for p in out.primitives if p.get("handle") == hatch.dxf.handle]
-    assert prims_for_handle, "expected at least one primitive for the HATCH"
-    # Exactly one circle primitive, no fallback filled_polygon for the same
-    # handle. `filled:true` is what tells the canvas case "circle" to fill
-    # rather than stroke.
-    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
-    filled_polys = [p for p in prims_for_handle if p["type"] == "filled_polygon"]
-    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
-    assert not filled_polys, "filled circle must not fall back to filled_polygon"
-    cp = circle_prims[0]
-    assert cp.get("filled") is True
-    cx, cy = cp["center"]
-    assert abs(cx - 2.0) < 1e-3 and abs(cy - (-1.0)) < 1e-3
-    assert abs(cp["r"] - 0.3) / 0.3 < 0.01  # within 1 %
-    # HATCH is decorative; the collapsed circle must inherit that flag so
-    # the matcher continues to ignore it.
-    assert cp.get("decorative") is True
+    handles_emitted = {p.get("handle") for p in out.primitives}
+
+    for h in (h_circle, h_poly, h_annulus):
+        assert h.dxf.handle not in handles_emitted, (
+            f"HATCH handle {h.dxf.handle} ({h.dxftype()}) leaked into primitives"
+        )
+    assert line.dxf.handle in handles_emitted, (
+        "non-HATCH sibling must still flatten"
+    )
 
 
 def _circular_polyline_pts(n: int, cx: float, cy: float, r: float) -> list[tuple[float, float]]:
@@ -191,40 +201,6 @@ def test_pure_line_polyline_circle_below_threshold_stays_polyline(tmp_path):
     assert "polyline" in types
 
 
-def test_hatch_bounded_by_polyline_circle_emits_filled_circle(tmp_path):
-    """A HATCH whose only boundary is a 24-vertex closed LWPOLYLINE on a
-    circle (no curve edges) SHALL collapse to a single `{type:"circle",
-    filled:true}` primitive — the same fast path that already covers
-    HATCH bounded by a CIRCLE / 360° ARC."""
-    import ezdxf
-
-    doc = ezdxf.new("R2010", setup=True)
-    msp = doc.modelspace()
-    hatch = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
-    pts = _circular_polyline_pts(n=24, cx=2.0, cy=-1.0, r=0.30)
-    poly_path = hatch.paths.add_polyline_path(pts, is_closed=True)
-    assert poly_path is not None
-
-    dxf_path = tmp_path / "filled_polyline_circle.dxf"
-    doc.saveas(str(dxf_path))
-
-    out = flatten_for_render(str(dxf_path))
-    prims_for_handle = [p for p in out.primitives if p.get("handle") == hatch.dxf.handle]
-    assert prims_for_handle, "expected at least one primitive for the HATCH"
-    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
-    filled_polys = [p for p in prims_for_handle if p["type"] == "filled_polygon"]
-    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
-    assert not filled_polys, "polyline-bounded filled circle must not fall back to filled_polygon"
-    cp = circle_prims[0]
-    assert cp.get("filled") is True
-    cx, cy = cp["center"]
-    assert abs(cx - 2.0) < 1e-3 and abs(cy - (-1.0)) < 1e-3
-    assert abs(cp["r"] - 0.30) / 0.30 < 0.01
-    # HATCH is decorative; inheritance must survive the polyline → circle
-    # promotion just as it does for the CIRCLE-bounded case.
-    assert cp.get("decorative") is True
-
-
 def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     """An 8-vertex closed POLYLINE that is NOT a circular approximation must
     remain a polyline — guards against the circle detector eating real
@@ -293,9 +269,11 @@ def test_collect_entity_points_matches_shape_points(test_dxf_path):
 
 
 def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
-    """TEXT / MTEXT / DIMENSION / HATCH must render but not participate in
-    selection or matching. JSONBackend tags them with `decorative: True` and
-    build_handle_index drops them."""
+    """TEXT / MTEXT / DIMENSION must render but not participate in selection
+    or matching. JSONBackend tags them with `decorative: True` and
+    build_handle_index drops them. (HATCH is stripped pre-flatten — see
+    test_hatch_emits_no_primitives — so it never gets a decorative-tagged
+    primitive in the first place.)"""
     import ezdxf
     from ezdxf.math import Vec3
 
@@ -307,9 +285,6 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     # Decorative entities:
     txt = msp.add_text("hello", dxfattribs={"insert": (5, 5), "height": 1})
     mtxt = msp.add_mtext("hello mtext", dxfattribs={"insert": (5, 10), "char_height": 1})
-    # Hatch needs at least one boundary path:
-    hatch = msp.add_hatch(dxfattribs={"layer": "FILL"})
-    hatch.paths.add_polyline_path([(0, 0), (1, 0), (1, 1), (0, 1)], is_closed=True)
     # Dimension:
     dim = msp.add_linear_dim(base=(0, 8), p1=(0, 5), p2=(10, 5))
     dim.render()  # produces the dimension's geometry block
@@ -329,7 +304,7 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     assert all(not p.get("decorative") for p in line_prims)
 
     # Each decorative entity's primitives MUST carry the flag.
-    for ent in (txt, mtxt, hatch):
+    for ent in (txt, mtxt):
         prims = by_handle.get(ent.dxf.handle, [])
         # Some entities (e.g. very thin text in some fonts) might collapse to
         # nothing renderable — only assert flagging when there is geometry.
@@ -340,7 +315,7 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     # Build the matching handle index — decoratives must drop out.
     idx = build_handle_index(out.primitives)
     assert line.dxf.handle in idx
-    for ent in (txt, mtxt, hatch):
+    for ent in (txt, mtxt):
         assert ent.dxf.handle not in idx
 
 

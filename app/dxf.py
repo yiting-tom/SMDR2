@@ -61,8 +61,10 @@ CIRCLE_RADIAL_TOL = 0.02
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
-# flag at flatten time; everything downstream filters on that.
-DECORATIVE_DXFTYPES = frozenset({"TEXT", "MTEXT", "DIMENSION", "HATCH"})
+# flag at flatten time; everything downstream filters on that. HATCH is
+# stripped before flatten (see `flatten_for_render`), so it never reaches
+# this filter.
+DECORATIVE_DXFTYPES = frozenset({"TEXT", "MTEXT", "DIMENSION"})
 
 
 @dataclass
@@ -330,6 +332,13 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
     """Parse a DXF file and return drawing primitives + bbox."""
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
+    # HATCH is pure decorative noise in packaging DXFs (solder-mask fills,
+    # copper pours) and its boundary edges otherwise reach the backend as
+    # polylines that don't promote to circle primitives — costing render
+    # budget and producing jagged N-gon outlines at zoom-in. Strip before
+    # `Frontend.draw_layout` so no HATCH-sourced primitive is ever emitted.
+    for hatch in list(msp.query("HATCH")):
+        msp.delete_entity(hatch)
     diagonal = _modelspace_diagonal(doc)
     tol = choose_flatten_tolerance(diagonal) if diagonal is not None else BASE_TOLERANCE
     if tol != BASE_TOLERANCE:
