@@ -341,3 +341,78 @@ def test_build_bundle_refuses_mixed_ring_and_lid(seeded_product):
     files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
     with pytest.raises(ValueError, match="RING and LID"):
         build_bundle(product, files_list)
+
+
+# ---- 3.7 customer fields ------------------------------------------------
+def test_manifest_carries_customer_for_named_library(seeded_product):
+    """A product bound to the default library (`id="default"`,
+    `name="Default"`) emits `customer_id="default"` and
+    `customer="Default"`."""
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("BD")
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    manifest = build_manifest(product, files_list)
+
+    assert manifest["customer_id"] == "default"
+    assert manifest["customer"] == "Default"
+
+
+def test_manifest_omits_customer_when_library_name_blank(seeded_product, monkeypatch):
+    """If the resolved library row has an empty `name`, the manifest
+    SHALL omit the `customer` key while keeping `customer_id` populated.
+    Consumers needing a display name MUST tolerate the omission."""
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+    from app.library import LIBRARIES
+
+    product, seed = seeded_product
+    seed("BD")
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+
+    # Force the registry to report an empty name without mutating the
+    # real default library row (other tests share this store).
+    real_get_library = LIBRARIES.store.get_library
+
+    def fake_get_library(library_id):
+        row = real_get_library(library_id)
+        if row is None or library_id != product.library_id:
+            return row
+        return {"id": row["id"], "name": "", "created_at": row["created_at"]}
+
+    monkeypatch.setattr(LIBRARIES.store, "get_library", fake_get_library)
+
+    manifest = build_manifest(product, files_list)
+    assert manifest["customer_id"] == product.library_id
+    assert "customer" not in manifest
+
+
+def test_manifest_raises_when_library_missing(seeded_product):
+    """If the product references a `library_id` that no longer resolves,
+    `build_manifest` MUST raise `ValueError` naming the unresolved id —
+    silently emitting a customer-less manifest would corrupt the
+    external team's contract."""
+    from dataclasses import replace
+
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("BD")
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+
+    bogus_product = replace(product, library_id="does-not-exist-zzz")
+
+    with pytest.raises(ValueError, match="does-not-exist-zzz"):
+        build_manifest(bogus_product, files_list)
+
+
+def test_bundle_version_bumped_to_1_2_0():
+    """The `customer` / `customer_id` addition is paired with a minor
+    bundle_version bump so consumers can detect old bundles."""
+    from app.drc_bundle import BUNDLE_VERSION
+
+    assert BUNDLE_VERSION == "1.2.0"

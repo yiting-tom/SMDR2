@@ -4,14 +4,14 @@
   "title": "SMDR2 DRC Handoff Manifest",
   "description": "Top-level manifest accompanying every DRC handoff bundle. The bundle is a directory (or zip) containing this file at its root plus the DXF + Match JSON files referenced by every entry in `files`. The downstream rule-checking team consumes this manifest to group files by role and run their own DRC.",
   "type": "object",
-  "required": ["bundle_version", "product_id", "files"],
+  "required": ["bundle_version", "product_id", "customer_id", "files"],
   "additionalProperties": false,
   "properties": {
     "bundle_version": {
       "description": "Semantic version of the manifest contract. Consumers MUST refuse manifests whose major version they do not understand.",
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["1.1.0"]
+      "examples": ["1.2.0"]
     },
     "product_id": {
       "description": "SMDR2 internal product identifier. Opaque to the consumer; useful for cross-referencing reports.",
@@ -20,6 +20,15 @@
     },
     "product_name": {
       "description": "Optional human-readable product name. Purely informational.",
+      "type": "string"
+    },
+    "customer_id": {
+      "description": "SMDR2 internal library identifier the product is bound to. Opaque to the consumer; stable across library renames. Mirrors `product_id`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "customer": {
+      "description": "Optional human-readable customer / library name. Omitted when the underlying library has no name. Consumers needing a stable display name SHOULD key by `customer_id` and join against their own customer table.",
       "type": "string"
     },
     "exported_at": {

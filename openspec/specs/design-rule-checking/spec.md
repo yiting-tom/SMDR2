@@ -109,9 +109,11 @@ the contract at that boundary.)
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `bundle_version` | semver string | yes | Manifest contract version. Consumers MUST refuse a major version they do not understand. Current value: `"1.1.0"` (minor bumped from `1.0.0` when the `role` enum widened to include `"LID"`). |
+| `bundle_version` | semver string | yes | Manifest contract version. Consumers MUST refuse a major version they do not understand. Current value: `"1.2.0"` (minor bumped from `1.1.0` when `customer` / `customer_id` were added). |
 | `product_id` | string | yes | SMDR2 internal product id, opaque to the consumer. |
 | `product_name` | string | no | Human-readable name for cross-referencing reports. |
+| `customer_id` | string | yes | SMDR2 internal `library_id` the product is bound to. Opaque to the consumer; stable across library renames. Mirrors how `product_id` is treated. |
+| `customer` | string | no | Human-readable customer / library name. Omitted when the underlying library has no name; consumers that need a stable display name SHOULD key by `customer_id` and join against their own customer table. |
 | `exported_at` | ISO 8601 string | no | Bundle generation time, second precision or finer. |
 | `files` | array of `file_entry` | yes | Every (DXF, Match JSON) pair in the bundle. |
 
@@ -135,6 +137,14 @@ space without needing to know the prefix scheme.
 Within-file view scoping (top/bottom/side) SHALL remain encoded in
 the Match JSON key prefix; no separate side-region rect data is
 required in the bundle.
+
+The bundle builder SHALL resolve `customer_id` directly from the
+product's `library_id` and SHALL look up the human-readable
+`customer` name via the library registry at export time. If the
+referenced library cannot be resolved (e.g., it was deleted
+out-of-band between product creation and bundle export), the
+builder SHALL raise a `ValueError` naming the offending library id
+rather than emit a manifest with a missing or guessed customer.
 
 #### Scenario: Single-DXF-per-role product (RING configuration)
 - **WHEN** a product has exactly one DXF under each of `SBT`, `BD`, `POD`, `RING`
@@ -168,6 +178,24 @@ required in the bundle.
 #### Scenario: Major version mismatch is refused
 - **WHEN** a consumer reads a manifest whose `bundle_version` major component does not match a major version it implements
 - **THEN** the consumer SHALL refuse to process the bundle and SHALL surface a version-mismatch error to its operator
+
+#### Scenario: Manifest carries customer_id and customer for a named library
+- **WHEN** a product is bound to a library `lib-1` named `"ACME Corp"`
+- **AND** the bundle is exported
+- **THEN** `manifest.customer_id` equals `"lib-1"`
+- **AND** `manifest.customer` equals `"ACME Corp"`
+
+#### Scenario: customer is omitted when the library has no name
+- **WHEN** a product is bound to a library whose `name` is an empty string or unset
+- **AND** the bundle is exported
+- **THEN** `manifest.customer_id` is present
+- **AND** the `customer` key SHALL either be omitted entirely or set to an empty string — consumers that care about display names MUST tolerate both forms
+
+#### Scenario: Missing library raises at export time
+- **WHEN** a product references a `library_id` that no longer resolves through the library registry
+- **AND** the export endpoint is invoked
+- **THEN** the bundle builder SHALL raise (no manifest is written)
+- **AND** the raised error SHALL name the unresolved `library_id`
 
 ### Requirement: Rule panel hover and pinned highlight
 

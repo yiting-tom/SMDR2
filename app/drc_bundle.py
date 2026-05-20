@@ -10,6 +10,13 @@ JSONs are shipped **per-file** with raw, unprefixed handles — the
 for the internal mock checker stays internal and never leaves the
 process boundary.
 
+The manifest also surfaces the **customer** dimension at the top
+level via ``customer_id`` (the SMDR2 ``library_id`` the product is
+bound to) and the optional ``customer`` name. ``build_manifest``
+resolves the name from the ``LIBRARIES`` registry at export time;
+if the library is missing the builder raises ``ValueError`` rather
+than emitting a manifest with a silently-dropped customer.
+
 Layout inside the zip:
 
     manifest.json
@@ -28,11 +35,12 @@ import zipfile
 from datetime import datetime, timezone
 
 from app.files import FileRecord
+from app.library import LIBRARIES
 from app.products import Product
 from app.storage import match_path, upload_path
 
 
-BUNDLE_VERSION = "1.1.0"
+BUNDLE_VERSION = "1.2.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -82,14 +90,27 @@ def build_manifest(
             f"product {product.id!r} has both RING and LID files; "
             "these are mutually exclusive — refusing to build manifest"
         )
+    # Customer = the library the product is bound to. Resolve via the
+    # registry's store rather than the cached Library object so we
+    # don't pay for the templates load on the export path.
+    library_row = LIBRARIES.store.get_library(product.library_id)
+    if library_row is None:
+        raise ValueError(
+            f"library {product.library_id!r} not found for product "
+            f"{product.id!r}; refusing to build manifest with missing customer"
+        )
     manifest: dict = {
         "bundle_version": BUNDLE_VERSION,
         "product_id": product.id,
+        "customer_id": product.library_id,
         "exported_at": _format_exported_at(now),
         "files": [_file_entry(f) for f in files],
     }
     if product.name:
         manifest["product_name"] = product.name
+    customer_name = library_row["name"] or ""
+    if customer_name:
+        manifest["customer"] = customer_name
     return manifest
 
 
