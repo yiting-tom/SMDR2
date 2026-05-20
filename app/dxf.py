@@ -451,6 +451,10 @@ def _detect_circle_subpath(
     rmean = float(r.mean())
     if rmean < 1e-9:
         return None
+    extent_x = float(arr[:, 0].max() - arr[:, 0].min())
+    extent_y = float(arr[:, 1].max() - arr[:, 1].min())
+    max_extent = max(extent_x, extent_y)
+    min_extent = min(extent_x, extent_y)
     # Safety bound on the LS-fit radius. A genuine closed circular sub-
     # path's mean radius is ≈ half its bbox extent, so `rmean` should
     # never exceed the larger bbox dimension. When it does, the LS solve
@@ -458,10 +462,17 @@ def _detect_circle_subpath(
     # output the user reported). Bail out so the sub-path stays a
     # polyline / filled_polygon and isn't promoted to a wildly oversized
     # `circle` primitive.
-    extent_x = float(arr[:, 0].max() - arr[:, 0].min())
-    extent_y = float(arr[:, 1].max() - arr[:, 1].min())
-    max_extent = max(extent_x, extent_y)
     if rmean > max_extent:
+        return None
+    # Bbox-aspect gate: a true closed circle's bbox is square. A
+    # rectangular outline (lid, package frame) with N ≥ 11 vertices
+    # whose verts happen to be roughly equidistant from the centroid
+    # passes the radial-variance test (all corners + symmetric edge
+    # midpoints share a common distance) but its bbox is far from
+    # square. Catching the aspect mismatch here prevents lid-shaped
+    # rectangles from being promoted to inscribed circles. 10 % slack
+    # absorbs the discretisation of a finite-N inscribed polygon.
+    if max_extent > 0 and min_extent / max_extent < 0.9:
         return None
     if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
         return None

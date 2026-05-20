@@ -303,6 +303,37 @@ def test_oversized_radius_is_rejected():
     assert _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE) is None
 
 
+def test_rectangular_lid_not_promoted_to_circle():
+    """Regression: a lid-style rectangle drawn with enough vertices that
+    they're all roughly equidistant from the centroid (4 corners + 8
+    symmetric edge midpoints = 12 verts, each at a distance derived
+    from the rectangle's geometry) passes the vertex-count gate AND
+    the radial-variance test (all 4 corners share one distance, all 8
+    midpoints share another, and if the rectangle's aspect ratio lines
+    those distances up they pool to a tight variance) — but the shape
+    is obviously not a circle. The bbox-aspect gate catches it: a
+    rectangle's bbox is not square."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # 30 mm × 20 mm rectangle, 4 corners + 8 edge midpoints + repeat
+    # first as last (closed-polyline sentinel).
+    pts = [
+        [0.0, 0.0], [7.5, 0.0], [15.0, 0.0], [22.5, 0.0],
+        [30.0, 0.0],
+        [30.0, 5.0], [30.0, 10.0], [30.0, 15.0],
+        [30.0, 20.0],
+        [22.5, 20.0], [15.0, 20.0], [7.5, 20.0],
+        [0.0, 20.0],
+        [0.0, 15.0], [0.0, 10.0], [0.0, 5.0],
+        [0.0, 0.0],
+    ]
+    assert len(pts) - 1 >= CIRCLE_MIN_VERTS_NOCURVE
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is None, (
+        f"30×20 rectangle must not promote to circle (got {result})"
+    )
+
+
 def test_collinear_vertices_fall_back_to_centroid(tmp_path):
     """The LS solve raises `LinAlgError` on collinear vertices. The
     function must not bubble the exception — it falls back to the
