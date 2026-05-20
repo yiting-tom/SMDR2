@@ -61,6 +61,29 @@ tests/                pytest 套件
 | `N_JOBS`（環境變數）| `1` | 65 | Worker process 數，讀 `SMDR2_N_JOBS` | 大圖時設為 CPU 核心數 |
 | `_MIN_ITEMS_PER_WORKER` | `200` | 66 | 低於此 worker pool 太貴改 single-thread | 一般不動 |
 
+#### 不同狀況怎麼調 matching 門檻
+
+實務上「太多誤報」與「該抓到的沒抓到」要動的旋鈕不同。對照下表挑常數，
+動完重啟 server。改一支看一輪結果再決定要不要再動下一支。
+
+| 想達到的效果 | 優先收 / 放的常數 | 建議方向 |
+|---|---|---|
+| **更嚴格篩選整體 bbox / 形狀比例**（在意 entity 群的外觀） | `SIGMA_RATIO_TOL`、`RADIUS_RATIO` | `0.15 → 0.08`、`0.20 → 0.10` |
+| **更嚴格篩選 entity 之間的相對關係**（同 cluster 內 entity 數量與相對位置） | `VERTEX_COUNT_RATIO`、`TOLERANCE_ABS` | `0.25 → 0.10`、`0.05 → 0.02` |
+| **更嚴格篩選整體尺度**（不允許縮放浮動） | `SCALE_MIN/MAX`、`PATH_LENGTH_RATIO` | `0.95/1.05 → 0.98/1.02`、`0.20 → 0.10` |
+| **誤報太多（找到不該找的）** | 先收 `SIGMA_RATIO_TOL` → 再收 `RADIUS_RATIO` → 最後 `TOLERANCE_ABS` | 每次只收一支，往 ~½ 的方向動 |
+| **漏抓太多（該抓到的沒抓到）** | 先放 `TOLERANCE_ABS` → 再放 `VERTEX_COUNT_RATIO` → 最後 `SCALE_MIN/MAX` | 反向操作，每次放寬 ~50% |
+| **圖紙來源縮放/噪訊不穩** | `SCALE_MIN/MAX`、`TOLERANCE_ABS`、`PATH_LENGTH_RATIO` 一起放寬 | 縮放窗放寬時 path length 必須同步放寬 |
+| **樣板很細長 / 點數很多** | `RESAMPLE_N` ↑（如 `64 → 128`） | 重採樣不夠細會丟掉局部特徵 |
+| **樣板很碎 / 點數很少** | `RESAMPLE_N` ↓（如 `64 → 32`） | 過度重採樣會放大噪訊 |
+
+**調整原則**
+
+1. `SIGMA_RATIO_TOL` 與 `RADIUS_RATIO` 是 rotation-invariant pre-filter gate，最先砍候選 — 想嚴格從這兩支動，CP 值最高。
+2. `TOLERANCE_ABS` 是最後 chamfer 階段；收太緊會把有噪訊的真 match 誤殺，務必和 `BASE_TOLERANCE`（`dxf.py`，flatten 弦差）一起想 — flatten 噪訊不會比 `BASE_TOLERANCE` 還小。
+3. `SCALE_MIN/MAX` 放寬時 `PATH_LENGTH_RATIO` 與 `RADIUS_RATIO` 要一起放，否則尺度窗開了但長度 gate 又把候選擋掉。
+4. 一次只動一支常數、跑一輪 match 看 false-positive / false-negative，再決定下一步 — 同時動多支會無法歸因。
+
 ### 2) DXF 解析 / flatten — `app/dxf.py`
 
 | 常數 | 預設 | 行 | 作用 |
