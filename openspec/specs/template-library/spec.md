@@ -22,7 +22,7 @@ deletable.
 
 ### Requirement: Default class seeding
 
-Every newly-created library SHALL be seeded with the following 14
+Every newly-created library SHALL be seeded with the following 15
 canonical IC-packaging classes, in this order, and the order SHALL
 be the toolbar / class-list order surfaced in the UI:
 
@@ -36,10 +36,11 @@ be the toolbar / class-list order surfaced in the UI:
 8. `FiducialCross`
 9. `SMD-2T`
 10. `BGABall`
-11. `2DBarcode`
-12. `SMD-3T`
-13. `SMD-8T`
-14. `SMD-14T`
+11. `Protrusion`
+12. `2DBarcode`
+13. `SMD-3T`
+14. `SMD-8T`
+15. `SMD-14T`
 
 The trailing three SMD variants (`SMD-3T`, `SMD-8T`, `SMD-14T`)
 SHALL be members of the viewer's collapsed-toolbar fold group so
@@ -50,9 +51,9 @@ deprecated and SHALL NOT be seeded into any new or existing
 library: `FiducialMark` (superseded by the `FiducialCircle` /
 `FiducialCross` split) and `Side` (unused in practice).
 
-#### Scenario: New library has the 14 default classes in canonical order
+#### Scenario: New library has the 15 default classes in canonical order
 - **WHEN** the user creates a new library via `POST /api/libraries`
-- **THEN** `GET /api/libraries/{id}/classes` returns the 14 names listed above
+- **THEN** `GET /api/libraries/{id}/classes` returns the 15 names listed above
 - **AND** the names appear in the listed order (Substrate first, SMD-14T last)
 
 #### Scenario: Deprecated classes are not seeded

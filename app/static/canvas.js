@@ -424,6 +424,7 @@ const CLASS_COLORS = {
   "LidInner":     "#f06292",  // pink
   "Lid":          "#9575cd",  // muted purple
   "BGABall":      "#ffab40",  // orange
+  "Protrusion":   "#80d8ff",  // light blue — distinct from SMD reds / BGA orange
   "Pin-1":        "#f48fb1",  // soft pink
   "FiducialCircle": "#4dd0e1",  // teal
   "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
