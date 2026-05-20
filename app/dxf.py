@@ -406,9 +406,26 @@ def _detect_circle_subpath(
     if n < min_verts:
         return None
     arr = np.asarray(points[:n], dtype=np.float64)
-    xs, ys = arr[:, 0], arr[:, 1]
-    # Kåsa: solve [Σx² Σxy Σx; Σxy Σy² Σy; Σx Σy n] · [D, E, F]ᵀ = -[Σx(x²+y²); Σy(x²+y²); Σ(x²+y²)]
-    # Then (cx, cy) = (-D/2, -E/2). Closed-form 3×3 solve.
+    # Translate to the vertex centroid before the LS solve. This is
+    # numerically essential for packaging DXFs where balls / pads sit at
+    # world coordinates ~10⁵ mm: without it, the Kåsa normal-equation
+    # matrix is dominated by Σx² ≈ n·cx0² and the condition number
+    # explodes (~10²¹ on a 100 km × 0.3 mm test case), producing a
+    # garbage centre and a radius ~10× too big. After translation the
+    # matrix's spread is the cloud's own diameter, so conditioning stays
+    # benign. Translation is a similarity invariant for circle fitting:
+    # solving in local coordinates and adding the offset back gives the
+    # same centre.
+    cx0 = float(arr[:, 0].mean())
+    cy0 = float(arr[:, 1].mean())
+    xs = arr[:, 0] - cx0
+    ys = arr[:, 1] - cy0
+    # Kåsa LS in centroid-local frame:
+    #   minimise Σ (D·x + E·y + F + (x² + y²))²
+    # Normal equations: [Σx² Σxy Σx; Σxy Σy² Σy; Σx Σy n] · [D, E, F]ᵀ
+    #                 = -[Σx(x²+y²); Σy(x²+y²); Σ(x²+y²)]
+    # In the local frame Σx = Σy = 0, so the matrix block-diagonalises;
+    # `linalg.solve` still handles it generically.
     x2y2 = xs * xs + ys * ys
     M = np.array([
         [(xs * xs).sum(), (xs * ys).sum(), xs.sum()],
@@ -418,21 +435,33 @@ def _detect_circle_subpath(
     b = -np.array([(xs * x2y2).sum(), (ys * x2y2).sum(), x2y2.sum()])
     try:
         D, E, _F = np.linalg.solve(M, b)
-        cx = -D / 2.0
-        cy = -E / 2.0
+        cx = cx0 - D / 2.0
+        cy = cy0 - E / 2.0
     except np.linalg.LinAlgError:
         # Singular system (collinear vertices, degenerate input). Fall
         # back to the centroid — the radial-variance test downstream
         # will reject these anyway, behaviour is identical to pre-LS.
-        cx = float(xs.mean())
-        cy = float(ys.mean())
-    dx = xs - cx
-    dy = ys - cy
+        cx = cx0
+        cy = cy0
+    dx = arr[:, 0] - cx
+    dy = arr[:, 1] - cy
     r = np.hypot(dx, dy)
     rmin = float(r.min())
     rmax = float(r.max())
     rmean = float(r.mean())
     if rmean < 1e-9:
+        return None
+    # Safety bound on the LS-fit radius. A genuine closed circular sub-
+    # path's mean radius is ≈ half its bbox extent, so `rmean` should
+    # never exceed the larger bbox dimension. When it does, the LS solve
+    # has fit a near-line/arc as a giant circle (the bigger-than-data
+    # output the user reported). Bail out so the sub-path stays a
+    # polyline / filled_polygon and isn't promoted to a wildly oversized
+    # `circle` primitive.
+    extent_x = float(arr[:, 0].max() - arr[:, 0].min())
+    extent_y = float(arr[:, 1].max() - arr[:, 1].min())
+    max_extent = max(extent_x, extent_y)
+    if rmean > max_extent:
         return None
     if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
         return None

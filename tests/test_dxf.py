@@ -260,6 +260,49 @@ def test_unevenly_sampled_circle_uses_ls_center(tmp_path):
     assert abs(cp["r"] - true_r) / true_r < 0.01
 
 
+def test_far_from_origin_circle_centre_is_stable(tmp_path):
+    """Regression: Kåsa LS on raw world coordinates blows up when balls
+    sit at large absolute positions (BGA layouts routinely live at
+    10⁴–10⁵ mm). The detector must centre the points before solving so
+    the matrix conditioning stays benign — otherwise the LS solve
+    returned a radius ~14× too big on a 100 km × 0.3 mm ball."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    true_cx, true_cy, true_r = 100_000.0, 0.0, 0.3
+    pts = _circular_polyline_pts(n=12, cx=true_cx, cy=true_cy, r=true_r)
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is not None
+    cx, cy = result["center"]
+    assert abs(cx - true_cx) < 1e-6 * true_r + 1e-3
+    assert abs(cy - true_cy) < 1e-6 * true_r + 1e-3
+    # Crucially: radius is right, not 10× inflated.
+    assert abs(result["r"] - true_r) / true_r < 0.01
+
+
+def test_oversized_radius_is_rejected():
+    """Defense in depth: if any future numerical pathology produces an
+    LS centre far enough from the cloud that the implied radius dwarfs
+    the cloud's bbox, the detector SHALL reject rather than emit a
+    wildly oversized circle primitive. Construct a near-collinear
+    sub-path that would otherwise fit a giant circle within tolerance."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # 12 points lying on a very flat arc. Any LS-style fit produces a
+    # circle whose centre is far from the points and whose radius dwarfs
+    # the bbox of the points (here the bbox is ~10 × ~0.0006).
+    import math as _math
+    R = 1_000_000.0  # huge circle
+    half_angle = 1e-5  # tiny arc segment
+    pts = []
+    n = 12
+    for i in range(n):
+        theta = _math.pi / 2.0 + half_angle * (2.0 * i / (n - 1) - 1.0)
+        pts.append([R * _math.cos(theta), R * _math.sin(theta) - R + 0.001])
+    # First duplicated as last so the dedup branch matches.
+    pts.append(pts[0])
+    assert _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE) is None
+
+
 def test_collinear_vertices_fall_back_to_centroid(tmp_path):
     """The LS solve raises `LinAlgError` on collinear vertices. The
     function must not bubble the exception — it falls back to the
