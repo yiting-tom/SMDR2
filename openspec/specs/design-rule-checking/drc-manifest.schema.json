@@ -11,7 +11,7 @@
       "description": "Semantic version of the manifest contract. Consumers MUST refuse manifests whose major version they do not understand.",
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["1.0.0"]
+      "examples": ["1.1.0"]
     },
     "product_id": {
       "description": "SMDR2 internal product identifier. Opaque to the consumer; useful for cross-referencing reports.",
@@ -41,9 +41,9 @@
       "additionalProperties": false,
       "properties": {
         "role": {
-          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role).",
+          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). RING and LID are mutually exclusive per product — a single manifest SHALL NOT contain both.",
           "type": "string",
-          "enum": ["SBT", "BD", "POD", "RING"]
+          "enum": ["SBT", "BD", "POD", "RING", "LID"]
         },
         "file_id": {
           "description": "SMDR2 internal file identifier — lowercase hex, derived from the DXF content hash. Stable across re-exports of the same file. The first 8 hex characters are the canonical short form used elsewhere in SMDR2.",

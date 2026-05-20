@@ -32,7 +32,7 @@ from app.products import Product
 from app.storage import match_path, upload_path
 
 
-BUNDLE_VERSION = "1.0.0"
+BUNDLE_VERSION = "1.1.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -72,6 +72,16 @@ def build_manifest(
     Pure: no disk I/O. ``files`` MUST already be filtered to
     role-attached records (``dxf_role is not None``).
     """
+    # RING and LID are mutually exclusive per product; the upload
+    # handler enforces this at write time. Fail loudly here if upstream
+    # data ever drifts so we never ship a bundle that violates the
+    # external rule-checking team's contract.
+    roles = {f.dxf_role for f in files}
+    if "RING" in roles and "LID" in roles:
+        raise ValueError(
+            f"product {product.id!r} has both RING and LID files; "
+            "these are mutually exclusive — refusing to build manifest"
+        )
     manifest: dict = {
         "bundle_version": BUNDLE_VERSION,
         "product_id": product.id,

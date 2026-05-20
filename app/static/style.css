@@ -87,6 +87,20 @@ header #role-switcher .role-btn.empty {
   cursor: not-allowed;
 }
 header #role-switcher .role-btn.empty:hover { border-color: #2a3340; color: #4a5868; }
+/* RING/LID pair: opposite half when the other already holds a file. */
+header #role-switcher .role-btn.empty.disabled,
+header #role-switcher .role-btn.empty.disabled:hover {
+  color: #2c3744;
+  border-color: #1c2630;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* The RING | LID pair shares one conceptual 4th slot — the two
+   buttons sit flush so they read as a single split control. */
+header #role-switcher .role-btn-pair {
+  display: inline-flex;
+  gap: 0.1rem;
+}
 
 header #role-switcher .role-btn-wrap {
   position: relative;
@@ -727,6 +741,15 @@ body.dashboard main.dashboard-main {
   color: #00ffff;
   cursor: pointer;
 }
+/* RING/LID pair: the half opposite an already-uploaded file. Locked
+   to mirror the server-side RING-XOR-LID rule. */
+.product-card .slot.empty.disabled,
+.product-card .slot.empty.disabled:hover {
+  border-color: #1c2630;
+  background: rgba(255, 255, 255, 0.02);
+  color: #3a4a5c;
+  cursor: not-allowed;
+}
 .product-card .slot.dragover {
   background: rgba(0, 255, 255, 0.06);
   border-color: #00ffff;
@@ -787,6 +810,18 @@ body.dashboard main.dashboard-main {
 .product-card .slot button.slot-add {
   align-self: flex-start;
   margin-top: 0.35rem;
+}
+
+/* 4th grid cell holds the RING | LID split pair. The cell itself is
+   just a flex container, so each half retains the full .slot styling
+   above. */
+.product-card .slot-pair {
+  display: flex;
+  gap: 0.4rem;
+}
+.product-card .slot-pair > .slot {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .product-card .product-footer {

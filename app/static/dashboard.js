@@ -4,7 +4,11 @@
 
 import { openLayerModal } from "./layer_modal.js";
 
-const ROLES = ["SBT", "BD", "POD", "RING"];
+// SBT/BD/POD always render as single-role slots. The 4th grid cell is
+// a split pair: RING on the left, LID on the right (mutually exclusive
+// — uploading to one disables the other; see the `viewer-ui` /
+// `product-files` specs for the full rule).
+const SINGLE_ROLES = ["SBT", "BD", "POD"];
 
 const $list = document.getElementById("product-list");
 const $empty = document.getElementById("empty-msg");
@@ -169,7 +173,8 @@ function productCard(p) {
 
   const grid = document.createElement("div");
   grid.className = "slot-grid";
-  for (const role of ROLES) grid.appendChild(slotCell(p, role));
+  for (const role of SINGLE_ROLES) grid.appendChild(slotCell(p, role));
+  grid.appendChild(ringLidPairCell(p));
   card.appendChild(grid);
 
   const footer = document.createElement("div");
@@ -256,7 +261,8 @@ async function downloadAllMatch(product) {
   }
 }
 
-function slotCell(product, role) {
+function slotCell(product, role, opts = {}) {
+  const { disabledReason = null } = opts;
   const cell = document.createElement("div");
   cell.className = "slot";
   cell.dataset.role = role;
@@ -267,6 +273,15 @@ function slotCell(product, role) {
 
   if (!allFiles.length) {
     cell.classList.add("empty");
+    if (disabledReason) {
+      // RING/LID pair: this half is locked because its opposite role
+      // already holds a file. Render a non-interactive placeholder
+      // matching the viewer-ui spec's `slot.empty.disabled`.
+      cell.classList.add("disabled");
+      cell.title = disabledReason;
+      cell.innerHTML += `<span class="file-name">unavailable</span>`;
+      return cell;
+    }
     cell.innerHTML += `<span class="file-name">+ Drop or click</span>`;
     cell.addEventListener("click", () => pickFile(product.id, role));
     wireDragAndDrop(cell, product.id, role);
@@ -291,6 +306,29 @@ function slotCell(product, role) {
   }
   cell.appendChild(filesContainer);
   cell.appendChild(buildAddButton(product, role));
+  return cell;
+}
+
+// The 4th grid cell is one container holding two adjacent `slotCell`
+// halves — RING on the left, LID on the right. When one half holds
+// ≥1 file, the other half renders as `slot.empty.disabled` (no
+// click, no drag/drop, `title` names a conflicting file id) so the
+// RING-XOR-LID server-side rule is mirrored in the UI.
+function ringLidPairCell(product) {
+  const ring = (product.files_by_role_all && product.files_by_role_all["RING"]) || [];
+  const lid  = (product.files_by_role_all && product.files_by_role_all["LID"])  || [];
+  const cell = document.createElement("div");
+  cell.className = "slot-pair";
+
+  const ringDisabled = ring.length === 0 && lid.length > 0
+    ? `LID file ${lid[0].id} already locked this product into a LID configuration. Remove it to upload a RING.`
+    : null;
+  const lidDisabled  = lid.length === 0 && ring.length > 0
+    ? `RING file ${ring[0].id} already locked this product into a RING configuration. Remove it to upload a LID.`
+    : null;
+
+  cell.appendChild(slotCell(product, "RING", { disabledReason: ringDisabled }));
+  cell.appendChild(slotCell(product, "LID",  { disabledReason: lidDisabled }));
   return cell;
 }
 
@@ -544,6 +582,10 @@ function showRuleResults(product, data) {
         // multi-DXF roles route to the DXF whose geometry the sub-rule
         // actually references. Falls back to the primary file for the
         // role when the rule emits no `file_id` (e.g. legacy data).
+        // `sub.part` may be RING or LID; the backend keys
+        // `files_by_role_all` by raw `dxf_role`, so a sub-rule with
+        // `part: "LID"` lights up the LID half of the split 4th cell
+        // without any extra branching here.
         const siblings = product.files_by_role_all?.[sub.part] ?? [];
         const file = (sub.file_id && siblings.find(f => f.id === sub.file_id))
                   || product.files_by_role[sub.part];

@@ -74,7 +74,7 @@ def _check_envelope(result):
         assert isinstance(payload["text"], str)
         assert isinstance(payload["rules"], list)
         for sub in payload["rules"]:
-            assert sub["part"] in {"SBT", "BD", "POD", "RING"}
+            assert sub["part"] in {"SBT", "BD", "POD", "RING", "LID"}
             assert isinstance(sub["from"], list)
             assert isinstance(sub["to"], list)
             assert isinstance(sub["text"], str)

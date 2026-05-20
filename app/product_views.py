@@ -1,7 +1,10 @@
 """Per-(product, role) view resolution.
 
-A product role (SBT / BD / POD / RING) can be sourced from one or more
-DXF files. Each file carries a `dxf_view`:
+A product role (SBT / BD / POD / RING / LID) can be sourced from one
+or more DXF files. RING and LID are mutually exclusive per product
+(enforced at upload in `app.main.upload_product_file`), so this
+module never sees both for the same product. Each file carries a
+`dxf_view`:
 
   - 'multi'           — the file contains per-view region rects; each
                         non-null `<view>_view_rect` claims that view.

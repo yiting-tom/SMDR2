@@ -454,3 +454,84 @@ def test_set_strategy_unknown_library_or_class_404s():
             json={"strategy": "signature"},
         )
         assert r2.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# RING / LID per-product mutual exclusion
+# ---------------------------------------------------------------------------
+
+
+def test_upload_lid_to_product_with_ring_returns_409():
+    """RING and LID are mutually exclusive per product. The second
+    upload to the opposite slot SHALL fail with 409 and the conflicting
+    file id surfaced in the body so the dashboard can explain why."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "ring-then-lid-rejected")
+
+        r1 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("ring.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "RING"},
+        )
+        assert r1.status_code == 200, r1.text
+        ring_id = r1.json()["file_id"]
+
+        r2 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("lid.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "LID"},
+        )
+        assert r2.status_code == 409, r2.text
+        detail = r2.json().get("detail", "")
+        assert ring_id in detail
+        assert "RING" in detail
+
+
+def test_upload_ring_to_product_with_lid_returns_409():
+    """Symmetric to the above: LID first, then RING is rejected."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "lid-then-ring-rejected")
+
+        r1 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("lid.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "LID"},
+        )
+        assert r1.status_code == 200, r1.text
+        lid_id = r1.json()["file_id"]
+
+        r2 = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("ring.dxf", _STUB_DXF + b"b", "application/dxf")},
+            data={"dxf_role": "RING"},
+        )
+        assert r2.status_code == 409, r2.text
+        detail = r2.json().get("detail", "")
+        assert lid_id in detail
+        assert "LID" in detail
+
+
+def test_upload_lid_to_empty_product_succeeds():
+    """A LID upload to a product holding neither RING nor LID should
+    bind cleanly. Confirms LID is a first-class role, not just an
+    enum value."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "lid-on-empty-ok")
+
+        r = client.post(
+            f"/api/products/{pid}/files",
+            files={"file": ("lid.dxf", _STUB_DXF, "application/dxf")},
+            data={"dxf_role": "LID"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["dxf_role"] == "LID"
+
+        g = client.get(f"/api/products/{pid}").json()
+        assert len(g["files_by_role_all"]["LID"]) == 1
+        assert g["files_by_role_all"]["RING"] == []

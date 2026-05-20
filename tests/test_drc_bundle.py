@@ -301,3 +301,43 @@ def test_endpoint_400_when_no_role_attached_files(seeded_product):
     with TestClient(app) as client:
         r = client.get(f"/api/products/{product.id}/drc-bundle")
     assert r.status_code == 400
+
+
+# ---- 3.6 LID configuration ---------------------------------------------
+def test_build_bundle_lid_configuration_validates(seeded_product, manifest_schema):
+    """A product in the LID configuration (LID instead of RING) emits
+    a manifest whose `role` enum accepts `"LID"` and whose files list
+    carries no `"RING"` entries."""
+    from app.drc_bundle import build_bundle
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("BD")
+    seed("SBT")
+    seed("POD")
+    seed("LID")
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    zip_bytes, _ = build_bundle(product, files_list)
+    manifest = _read_manifest(zip_bytes)
+    jsonschema.validate(manifest, manifest_schema)
+
+    roles = {e["role"] for e in manifest["files"]}
+    assert "LID" in roles
+    assert "RING" not in roles
+
+
+def test_build_bundle_refuses_mixed_ring_and_lid(seeded_product):
+    """If upstream data ever drifts so a product contains both RING
+    and LID files, `build_manifest` MUST fail loudly — the external
+    rule-checking team's contract forbids the combination."""
+    from app.drc_bundle import build_bundle
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("RING")
+    seed("LID")
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    with pytest.raises(ValueError, match="RING and LID"):
+        build_bundle(product, files_list)
