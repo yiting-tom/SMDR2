@@ -201,6 +201,85 @@ def test_pure_line_polyline_circle_below_threshold_stays_polyline(tmp_path):
     assert "polyline" in types
 
 
+def test_unevenly_sampled_circle_uses_ls_center(tmp_path):
+    """A closed LWPOLYLINE whose vertices sit on a circle but are
+    unevenly distributed (24 dense on a 90° arc + 6 sparse on the other
+    270°) must still promote to a `circle` primitive whose centre matches
+    the true geometric centre to LS precision — NOT the vertex centroid,
+    which would drift toward the dense arc."""
+    import math as _math
+
+    import ezdxf
+
+    true_cx, true_cy, true_r = 5.0, -3.0, 0.5
+
+    pts: list[tuple[float, float]] = []
+    # Dense arc: 24 vertices on θ ∈ [0°, 90°)
+    for i in range(24):
+        theta = (_math.pi / 2.0) * (i / 24.0)
+        pts.append((true_cx + true_r * _math.cos(theta),
+                    true_cy + true_r * _math.sin(theta)))
+    # Sparse arc: 6 vertices on θ ∈ [90°, 360°)
+    for i in range(6):
+        theta = (_math.pi / 2.0) + (3.0 * _math.pi / 2.0) * (i / 6.0)
+        pts.append((true_cx + true_r * _math.cos(theta),
+                    true_cy + true_r * _math.sin(theta)))
+
+    # Sanity-check the setup: the *centroid* (what the old code computed)
+    # should land visibly off-centre toward the dense arc.
+    centroid_cx = sum(p[0] for p in pts) / len(pts)
+    centroid_cy = sum(p[1] for p in pts) / len(pts)
+    centroid_drift = _math.hypot(centroid_cx - true_cx, centroid_cy - true_cy)
+    assert centroid_drift > 0.05 * true_r, (
+        f"test fixture broken: centroid drift {centroid_drift:.4g} ≤ 5% of r, "
+        "no point demonstrating the LS upgrade"
+    )
+
+    doc = ezdxf.new("R2010", setup=True)
+    msp = doc.modelspace()
+    poly = msp.add_lwpolyline(pts, close=True)
+    dxf_path = tmp_path / "uneven_circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    circle_prims = [p for p in prims if p["type"] == "circle"]
+    assert len(circle_prims) == 1, (
+        f"expected 1 circle primitive, got {len(circle_prims)} (prim types: "
+        f"{[p['type'] for p in prims]})"
+    )
+    cp = circle_prims[0]
+    cx, cy = cp["center"]
+    err = _math.hypot(cx - true_cx, cy - true_cy)
+    # LS centre is unbiased: within numerical noise of the true centre,
+    # well below `1e-3 * r`. (Centroid would be off by ~0.07 * r.)
+    assert err < 1e-3 * true_r, (
+        f"LS centre off by {err:.4g} (>{1e-3 * true_r:.4g}); centroid drift "
+        f"was {centroid_drift:.4g}"
+    )
+    assert abs(cp["r"] - true_r) / true_r < 0.01
+
+
+def test_collinear_vertices_fall_back_to_centroid(tmp_path):
+    """The LS solve raises `LinAlgError` on collinear vertices. The
+    function must not bubble the exception — it falls back to the
+    centroid, then the radial-variance test (huge for collinear
+    vertices) rejects the sub-path. No `circle` primitive emitted."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # Twelve collinear points: y is constant, x walks along the x-axis.
+    # The Kåsa normal-equation matrix is singular (rank 2).
+    n = CIRCLE_MIN_VERTS_NOCURVE + 1
+    pts = [[float(i), 0.0] for i in range(n)]
+    # First duplicate-of-last sentinel to mimic a closed-polyline shape.
+    pts.append([pts[0][0], pts[0][1]])
+
+    # Should not raise; should return None because the radial-variance
+    # test rejects collinear input.
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is None
+
+
 def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     """An 8-vertex closed POLYLINE that is NOT a circular approximation must
     remain a polyline — guards against the circle detector eating real

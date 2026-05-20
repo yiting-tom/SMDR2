@@ -22,6 +22,7 @@ from typing import Any, Iterable
 
 import ezdxf
 import ezdxf.bbox
+import numpy as np
 from ezdxf.addons.drawing import Frontend, RenderContext
 from ezdxf.addons.drawing.backend import BackendInterface
 from ezdxf.addons.drawing.config import Configuration
@@ -388,37 +389,54 @@ def _detect_circle_subpath(
     rule: `CIRCLE_MIN_VERTS` (8) when ezdxf flattened a real curve
     sub-path, `CIRCLE_MIN_VERTS_NOCURVE` (11) when the sub-path is pure
     line segments — the higher floor keeps deliberate low-N polygon
-    pads from being eaten by the radial test."""
+    pads from being eaten by the radial test.
+
+    Centre is estimated by Kåsa algebraic least-squares fit
+    (`min Σ (xᵢ² + yᵢ² + D·xᵢ + E·yᵢ + F)²`, closed form): this is
+    spacing-invariant where the vertex centroid is not. The centroid
+    drifts toward dense regions of the perimeter when vertices are
+    unevenly spaced; LS does not. On singular / collinear inputs the
+    function falls back to the centroid so degenerate sub-paths produce
+    the same result as before this change (the radial-variance test
+    rejects them downstream anyway)."""
     if len(points) < min_verts:
         return None
     first, last = points[0], points[-1]
     n = len(points) - 1 if first[0] == last[0] and first[1] == last[1] else len(points)
     if n < min_verts:
         return None
-    sx = sy = 0.0
-    for i in range(n):
-        sx += points[i][0]
-        sy += points[i][1]
-    cx = sx / n
-    cy = sy / n
-    rmin = float("inf")
-    rmax = 0.0
-    rsum = 0.0
-    for i in range(n):
-        dx = points[i][0] - cx
-        dy = points[i][1] - cy
-        r = math.hypot(dx, dy)
-        if r < rmin:
-            rmin = r
-        if r > rmax:
-            rmax = r
-        rsum += r
-    rmean = rsum / n
+    arr = np.asarray(points[:n], dtype=np.float64)
+    xs, ys = arr[:, 0], arr[:, 1]
+    # Kåsa: solve [Σx² Σxy Σx; Σxy Σy² Σy; Σx Σy n] · [D, E, F]ᵀ = -[Σx(x²+y²); Σy(x²+y²); Σ(x²+y²)]
+    # Then (cx, cy) = (-D/2, -E/2). Closed-form 3×3 solve.
+    x2y2 = xs * xs + ys * ys
+    M = np.array([
+        [(xs * xs).sum(), (xs * ys).sum(), xs.sum()],
+        [(xs * ys).sum(), (ys * ys).sum(), ys.sum()],
+        [xs.sum(),         ys.sum(),         float(n)],
+    ])
+    b = -np.array([(xs * x2y2).sum(), (ys * x2y2).sum(), x2y2.sum()])
+    try:
+        D, E, _F = np.linalg.solve(M, b)
+        cx = -D / 2.0
+        cy = -E / 2.0
+    except np.linalg.LinAlgError:
+        # Singular system (collinear vertices, degenerate input). Fall
+        # back to the centroid — the radial-variance test downstream
+        # will reject these anyway, behaviour is identical to pre-LS.
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+    dx = xs - cx
+    dy = ys - cy
+    r = np.hypot(dx, dy)
+    rmin = float(r.min())
+    rmax = float(r.max())
+    rmean = float(r.mean())
     if rmean < 1e-9:
         return None
     if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
         return None
-    return {"center": [cx, cy], "r": rmean}
+    return {"center": [float(cx), float(cy)], "r": rmean}
 
 
 def _props(p: BackendProperties) -> dict[str, Any]:
