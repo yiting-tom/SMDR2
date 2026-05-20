@@ -437,17 +437,17 @@ function buildFileActions(product, role, f, compact) {
     dl.addEventListener("click", () => downloadMatchJson(f));
     actions.appendChild(dl);
   }
-  // The delete control is only useful when there are siblings to keep;
-  // for the single-file slot, "Replace" already covers the swap path.
-  if (compact) {
-    const del = document.createElement("button");
-    del.className = "replace-btn";
-    del.type = "button";
-    del.textContent = "✕";
-    del.title = "Remove this DXF from the role";
-    del.addEventListener("click", () => deleteProductFile(product, role, f));
-    actions.appendChild(del);
-  }
+  // Delete (detach) is exposed on every file row — including single-file
+  // slots — so the engineer can empty a slot without uploading a
+  // replacement. Needed for flows like switching a product between RING
+  // and LID, which requires detaching the lone existing file first.
+  const del = document.createElement("button");
+  del.className = "replace-btn";
+  del.type = "button";
+  del.textContent = "✕";
+  del.title = "Remove this DXF from the role";
+  del.addEventListener("click", () => deleteProductFile(product, role, f));
+  actions.appendChild(del);
   return actions;
 }
 
