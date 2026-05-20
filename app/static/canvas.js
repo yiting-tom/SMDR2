@@ -2019,59 +2019,11 @@ $canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // ---- class toolbar & add-mode state machine ------------------------------
-// Mirrors `app.matching.TOLERANCE_ABS`. Shown in class-button tooltips so the
-// user knows what the "default" they're overriding actually is.
-const DEFAULT_TOLERANCE_HINT = "0.05 mm";
-
 async function fetchClasses() {
   const res = await fetch(API.classes());
   const data = await res.json();
   classes = data.classes;
-  if (data.library_id) window.__libraryId = data.library_id;
   renderClassToolbar();
-}
-
-async function editClassTolerance(cls) {
-  const libId = window.__libraryId || null;
-  if (!libId) {
-    setBaseStatus("library id unknown; can't edit tolerance");
-    return;
-  }
-  const current = cls.tolerance == null ? "" : String(cls.tolerance);
-  const raw = prompt(
-    `Tolerance for class "${cls.name}" in mm.\n` +
-    `Empty = default (${DEFAULT_TOLERANCE_HINT}). Typical: 0.05 for BGA balls, 0.5 for substrates.`,
-    current,
-  );
-  if (raw === null) return;  // user cancelled
-  const trimmed = raw.trim();
-  let body;
-  if (trimmed === "") {
-    body = { tolerance: null };
-  } else {
-    const v = Number(trimmed);
-    if (!Number.isFinite(v) || v <= 0 || v > 100) {
-      setBaseStatus(`tolerance must be > 0 and ≤ 100 mm (got "${raw}")`);
-      return;
-    }
-    body = { tolerance: v };
-  }
-  const url = `/api/libraries/${encodeURIComponent(libId)}/classes/${encodeURIComponent(cls.name)}/tolerance`;
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    setBaseStatus(`set tolerance failed: ${res.status}`);
-    return;
-  }
-  await fetchClasses();
-  setBaseStatus(
-    body.tolerance == null
-      ? `${cls.name} tolerance cleared (default)`
-      : `${cls.name} tolerance = ${body.tolerance} mm`,
-  );
 }
 
 // Less-common classes hidden from the toolbar by default to keep it tight.
@@ -2110,21 +2062,7 @@ function renderClassToolbar() {
       btn.classList.add(matchesStaged ? "staged" : "active");
     }
     btn.innerHTML = `<span class="name">${cls.name}</span>`;
-    const tolText = cls.tolerance != null
-      ? `tolerance ${cls.tolerance} mm — right-click to edit (default ${DEFAULT_TOLERANCE_HINT})`
-      : `tolerance: default (${DEFAULT_TOLERANCE_HINT}) — right-click to override`;
-    btn.title = `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n${tolText}`;
-    if (cls.tolerance != null) {
-      const tag = document.createElement("span");
-      tag.className = "class-tol-tag";
-      tag.textContent = `ε=${cls.tolerance}`;
-      btn.appendChild(tag);
-    }
     btn.addEventListener("click", () => enterAddMode(cls.name));
-    btn.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      editClassTolerance(cls);
-    });
     $classToolbar.appendChild(btn);
   });
   // Only show the toggle if there's something to hide/reveal at all.
@@ -2172,12 +2110,10 @@ async function scanCurrentSelection() {
   setBaseStatus(`scanning…`);
   const t0 = performance.now();
   try {
-    const reqBody = { handles: [...selection] };
-    if (addModeClass) reqBody.class_name = addModeClass;
     const res = await fetch(API.match(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(reqBody),
+      body: JSON.stringify({ handles: [...selection] }),
     });
     if (!res.ok) {
       const err = await res.text();
@@ -3097,8 +3033,6 @@ async function load() {
   primitives = data.primitives;
   background = data.background || "#1a1f26";
   fitToBbox(data.bbox);
-  window.__primitives = primitives;
-  window.__view = view;
 
   const tBox0 = performance.now();
   computeBBoxes();
