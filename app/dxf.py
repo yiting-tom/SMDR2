@@ -83,6 +83,135 @@ class RenderOutput:
     # record and fed into the dashboard's unit-scale-warning heuristic.
     # None when the header is missing or unparseable.
     insunits: int | None = None
+    # Multiplier applied to every coordinate in `primitives` + `bbox` so the
+    # downstream consumers can stay in mm. `rescaled_coord = original_coord
+    # * applied_scale`. `1.0` means "no rescale". See `detect_scale_factor`
+    # for the trigger rules.
+    applied_scale: float = 1.0
+
+
+# Expected packaging-design diagonal range (mm) for the unitless path of
+# `detect_scale_factor`. A factor M is accepted iff
+# `original_diagonal * M ∈ [EXPECTED_LOW, EXPECTED_HIGH]`.
+EXPECTED_DIAGONAL_LOW_MM = 10.0
+EXPECTED_DIAGONAL_HIGH_MM = 5000.0
+
+
+def detect_scale_factor(insunits: int | None, bbox_diagonal: float) -> float:
+    """Decide what multiplier to apply so a file's coordinates land in mm.
+
+    `applied_scale` semantics: `rescaled_coord = original_coord * factor`.
+    Returns `1.0` when no rescale is needed (or none is safe).
+
+    Declared-unit cases trust the INSUNITS header:
+      - 1 (inch) → 25.4
+      - 5 (cm)   → 10.0
+      - 6 (m)    → 1000.0
+      - 4 (mm)   → 1.0 (always trust mm — never auto-rescale)
+
+    Unitless / unknown (`0` or `None`) picks the power-of-10 in
+    `[-4, +4]` that brings the diagonal into the expected packaging
+    range, preferring the factor closest to 1. A one-order-of-magnitude
+    safety guard keeps marginal factors (e.g. ×3, ×7) at `1.0`."""
+    # Declared units are authoritative.
+    if insunits == 1:
+        return 25.4
+    if insunits == 5:
+        return 10.0
+    if insunits == 6:
+        return 1000.0
+    if insunits == 4:
+        return 1.0
+    # Unitless / unknown path. Heuristic only — bail on degenerate inputs.
+    if insunits not in (0, None):
+        return 1.0
+    if not math.isfinite(bbox_diagonal) or bbox_diagonal <= 0:
+        return 1.0
+    # Cap the unitless heuristic at ±3 orders of magnitude (M ∈ [0.001,
+    # 1000]). Bigger factors would cover declared-unit cases (e.g. m → mm
+    # is ×1000) but those bypass this path entirely; extreme-magnitude
+    # unitless rescales (e.g. ×10⁴) are almost always pathology, not a
+    # legitimate unit choice, and the safer behaviour is to leave them
+    # at M=1.0 and let the user see the warning badge.
+    candidates = [10 ** k for k in range(-3, 4)]
+    in_range = [
+        m for m in candidates
+        if EXPECTED_DIAGONAL_LOW_MM <= bbox_diagonal * m <= EXPECTED_DIAGONAL_HIGH_MM
+    ]
+    if not in_range:
+        return 1.0
+    # Prefer M=1.0 (no rescale) when it qualifies — the file is already in
+    # the expected packaging range. Otherwise pick the factor that drives
+    # the diagonal as far down inside the range as possible: packaging
+    # designs cluster in the 1–50 mm chip / 5–200 mm package band, so for
+    # an out-of-range file the aggressive choice (smallest post-rescale
+    # diagonal) is almost always right, and ambiguous cases like
+    # diagonal=6000 → {60, 600} mm pick 60 mm. The price is that a
+    # legitimate 600 mm panel mistakenly stored at 6000 units would be
+    # over-corrected to 60 mm; declared-unit files (mm/cm/m/inch) bypass
+    # this path entirely, so the only risk is genuinely unitless files
+    # which are already a guess.
+    if 1.0 in in_range:
+        best = 1.0
+    else:
+        best = min(in_range, key=lambda m: bbox_diagonal * m)
+    # Safety guard: refuse marginal factors (≤ ±1 order of magnitude) so a
+    # borderline file like a real 5×5 mm dice (diagonal ≈ 7 mm, would
+    # otherwise grab M=10 → 70 mm) stays at 1.0 and falls back to the
+    # existing "suspect" badge for a human. Strictly greater than 1 means
+    # 100×+ rescales pass; 10× rescales don't.
+    if abs(math.log10(best)) <= 1.0:
+        return 1.0
+    return float(best)
+
+
+def _scale_primitive_coords(prim: dict[str, Any], factor: float) -> None:
+    """Multiply every coordinate inside a primitive dict by `factor` in
+    place. Handles every primitive shape emitted by `JSONBackend`."""
+    t = prim.get("type")
+    if t == "point":
+        x, y = prim["pos"]
+        prim["pos"] = [x * factor, y * factor]
+    elif t == "line":
+        sx, sy = prim["start"]
+        ex, ey = prim["end"]
+        prim["start"] = [sx * factor, sy * factor]
+        prim["end"] = [ex * factor, ey * factor]
+    elif t == "polyline":
+        prim["points"] = [[x * factor, y * factor] for x, y in prim["points"]]
+    elif t == "circle":
+        cx, cy = prim["center"]
+        prim["center"] = [cx * factor, cy * factor]
+        prim["r"] = prim["r"] * factor
+    elif t == "filled_polygon":
+        prim["rings"] = [
+            [[x * factor, y * factor] for x, y in ring]
+            for ring in prim["rings"]
+        ]
+
+
+def _maybe_rescale(render: RenderOutput) -> tuple[RenderOutput, float]:
+    """Apply `detect_scale_factor` and, when non-trivial, scale every
+    primitive coordinate and the bbox in place. Returns the (possibly
+    mutated) render and the applied factor."""
+    if render.bbox is None:
+        return render, 1.0
+    xmin, ymin, xmax, ymax = render.bbox
+    dx = float(xmax) - float(xmin)
+    dy = float(ymax) - float(ymin)
+    diagonal = math.hypot(max(dx, 0.0), max(dy, 0.0))
+    factor = detect_scale_factor(render.insunits, diagonal)
+    if factor == 1.0:
+        return render, 1.0
+    for prim in render.primitives:
+        _scale_primitive_coords(prim, factor)
+    render.bbox = (xmin * factor, ymin * factor, xmax * factor, ymax * factor)
+    render.applied_scale = factor
+    logger.info(
+        "auto-rescale: insunits=%s, pre-diagonal=%.3g, factor=%.6g → post-diagonal=%.3g",
+        render.insunits, diagonal, factor, diagonal * factor,
+    )
+    return render, factor
 
 
 def choose_flatten_tolerance(diagonal: float) -> float:
@@ -350,13 +479,15 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
     ctx = RenderContext(doc)
     backend = JSONBackend(flatten_tolerance=tol)
     Frontend(ctx, backend).draw_layout(msp, finalize=True)
-    return RenderOutput(
+    render = RenderOutput(
         primitives=backend.primitives,
         bbox=backend.bbox,
         background=backend.background,
         flatten_tolerance=tol,
         insunits=_read_insunits(doc),
     )
+    render, _ = _maybe_rescale(render)
+    return render
 
 
 def _read_insunits(doc) -> int | None:

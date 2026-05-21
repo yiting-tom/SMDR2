@@ -90,6 +90,7 @@ def _preprocess_worker(
     background: str
     primitives: list[dict[str, Any]]
     insunits: int | None
+    applied_scale: float
     if transient_primitives and Path(transient_primitives).exists():
         with open(transient_primitives) as f:
             cached = json.load(f)
@@ -97,12 +98,14 @@ def _preprocess_worker(
         bbox = tuple(cached["bbox"]) if cached.get("bbox") else None
         background = cached.get("background", "#ffffff")
         insunits = cached.get("insunits")
+        applied_scale = float(cached.get("applied_scale", 1.0))
     else:
         out = flatten_for_render(src)
         primitives = out.primitives
         bbox = out.bbox
         background = out.background
         insunits = out.insunits
+        applied_scale = out.applied_scale
 
     # 2. Apply layer filter (None = legacy, keep everything).
     if selected_layers is not None:
@@ -170,6 +173,7 @@ def _preprocess_worker(
         "bbox": bbox,
         "background": background,
         "insunits": insunits,
+        "applied_scale": applied_scale,
         "prematch_total": sum(len(v) for v in by_class.values()),
     }
 
@@ -248,13 +252,32 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
-    FILE_STORE.update_parsed(
+    factor_changed = FILE_STORE.update_parsed(
         file_id,
         primitive_count=result["primitive_count"],
         bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
         background=result["background"],
         insunits=result.get("insunits"),
+        applied_scale=float(result.get("applied_scale", 1.0)),
     )
+    if factor_changed:
+        _invalidate_match_after_rescale(file_id)
+
+
+def _invalidate_match_after_rescale(file_id: str) -> None:
+    """Drop the saved per-file Match JSON when `applied_scale` changes.
+    Saved point sets reference the prior coordinate system; rerunning is
+    cheaper and safer than scaling the JSON in place. See the
+    `dxf-pipeline` spec / `auto-normalize-unit-suspect-dxf` change."""
+    from app.files import FILE_STORE
+    from app.storage import match_path
+
+    mp = match_path(file_id)
+    try:
+        mp.unlink()
+    except FileNotFoundError:
+        pass
+    FILE_STORE.set_match_saved(file_id, False)
 
 
 # ---- Discover-layers worker (Phase 1) ------------------------------------
@@ -308,6 +331,7 @@ def _discover_layers_worker(
         "bbox": out.bbox,
         "background": out.background,
         "insunits": out.insunits,
+        "applied_scale": out.applied_scale,
     }))
 
     return {
@@ -519,7 +543,11 @@ _REPROCESS_SKIP_STATUSES = frozenset({
 })
 
 
-def submit_reprocess_all() -> str:
+def submit_reprocess_all(
+    file_id_filter: set[str] | None = None,
+    *,
+    kind: str = "reprocess-all",
+) -> str:
     """Re-preprocess every eligible file in storage with current overrides.
 
     Returns one parent job_id; `_jobs[job_id]` exposes
@@ -527,17 +555,22 @@ def submit_reprocess_all() -> str:
     completed Phase 1 layer selection (status is past
     `awaiting_layers`). Errored or still-discovering files are counted
     in `skipped` and don't get a worker dispatched.
+
+    `file_id_filter` restricts the run to a subset (used by the
+    startup auto-rescale migration); `None` runs the full set.
     """
     from app.files import FILE_STORE
     parent_id = str(uuid.uuid4())
     files = FILE_STORE.list_all()
+    if file_id_filter is not None:
+        files = [r for r in files if r.id in file_id_filter]
     eligible = [r for r in files if r.status not in _REPROCESS_SKIP_STATUSES]
     skipped = len(files) - len(eligible)
     now = time.time()
     with _lock:
         _jobs[parent_id] = {
             "id": parent_id,
-            "kind": "reprocess-all",
+            "kind": kind,
             "status": "running" if eligible else "done",
             "submitted_at": now,
             "started_at": now,
@@ -585,13 +618,16 @@ def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
                     job["status"] = "done"
                     job["completed_at"] = time.time()
         return
-    FILE_STORE.update_parsed(
+    factor_changed = FILE_STORE.update_parsed(
         file_id,
         primitive_count=result["primitive_count"],
         bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
         background=result["background"],
         insunits=result.get("insunits"),
+        applied_scale=float(result.get("applied_scale", 1.0)),
     )
+    if factor_changed:
+        _invalidate_match_after_rescale(file_id)
     with _lock:
         job = _jobs.get(parent_id)
         if job is not None:

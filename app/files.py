@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS files (
     top_view_rect    TEXT,
     bottom_view_rect TEXT,
     side_view_rect   TEXT,
-    insunits        INTEGER
+    insunits        INTEGER,
+    applied_scale   REAL NOT NULL DEFAULT 1.0
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -108,9 +109,25 @@ class FileRecord:
     # rows uploaded before this column existed; re-preprocess to populate).
     # 0 = unitless, 1 = inch, 2 = foot, 4 = mm, 5 = cm, 6 = m, …
     insunits: int | None = None
+    # Multiplier the preprocessor applied to bring this file's coordinates
+    # into mm. `rescaled_coord = original_coord * applied_scale`. `1.0`
+    # means "no rescale". See `app.dxf.detect_scale_factor`.
+    applied_scale: float = 1.0
 
     def to_dict(self) -> dict:
-        kind, detail = compute_unit_scale_warning(self.insunits, self.bbox)
+        # When the preprocessor applied a rescale, the persisted bbox is
+        # already in mm — so feed the heuristic the *pre-rescale* diagonal
+        # (current diagonal / applied_scale) so the warning kind stays
+        # stable regardless of auto-rescale.
+        pre_bbox = self.bbox
+        if pre_bbox is not None and self.applied_scale != 1.0 and self.applied_scale > 0:
+            inv = 1.0 / self.applied_scale
+            pre_bbox = tuple(c * inv for c in self.bbox)
+        kind, detail = compute_unit_scale_warning(self.insunits, pre_bbox)
+        if self.applied_scale != 1.0:
+            detail = _format_rescale_detail(
+                self.insunits, pre_bbox, self.applied_scale,
+            )
         return {
             "id": self.id,
             "name": self.name,
@@ -135,8 +152,13 @@ class FileRecord:
             "bottom_view_rect": dict(self.bottom_view_rect) if self.bottom_view_rect else None,
             "side_view_rect": dict(self.side_view_rect) if self.side_view_rect else None,
             "insunits": self.insunits,
+            "applied_scale": self.applied_scale,
             "unit_scale_warning": kind,
-            "unit_scale_warning_detail": detail if kind else None,
+            "unit_scale_warning_detail": detail if (kind or self.applied_scale != 1.0) else None,
+            "applied_scale_label": (
+                format_applied_scale_label(self.applied_scale, self.insunits)
+                if self.applied_scale != 1.0 else None
+            ),
         }
 
 
@@ -171,6 +193,62 @@ def compute_unit_scale_warning(
         return "unitless", f"{base} — DXF is declared unitless ($INSUNITS=0)"
     # diagonal ≤ 1000, declared unit (or unknown) → no warning.
     return None, ""
+
+
+# Map INSUNITS → short human label, used only for the rescale pill text.
+_INSUNITS_LABELS = {
+    0: "unitless",
+    1: "inch",
+    2: "foot",
+    4: "mm",
+    5: "cm",
+    6: "m",
+}
+
+
+def format_applied_scale_label(applied_scale: float, insunits: int | None) -> str:
+    """Short pill text for the dashboard, e.g. `"÷1000"`, `"×25.4 (inch)"`.
+
+    Powers of 10 render with the `÷` / `×` shorthand; non-power factors
+    (currently only 25.4 from inch) render with `×` and the source unit
+    in parentheses."""
+    if applied_scale == 1.0:
+        return ""
+    # Power-of-10 case: render as ÷N (when M < 1) or ×N (when M > 1) to
+    # match the user's mental model of "the file was N× too big / small."
+    import math as _math
+    log10 = _math.log10(applied_scale)
+    if _math.isclose(log10, round(log10), abs_tol=1e-9):
+        n = 10 ** int(round(abs(log10)))
+        if applied_scale < 1.0:
+            return f"÷{n}"
+        return f"×{n}"
+    # Non-power factor (declared inch → ×25.4). Append the source unit for
+    # discoverability so the user sees why we did it.
+    label = _INSUNITS_LABELS.get(insunits or -1)
+    suffix = f" ({label})" if label else ""
+    return f"×{applied_scale:g}{suffix}"
+
+
+def _format_rescale_detail(
+    insunits: int | None,
+    pre_bbox: tuple[float, float, float, float] | None,
+    applied_scale: float,
+) -> str:
+    """Full detail text shown in the dashboard pill's `title`."""
+    iu_label = _INSUNITS_LABELS.get(insunits or -1, "unknown")
+    iu_token = "None" if insunits is None else f"{insunits} ({iu_label})"
+    pill = format_applied_scale_label(applied_scale, insunits)
+    if pre_bbox:
+        import math as _math
+        dx = float(pre_bbox[2]) - float(pre_bbox[0])
+        dy = float(pre_bbox[3]) - float(pre_bbox[1])
+        diag = _math.hypot(max(dx, 0.0), max(dy, 0.0))
+        return (
+            f"INSUNITS={iu_token}, pre-rescale diagonal={diag:.1f} "
+            f"→ auto-rescaled {pill} (mm)"
+        )
+    return f"INSUNITS={iu_token} → auto-rescaled {pill} (mm)"
 
 
 class FileStore:
@@ -247,6 +325,12 @@ class FileStore:
                 self.conn.execute("ALTER TABLE files ADD COLUMN side_view_rect TEXT")
             if "insunits" not in cols:
                 self.conn.execute("ALTER TABLE files ADD COLUMN insunits INTEGER")
+            if "applied_scale" not in cols:
+                # Legacy rows pre-date the auto-rescale feature; treat them
+                # as untouched (factor = 1.0) until they are re-preprocessed.
+                self.conn.execute(
+                    "ALTER TABLE files ADD COLUMN applied_scale REAL NOT NULL DEFAULT 1.0"
+                )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -367,15 +451,26 @@ class FileStore:
         bbox: tuple[float, float, float, float],
         background: str,
         insunits: int | None = None,
-    ) -> None:
+        applied_scale: float = 1.0,
+    ) -> bool:
+        """Update preprocess outputs on the file row. Returns True iff the
+        `applied_scale` actually changed (caller invalidates Match JSON in
+        that case — see `app/jobs.py` and the auto-rescale spec)."""
         with self.lock, self.conn:
+            prior_row = self.conn.execute(
+                "SELECT applied_scale FROM files WHERE id = ?", (file_id,)
+            ).fetchone()
+            prior = float(prior_row["applied_scale"]) if prior_row else 1.0
             self.conn.execute(
                 "UPDATE files SET status = ?, parsed_at = ?, primitive_count = ?, "
                 "bbox_xmin = ?, bbox_ymin = ?, bbox_xmax = ?, bbox_ymax = ?, "
-                "background = ?, insunits = ?, error = NULL WHERE id = ?",
+                "background = ?, insunits = ?, applied_scale = ?, error = NULL "
+                "WHERE id = ?",
                 (READY, time.time(), primitive_count,
-                 bbox[0], bbox[1], bbox[2], bbox[3], background, insunits, file_id),
+                 bbox[0], bbox[1], bbox[2], bbox[3], background, insunits,
+                 float(applied_scale), file_id),
             )
+        return prior != float(applied_scale)
 
     # ---- reads ------------------------------------------------------------
     def get(self, file_id: str) -> FileRecord | None:
@@ -457,6 +552,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         bottom_view_rect=bottom_view_rect,
         side_view_rect=side_view_rect,
         insunits=_get("insunits"),
+        applied_scale=float(_get("applied_scale", 1.0) or 1.0),
     )
 
 

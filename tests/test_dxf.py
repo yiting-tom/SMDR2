@@ -25,6 +25,7 @@ def test_circle_entity_emits_circle_primitive(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     circle = msp.add_circle(center=(3.0, 4.0), radius=0.15)
     dxf_path = tmp_path / "circle.dxf"
@@ -53,6 +54,7 @@ def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     circle = msp.add_circle(center=(1.0, -2.0), radius=0.5)
     dxf_path = tmp_path / "one_circle.dxf"
@@ -80,6 +82,7 @@ def test_hatch_emits_no_primitives(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
 
     # (a) HATCH bounded by a circular edge
@@ -136,6 +139,7 @@ def test_pure_line_polyline_circle_emits_circle(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     pts = _circular_polyline_pts(n=24, cx=3.0, cy=4.0, r=0.15)
     poly = msp.add_lwpolyline(pts, close=True)
@@ -163,6 +167,7 @@ def test_pure_line_polyline_circle_at_threshold_emits_circle(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     pts = _circular_polyline_pts(n=11, cx=0.0, cy=0.0, r=0.25)
     poly = msp.add_lwpolyline(pts, close=True)
@@ -186,6 +191,7 @@ def test_pure_line_polyline_circle_below_threshold_stays_polyline(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     pts = _circular_polyline_pts(n=10, cx=0.0, cy=0.0, r=0.25)
     poly = msp.add_lwpolyline(pts, close=True)
@@ -236,6 +242,7 @@ def test_unevenly_sampled_circle_uses_ls_center(tmp_path):
     )
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     poly = msp.add_lwpolyline(pts, close=True)
     dxf_path = tmp_path / "uneven_circle.dxf"
@@ -361,6 +368,7 @@ def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     # A clearly non-circular octagon (alternating long/short radial distances).
     pts = [
@@ -431,6 +439,7 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     from ezdxf.math import Vec3
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
 
     # One regular selectable entity:
@@ -480,6 +489,7 @@ def _make_scaled_dxf(tmp_path, scale: float, name: str):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     # LINE drives the bbox: 30 × 30 units (so diagonal ≈ 30·√2 ≈ 42.4).
     msp.add_line((0, 0), (30 * scale, 30 * scale))
@@ -579,6 +589,7 @@ def test_flatten_tolerance_falls_back_when_extents_unavailable(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     # Nothing added to msp.
     path = tmp_path / "empty.dxf"
     doc.saveas(str(path))

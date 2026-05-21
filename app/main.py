@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import shutil
 from contextlib import asynccontextmanager
@@ -160,10 +161,51 @@ def _ensure_test_dxf_registered() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _ensure_test_dxf_registered()
+    _submit_unit_rescale_migration()
     yield
     jobs.shutdown()
     from app.matching import shutdown_pool
     shutdown_pool()
+
+
+logger = logging.getLogger(__name__)
+
+
+def _submit_unit_rescale_migration() -> None:
+    """One-shot: re-preprocess any legacy file whose persisted INSUNITS +
+    bbox would now resolve to a non-`1.0` factor under the
+    `auto-normalize-unit-suspect-dxf` detector. Idempotent because a
+    file that was already rescaled has its bbox stored in mm, so the
+    detector returns `1.0` for it the next time around.
+
+    Match JSON invalidation rides along the standard per-file
+    re-preprocess flow in `app.jobs._on_reprocess_step_done` (which
+    delegates to `_invalidate_match_after_rescale` when the factor
+    changes), so no separate cleanup pass is needed here."""
+    import math
+    from app.dxf import detect_scale_factor
+
+    targets: set[str] = set()
+    chosen: dict[str, float] = {}
+    for rec in FILE_STORE.list_all():
+        if rec.applied_scale != 1.0:
+            continue
+        if rec.bbox is None:
+            continue
+        xmin, ymin, xmax, ymax = rec.bbox
+        diag = math.hypot(max(xmax - xmin, 0.0), max(ymax - ymin, 0.0))
+        factor = detect_scale_factor(rec.insunits, diag)
+        if factor == 1.0:
+            continue
+        targets.add(rec.id)
+        chosen[rec.id] = factor
+    if not targets:
+        return
+    for fid, factor in chosen.items():
+        logger.info(
+            "unit-rescale migration: queueing file_id=%s (factor=%.6g)", fid, factor,
+        )
+    jobs.submit_reprocess_all(file_id_filter=targets, kind="unit-rescale-migration")
 
 
 app = FastAPI(title="SMDR2", lifespan=lifespan)

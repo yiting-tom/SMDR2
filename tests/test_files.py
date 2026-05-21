@@ -10,6 +10,7 @@ from app.files import (
     PREPROCESSING,
     READY,
     compute_unit_scale_warning,
+    format_applied_scale_label,
 )
 
 
@@ -117,6 +118,148 @@ def test_to_dict_round_trip(tmp_db):
     d = fs.get("k").to_dict()
     assert d["status"] == READY
     assert d["bbox"] == [0, 1, 2, 3]
+
+
+# ---- applied_scale column + payload --------------------------------------
+def test_fresh_db_has_applied_scale_column_default_1(tmp_db):
+    fs = FileStore(tmp_db)
+    cols = [r["name"] for r in fs.conn.execute("PRAGMA table_info(files)")]
+    assert "applied_scale" in cols
+    fs.register("a", "a.dxf", 1)
+    rec = fs.get("a")
+    # Default 1.0 for any row that hasn't been re-preprocessed yet.
+    assert rec.applied_scale == 1.0
+    assert rec.to_dict()["applied_scale"] == 1.0
+
+
+def test_update_parsed_persists_applied_scale_and_reports_change(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("b", "b.dxf", 1)
+    # First preprocess: factor 1.0, no change (prior default is also 1.0).
+    changed = fs.update_parsed("b", 1, (0, 0, 1, 1), "#000",
+                               insunits=4, applied_scale=1.0)
+    assert changed is False
+    # Second preprocess: factor flips to 0.001 — caller invalidates match.
+    changed = fs.update_parsed("b", 1, (0, 0, 1, 1), "#000",
+                               insunits=0, applied_scale=0.001)
+    assert changed is True
+    rec = fs.get("b")
+    assert rec.applied_scale == pytest.approx(0.001)
+
+
+def test_to_dict_rescaled_payload(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("c", "c.dxf", 1)
+    # Persisted (post-rescale) bbox in mm; applied_scale records the
+    # multiplier we applied (0.001 = was 1000× too big).
+    fs.update_parsed("c", 1, (0, 0, 42, 42), "#000",
+                     insunits=0, applied_scale=0.001)
+    d = fs.get("c").to_dict()
+    assert d["applied_scale"] == pytest.approx(0.001)
+    assert d["applied_scale_label"] == "÷1000"
+    # The detail string spells out both the source units and the factor.
+    assert d["unit_scale_warning_detail"]
+    assert "0.001" in d["unit_scale_warning_detail"] or "÷1000" in d["unit_scale_warning_detail"]
+    assert "INSUNITS=0" in d["unit_scale_warning_detail"]
+
+
+def test_to_dict_inch_rescaled_payload(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("d", "d.dxf", 1)
+    # 10-inch design → 254 mm after the inch → mm rescale.
+    fs.update_parsed("d", 1, (0, 0, 254, 254), "#000",
+                     insunits=1, applied_scale=25.4)
+    d = fs.get("d").to_dict()
+    assert d["applied_scale"] == pytest.approx(25.4)
+    assert d["applied_scale_label"] == "×25.4 (inch)"
+    assert "INSUNITS=1" in d["unit_scale_warning_detail"]
+    assert "inch" in d["unit_scale_warning_detail"]
+
+
+def test_to_dict_not_rescaled_payload_unchanged(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("e", "e.dxf", 1)
+    fs.update_parsed("e", 1, (0, 0, 300, 300), "#000",
+                     insunits=4, applied_scale=1.0)
+    d = fs.get("e").to_dict()
+    assert d["applied_scale"] == 1.0
+    assert d["applied_scale_label"] is None
+    # mm + diagonal ~424 is a normal design → no warning, no detail.
+    assert d["unit_scale_warning"] is None
+    assert d["unit_scale_warning_detail"] is None
+
+
+@pytest.mark.parametrize("factor,insunits,expected", [
+    (0.001, 0,    "÷1000"),
+    (0.01,  0,    "÷100"),
+    (0.1,   0,    "÷10"),
+    (10.0,  5,    "×10"),
+    (100.0, 0,    "×100"),
+    (1000.0, 6,   "×1000"),
+    (25.4,  1,    "×25.4 (inch)"),
+])
+def test_format_applied_scale_label(factor, insunits, expected):
+    assert format_applied_scale_label(factor, insunits) == expected
+
+
+def test_format_applied_scale_label_no_op():
+    assert format_applied_scale_label(1.0, 4) == ""
+
+
+def test_legacy_db_alter_adds_applied_scale_with_default(tmp_path):
+    """Open a pre-auto-rescale DB and confirm the ALTER fires and old data
+    survives."""
+    import json as _json
+    import sqlite3
+    db_path = tmp_path / "legacy_no_applied_scale.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            size            INTEGER NOT NULL,
+            uploaded_at     REAL NOT NULL,
+            status          TEXT NOT NULL,
+            error           TEXT,
+            parsed_at       REAL,
+            primitive_count INTEGER,
+            bbox_xmin       REAL,
+            bbox_ymin       REAL,
+            bbox_xmax       REAL,
+            bbox_ymax       REAL,
+            background      TEXT,
+            library_id      TEXT NOT NULL DEFAULT 'default',
+            product_id      TEXT,
+            dxf_role        TEXT,
+            dxf_view        TEXT,
+            match_saved     INTEGER NOT NULL DEFAULT 0,
+            selected_layers TEXT,
+            top_view_rect   TEXT,
+            bottom_view_rect TEXT,
+            side_view_rect  TEXT,
+            insunits        INTEGER
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO files (id, name, size, uploaded_at, status, insunits, "
+        "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("legacy-x", "x.dxf", 1, 0.0, "ready_to_match", 0,
+         0.0, 0.0, 42_000.0, 42_000.0),
+    )
+    conn.commit()
+    conn.close()
+    fs = FileStore(db_path)
+    cols = [r["name"] for r in fs.conn.execute("PRAGMA table_info(files)")]
+    assert "applied_scale" in cols
+    rec = fs.get("legacy-x")
+    # Default fills in as 1.0 — the file hasn't been re-preprocessed yet.
+    assert rec.applied_scale == 1.0
+    # Existing bbox + insunits survived the ALTER.
+    assert rec.insunits == 0
+    assert rec.bbox == (0.0, 0.0, 42_000.0, 42_000.0)
 
 
 def test_side_regions_persist_and_round_trip(tmp_db):

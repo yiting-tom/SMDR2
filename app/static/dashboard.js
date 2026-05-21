@@ -560,13 +560,7 @@ function renderSingleFileSlot(cell, product, role, f) {
   cell.innerHTML +=
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
-  if (f.unit_scale_warning) {
-    const badge = document.createElement("span");
-    badge.className = "warn-badge";
-    badge.textContent = "⚠ unit";
-    badge.title = f.unit_scale_warning_detail || "";
-    cell.querySelector(".slot-status").appendChild(badge);
-  }
+  appendUnitScaleAnnotation(cell.querySelector(".slot-status"), f);
   cell.appendChild(buildFileActions(product, role, f, /*compact=*/false));
 }
 
@@ -578,15 +572,32 @@ function slotFileRow(product, role, f, compact) {
   row.innerHTML =
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
+  appendUnitScaleAnnotation(row.querySelector(".slot-status"), f);
+  row.appendChild(buildFileActions(product, role, f, compact));
+  return row;
+}
+
+// A file gets either the "auto-rescaled" info pill (when preprocess
+// applied a non-1.0 factor) or the legacy "⚠ unit" warning badge — never
+// both. The pill wins because once we've fixed the units the warning is
+// no longer actionable; the title text still spells out what happened.
+function appendUnitScaleAnnotation(parent, f) {
+  if (!parent) return;
+  if (f.applied_scale && f.applied_scale !== 1.0 && f.applied_scale_label) {
+    const pill = document.createElement("span");
+    pill.className = "rescaled-pill";
+    pill.textContent = `ℹ rescaled ${f.applied_scale_label}`;
+    pill.title = f.unit_scale_warning_detail || "";
+    parent.appendChild(pill);
+    return;
+  }
   if (f.unit_scale_warning) {
     const badge = document.createElement("span");
     badge.className = "warn-badge";
     badge.textContent = "⚠ unit";
     badge.title = f.unit_scale_warning_detail || "";
-    row.querySelector(".slot-status").appendChild(badge);
+    parent.appendChild(badge);
   }
-  row.appendChild(buildFileActions(product, role, f, compact));
-  return row;
 }
 
 function fileStatusBits(f) {

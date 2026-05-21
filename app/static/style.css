@@ -821,6 +821,12 @@ body.dashboard main.dashboard-main {
   font-size: 0.78rem;
   cursor: help;
 }
+.rescaled-pill {
+  color: #5d8aa8;
+  margin-left: 0.5em;
+  font-size: 0.78rem;
+  cursor: help;
+}
 .product-card .slot .slot-actions {
   display: flex;
   gap: 0.4rem;
