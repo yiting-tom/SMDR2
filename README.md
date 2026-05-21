@@ -220,7 +220,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | `POST /api/products/{pid}/files` | 上傳 DXF 到 product 的某 role |
 | `GET /api/files/{id}/primitives` | 取 flatten 過的繪圖 primitives |
 | `POST /api/files/{id}/match` | 對單一 template 跑 match |
-| `POST /api/files/{id}/match-json` | Save Match — 寫 `data/match/{id}.json` |
+| `POST /api/files/{id}/match-json` | Save Match — 寫 `data/match/{id}.json`；回傳 payload 包含 `arbitration_counts`（class-arbitration 仲裁結果，BGABall vs FiducialCircle 等同尺寸衝突的分流統計）|
 | `GET /api/files/{id}/match-json` | 讀回 Match JSON（dev mode "Download Match" 用這條）|
 | `POST /api/products/{pid}/rule-check` | 跑 mock DRC |
 | `GET /api/products/{pid}/rule-check` | 取最近一次 DRC 結果 |

@@ -117,6 +117,17 @@ def _make_lib_with_constrained_templates(monkeypatch):
     return lib.library_id
 
 
+def _make_lib_with_arbitration_classes(monkeypatch):
+    """A library that has BOTH BGABall and FiducialCircle templates so
+    arbitration has both members populated."""
+    lib = LIBRARIES.create("test-arbitration")
+    for cls in ("BGABall", "FiducialCircle"):
+        t = Template.from_entities(cls, [[(0.0, 0.0), (1.0, 0.0)]])
+        lib.add_template(t)
+    _wrap_templates_of(lib)
+    return lib.library_id
+
+
 def _bind_file_to_lib(file_id, library_id):
     """Use FILE_STORE.update_library directly (avoids PATCH's
     re-preprocess side effect)."""
@@ -222,3 +233,80 @@ def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch):
     assert not any("c4_ball" in k for k in saved)
     # BGABall in bottom_view survives.
     assert "bottom_view.bga_ball.0" in saved
+
+
+def test_save_match_json_emits_arbitration_counts(monkeypatch):
+    """End-to-end: response payload exposes arbitration_counts with the
+    documented per-group breakdown, and identical-handle cross-fire
+    between BGABall and FiducialCircle resolves to one class per handle."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.storage import match_path
+
+    fid = "mjc-3-arbitration"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": -50, "y0": -50, "x1": -10, "y1": -10},   # corner region
+        bottom={"x0": 0, "y0": 0, "x1": 10, "y1": 10},       # BGA grid region
+        side=None,
+    )
+    library_id = _make_lib_with_arbitration_classes(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    # Build a 3×3 BGA grid (pitch 1) inside bottom_view, plus 2 isolated
+    # corner fiducials inside top_view. Both BGABall and FiducialCircle
+    # templates cross-fire on every circle.
+    grid_handles = [f"g{i}_{j}" for i in range(3) for j in range(3)]
+    grid_coords = [(float(i), float(j)) for i in range(3) for j in range(3)]
+    fid_handles = ["f0", "f1"]
+    fid_coords = [(-30.0, -30.0), (-20.0, -20.0)]
+
+    shapes = {}
+    for h, (x, y) in zip(grid_handles, grid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+    for h, (x, y) in zip(fid_handles, fid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+
+    # Both matchers return both grid+fid handles to simulate cross-fire.
+    all_matches = [_mr([h]) for h in grid_handles + fid_handles]
+    matches = {
+        "BGABall":        list(all_matches),
+        "FiducialCircle": list(all_matches),
+    }
+    _install_fakes(monkeypatch, shapes, matches)
+
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/match-json")
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+    # Response payload exposes arbitration_counts.
+    assert "arbitration_counts" in body
+    ac = body["arbitration_counts"]
+    label = "BGABall|FiducialCircle"
+    assert label in ac
+    gc = ac[label]
+    # Pool dedupes cross-fired handles: 9 grid + 2 fids = 11 unique
+    # physical instances even though the matcher reported 22.
+    # NB: BGABall's matches in top_view get pre-filtered by
+    # split_matches_by_side (top is disallowed), so the 2 fid handles
+    # only reach the pool via the FiducialCircle key. Pool size therefore
+    # = 9 (grid, via both BGA + Fid) + 2 (fids, via Fid only) = 11.
+    assert gc["pool_size"] == 11
+    assert gc["assigned"]["BGABall"] == 9
+    assert gc["assigned"]["FiducialCircle"] == 2
+
+    saved = json.loads(match_path(fid).read_text())
+    # Grid handles end up under bga_ball; fid handles end up under
+    # fiducial_circle. No handle appears under both.
+    bga_handles_out: set[str] = set()
+    fid_handles_out: set[str] = set()
+    for k, hls in saved.items():
+        for hl in hls:
+            if "bga_ball" in k:
+                bga_handles_out.update(hl)
+            elif "fiducial_circle" in k:
+                fid_handles_out.update(hl)
+    assert bga_handles_out == set(grid_handles)
+    assert fid_handles_out == set(fid_handles)
+    assert bga_handles_out.isdisjoint(fid_handles_out)

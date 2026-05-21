@@ -42,7 +42,9 @@ from app.files import (
     PREPROCESSING,
     READY,
 )
+from app.class_arbitration import arbitrate
 from app.library import (
+    CLASS_ARBITRATION_GROUPS,
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_LIBRARY_ID,
@@ -1027,6 +1029,22 @@ async def save_match_json(file_id: str) -> dict:
             for k, n in cnts.items():
                 side_counts[k] += n
             total_matches += len(result.matches)
+    # Post-match arbitration: resolves geometrically-identical class
+    # collisions (e.g., BGABall vs FiducialCircle when diameters match)
+    # by neighbour count. No-op when no arbitration group's members
+    # appear in `out`.
+    out, arbitration_counts, view_drops = arbitrate(
+        out, shapes, CLASS_ARBITRATION_GROUPS
+    )
+    # Fold view-conflict drops from arbitration into side_counts so the
+    # response stays internally consistent. A drop here means an instance
+    # that was originally counted under some prefix (top/bottom/side/
+    # unassigned) is now moving to "dropped".
+    for _label, by_prefix in view_drops.items():
+        for prefix, n in by_prefix.items():
+            bucket = prefix if prefix else "unassigned"
+            side_counts[bucket] = max(0, side_counts[bucket] - n)
+            side_counts["dropped"] += n
     dst = match_path(file_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "w") as f:
@@ -1039,6 +1057,7 @@ async def save_match_json(file_id: str) -> dict:
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "side_counts": side_counts,
+        "arbitration_counts": arbitration_counts,
         "saved_to": str(dst.relative_to(DATA_DIR.parent)),
         "match_saved": True,
     }
