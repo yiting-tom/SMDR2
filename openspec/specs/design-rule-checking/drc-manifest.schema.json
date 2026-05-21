@@ -50,7 +50,7 @@
       "additionalProperties": false,
       "properties": {
         "role": {
-          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). RING and LID are mutually exclusive per product — a single manifest SHALL NOT contain both.",
+          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). All five roles are independent; a single manifest MAY contain entries under any subset, including both RING and LID.",
           "type": "string",
           "enum": ["SBT", "BD", "POD", "RING", "LID"]
         },

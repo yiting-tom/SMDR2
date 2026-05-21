@@ -608,23 +608,13 @@ each half is an independent role-btn for hit-testing.
 
 **Per-product 4th-slot pair rendering:**
 
-- Product has 0 DXFs under `RING` AND 0 under `LID` → both halves
-  render as enabled empty placeholders (`role-btn.empty`); the
-  engineer MAY click or drag to either half.
-- Product has ≥1 DXF under `RING` and 0 under `LID` → the left
-  (RING) half renders by the usual single-role rules below; the
-  right (LID) half renders as a **disabled** placeholder
-  (`role-btn.empty.disabled`) with `cursor: not-allowed`, no click
-  / drop response, and a `title` attribute identifying one file id
-  that locked the product into the RING configuration.
-- Product has 0 under `RING` and ≥1 under `LID` → mirror of the
-  above: right (LID) half renders normally; left (RING) half is
-  disabled with the symmetric explanatory `title`.
-- Product has ≥1 under BOTH → unreachable in normal operation
-  (upload enforces mutual exclusion in `product-files`). If the
-  front-end nonetheless encounters this state (stale cache, manual
-  DB edit), both halves SHALL render normally and the front-end
-  SHALL log a console warning naming both file id sets.
+Each half of the 4th-slot pair SHALL be rendered independently
+according to the per-slot rules below, using its own role key
+(`"RING"` for the left half, `"LID"` for the right). Neither half's
+rendering SHALL depend on the file count of the opposite half — both
+halves MAY be enabled placeholders, both MAY hold ≥1 DXF, or any
+mixed combination. The `.disabled` modifier SHALL NOT be applied to
+either half on the basis of files held under the opposite role.
 
 For slots 1–3 (always `SBT`/`BD`/`POD`) and for each half of the
 4th-slot pair (each treated as its own single-role slot keyed by
@@ -636,10 +626,7 @@ list — see the `product-files` capability):
 
 - **Zero DXFs** in the role → render an unclickable
   `role-btn role-btn.empty` (dashed border, dimmed colour, `title`
-  attribute states the role is not uploaded). For the 4th-slot pair
-  specifically, when the opposite half holds ≥1 file the empty half
-  SHALL additionally carry the `.disabled` modifier (see "Per-product
-  4th-slot pair rendering" above).
+  attribute states the role is not uploaded).
 - **Exactly one DXF**, and that DXF IS the currently-loaded viewer
   file → render a `role-btn.current` (cyan accent, non-link, no
   cursor) — the engineer is already there.
@@ -677,8 +664,8 @@ the toolbar always renders four conceptual columns in a stable
 order — empty roles included — acting as an upload-progress
 checklist for the engineer. The 4th position SHALL always render
 both halves (RING on the left, LID on the right); only their
-enabled/disabled/populated states vary per product. Positions 1–3
-are immutable single-role slots.
+enabled/populated states vary per product. Positions 1–3 are
+immutable single-role slots.
 
 #### Scenario: Single-DXF role still renders as a one-click button
 - **WHEN** the current file's product has exactly one DXF under role `POD`
@@ -731,23 +718,29 @@ are immutable single-role slots.
 - **AND** both halves carry `role-btn.empty` (dashed border) and are enabled (click / drop targets active)
 - **AND** neither half carries `.disabled`
 
-#### Scenario: LID half is disabled when product already holds a RING file
+#### Scenario: LID half stays an enabled placeholder when product already holds a RING file
 - **WHEN** the product has one DXF under `RING` and zero under `LID`
 - **THEN** the left (RING) half renders by the single-DXF rules (button or `.current` per current-file membership)
-- **AND** the right (LID) half renders as `role-btn.empty.disabled` with `cursor: not-allowed`
-- **AND** the disabled half's `title` attribute names at least one RING file id that locked the configuration
-- **AND** clicking or dropping onto the disabled half SHALL be a no-op
+- **AND** the right (LID) half renders as `role-btn.empty` (dashed border) — enabled, no `.disabled` modifier
+- **AND** clicking or dropping onto the LID half MAY initiate a LID upload via the dashboard's empty-slot flow
 
-#### Scenario: RING half is disabled when product already holds a LID file
+#### Scenario: RING half stays an enabled placeholder when product already holds a LID file
 - **WHEN** the product has one DXF under `LID` and zero under `RING`
 - **THEN** the right (LID) half renders by the single-DXF rules
-- **AND** the left (RING) half renders as `role-btn.empty.disabled` and is non-interactive
-- **AND** the disabled half's `title` attribute names at least one LID file id that locked the configuration
+- **AND** the left (RING) half renders as `role-btn.empty` (dashed border) — enabled, no `.disabled` modifier
+- **AND** clicking or dropping onto the RING half MAY initiate a RING upload
 
-#### Scenario: Current-file highlighting works on the LID half
+#### Scenario: Both halves populated render independently
+- **WHEN** the product has one DXF under `RING` and one DXF under `LID`
+- **THEN** the left (RING) half renders by the single-DXF rules for the RING file
+- **AND** the right (LID) half renders by the single-DXF rules for the LID file
+- **AND** neither half carries `.disabled`
+- **AND** the front-end SHALL NOT emit a console warning about the both-present state
+
+#### Scenario: Current-file highlighting works on the LID half independently of RING
 - **WHEN** the currently-loaded viewer file has `dxf_role = "LID"` and is the product's only LID file
 - **THEN** the right (LID) half renders as `role-btn.current` (cyan accent, non-link)
-- **AND** the left (RING) half is `role-btn.empty.disabled`
+- **AND** the left (RING) half renders according to its own file count (empty placeholder if zero, navigable link if one non-current, dropdown if multi)
 
 ### Requirement: Dashboard slot per-file action bar
 

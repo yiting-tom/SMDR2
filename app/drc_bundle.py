@@ -80,16 +80,6 @@ def build_manifest(
     Pure: no disk I/O. ``files`` MUST already be filtered to
     role-attached records (``dxf_role is not None``).
     """
-    # RING and LID are mutually exclusive per product; the upload
-    # handler enforces this at write time. Fail loudly here if upstream
-    # data ever drifts so we never ship a bundle that violates the
-    # external rule-checking team's contract.
-    roles = {f.dxf_role for f in files}
-    if "RING" in roles and "LID" in roles:
-        raise ValueError(
-            f"product {product.id!r} has both RING and LID files; "
-            "these are mutually exclusive — refusing to build manifest"
-        )
     # Customer = the library the product is bound to. Resolve via the
     # registry's store rather than the cached Library object so we
     # don't pay for the templates load on the export path.

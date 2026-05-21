@@ -1,10 +1,10 @@
 """Design Rule Checking (DRC) — mock for now.
 
 DRC is product-scoped: it receives every uploaded DXF in the product
-keyed by role (SBT, BD, POD, and one of RING / LID — the latter two
-are mutually exclusive per product) and returns RuleChecking JSON
-whose *sub-rules* each describe a from→to relationship on a specific
-DXF that the viewer can highlight + draw an annotation line for.
+keyed by role (SBT, BD, POD, RING, LID — all five are independent
+and may be populated together) and returns RuleChecking JSON whose
+*sub-rules* each describe a from→to relationship on a specific DXF
+that the viewer can highlight + draw an annotation line for.
 
 RuleChecking JSON format:
     {

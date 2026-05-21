@@ -457,18 +457,18 @@ def test_set_strategy_unknown_library_or_class_404s():
 
 
 # ---------------------------------------------------------------------------
-# RING / LID per-product mutual exclusion
+# RING and LID coexist on the same product
 # ---------------------------------------------------------------------------
 
 
-def test_upload_lid_to_product_with_ring_returns_409():
-    """RING and LID are mutually exclusive per product. The second
-    upload to the opposite slot SHALL fail with 409 and the conflicting
-    file id surfaced in the body so the dashboard can explain why."""
+def test_upload_lid_to_product_with_ring_succeeds():
+    """RING and LID are independent roles. Uploading LID after RING
+    SHALL succeed and both files SHALL be visible under
+    `files_by_role_all`."""
     from fastapi.testclient import TestClient
     from app.main import app
     with TestClient(app) as client:
-        pid = _new_product(client, "ring-then-lid-rejected")
+        pid = _new_product(client, "ring-then-lid-coexist")
 
         r1 = client.post(
             f"/api/products/{pid}/files",
@@ -483,18 +483,20 @@ def test_upload_lid_to_product_with_ring_returns_409():
             files={"file": ("lid.dxf", _STUB_DXF + b"b", "application/dxf")},
             data={"dxf_role": "LID"},
         )
-        assert r2.status_code == 409, r2.text
-        detail = r2.json().get("detail", "")
-        assert ring_id in detail
-        assert "RING" in detail
+        assert r2.status_code == 200, r2.text
+        lid_id = r2.json()["file_id"]
+
+        g = client.get(f"/api/products/{pid}").json()
+        assert [f["id"] for f in g["files_by_role_all"]["RING"]] == [ring_id]
+        assert [f["id"] for f in g["files_by_role_all"]["LID"]]  == [lid_id]
 
 
-def test_upload_ring_to_product_with_lid_returns_409():
-    """Symmetric to the above: LID first, then RING is rejected."""
+def test_upload_ring_to_product_with_lid_succeeds():
+    """Symmetric to the above: LID first, then RING also succeeds."""
     from fastapi.testclient import TestClient
     from app.main import app
     with TestClient(app) as client:
-        pid = _new_product(client, "lid-then-ring-rejected")
+        pid = _new_product(client, "lid-then-ring-coexist")
 
         r1 = client.post(
             f"/api/products/{pid}/files",
@@ -509,10 +511,12 @@ def test_upload_ring_to_product_with_lid_returns_409():
             files={"file": ("ring.dxf", _STUB_DXF + b"b", "application/dxf")},
             data={"dxf_role": "RING"},
         )
-        assert r2.status_code == 409, r2.text
-        detail = r2.json().get("detail", "")
-        assert lid_id in detail
-        assert "LID" in detail
+        assert r2.status_code == 200, r2.text
+        ring_id = r2.json()["file_id"]
+
+        g = client.get(f"/api/products/{pid}").json()
+        assert [f["id"] for f in g["files_by_role_all"]["LID"]]  == [lid_id]
+        assert [f["id"] for f in g["files_by_role_all"]["RING"]] == [ring_id]
 
 
 def test_upload_lid_to_empty_product_succeeds():

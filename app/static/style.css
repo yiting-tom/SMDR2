@@ -87,7 +87,9 @@ header #role-switcher .role-btn.empty {
   cursor: not-allowed;
 }
 header #role-switcher .role-btn.empty:hover { border-color: #2a3340; color: #4a5868; }
-/* RING/LID pair: opposite half when the other already holds a file. */
+/* Empty role-btn locked via `disabledReason` (e.g., future per-slot
+   constraints surfaced through the `renderRoleSlot` opts). Not
+   currently triggered by any caller but kept reachable. */
 header #role-switcher .role-btn.empty.disabled,
 header #role-switcher .role-btn.empty.disabled:hover {
   color: #2c3744;
@@ -791,8 +793,8 @@ body.dashboard main.dashboard-main {
   color: #00ffff;
   cursor: pointer;
 }
-/* RING/LID pair: the half opposite an already-uploaded file. Locked
-   to mirror the server-side RING-XOR-LID rule. */
+/* Empty slot locked via `disabledReason` on `slotCell` — reachable
+   API for future per-slot constraints. Not currently triggered. */
 .product-card .slot.empty.disabled,
 .product-card .slot.empty.disabled:hover {
   border-color: #1c2630;

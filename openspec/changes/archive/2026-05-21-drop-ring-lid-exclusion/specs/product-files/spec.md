@@ -1,11 +1,5 @@
-# product-files Specification
+## MODIFIED Requirements
 
-## Purpose
-Owns the product-scoped DXF file model: how many DXFs a (product, role)
-can hold, how they accumulate vs. replace, how per-file region rects
-combine, and how downstream rule-check merges matches across files in
-the same role.
-## Requirements
 ### Requirement: Multiple DXFs per (product, role)
 
 A `(product_id, dxf_role)` pair SHALL accept any number of DXFs
@@ -51,65 +45,7 @@ schema SHALL NOT enforce per-slot uniqueness via a unique index.
 - **AND** the file is bound to `(p1, LID)`
 - **AND** the RING file is unchanged
 
-### Requirement: Per-file region rects are independent
-
-Each DXF in a `(product, role)` SHALL mark its own `top_view_rect`,
-`bottom_view_rect`, and `side_view_rect` independently. Two sibling
-files MAY both have a non-null `top_view_rect` (or any other view);
-the server SHALL accept these writes without cross-file uniqueness
-checks. The rule-check merge consolidates the per-file `match_json`
-documents into one role-level bundle (see "Per-role rule-check
-merging"), so any view label may legitimately receive matches from
-multiple source files.
-
-#### Scenario: Both siblings mark top_view_rect successfully
-- **WHEN** product `p1` has DXFs `A` and `B` under role `SBT`
-- **AND** the client PATCHes `A/side-regions` with a non-null `top_view_rect`
-- **AND** the client PATCHes `B/side-regions` with a different non-null `top_view_rect`
-- **THEN** both PATCH requests return HTTP 200
-- **AND** both files' `top_view_rect` values persist independently
-
-### Requirement: View resolution lookup (utility)
-
-The server SHALL expose a utility module `app.product_views` with a
-function `resolve_views(rows)` that, given a list of `FileRecord`s for
-a `(product, role)`, returns a mapping `{view: ViewSource}` where
-`view ∈ {top, bottom, side}`. The function SHALL raise
-`ViewCoverageConflict` if a view is claimed by more than one file.
-This module is provided for callers that need a single-source-per-view
-view of a role; it is NOT used to validate writes on the upload or
-side-regions paths.
-
-#### Scenario: Single-source-per-view roles resolve cleanly
-- **WHEN** product `p1` has one SBT DXF with `top_view_rect` and
-  `bottom_view_rect` set, and another SBT DXF with `side_view_rect` set
-- **AND** the caller invokes `resolve_views(rows)` for those rows
-- **THEN** the returned mapping contains `top`, `bottom`, and `side`
-  each pointing at exactly one file
-
-### Requirement: Per-role rule-check merging
-
-`POST /api/products/{product_id}/rule-check` SHALL accept any number
-of DXFs per role and SHALL build the rule checker's per-role bundle
-by merging across files: union the per-file `match_json` dicts and
-the per-file `entity_shapes`. When a role has 2+ files, handles in
-both maps SHALL be namespaced as `<short_file_id>:<handle>` (first 8
-characters of the file id) to keep them unique across the merge.
-When a role has exactly one file, handles SHALL remain bare so the
-viewer's highlight path keeps working without changes.
-
-#### Scenario: Single-file role produces bare handles
-- **WHEN** role `SBT` has one DXF whose `match_json` contains handle
-  `"A3F"`
-- **THEN** the merged `dxfs_by_role['SBT']['match_json']` contains
-  `"A3F"` verbatim
-- **AND** the merged `entity_shapes` keys it under `"A3F"`
-
-#### Scenario: Multi-file role namespaces handles per source file
-- **WHEN** role `SBT` has DXFs `A` (id `abcdef01...`) and `B`
-  (id `12345678...`) each contributing a handle `"7"`
-- **THEN** the merged `match_json` and `entity_shapes` carry both as
-  `"abcdef01:7"` and `"12345678:7"`
+## ADDED Requirements
 
 ### Requirement: RING and LID are independent roles
 
@@ -160,3 +96,20 @@ are uploaded under them.
 - **AND** the job completes with HTTP 200 and writes
   `rule_check.json`
 
+## REMOVED Requirements
+
+### Requirement: RING / LID per-product mutual exclusion
+**Reason**: Real packages routinely involve both a RING and a LID, so a
+single product card needs to represent both halves. The XOR was a
+policy guardrail from when downstream rule-check / DRC bundle could
+not reason about both roles at once; that constraint no longer
+applies. Downstream contracts (`manifest.files` is role-flat;
+`dxfs_by_role` is role-keyed) already support both roles coexisting.
+
+**Migration**: Existing products holding only one of RING / LID are
+unaffected — they simply gain the ability to accept the opposite-role
+upload going forward. Clients that previously surfaced the HTTP 409
+as a user-facing error MUST drop that branch; both halves of the 4th
+dashboard slot are now independently fillable. See the new
+"RING and LID are independent roles" Requirement for the replacement
+positive scenarios.

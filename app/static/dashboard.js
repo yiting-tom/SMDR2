@@ -5,10 +5,10 @@
 import { openLayerModal } from "./layer_modal.js";
 import { mountDevParamsModal } from "./dev_params.js";
 
-// SBT/BD/POD always render as single-role slots. The 4th grid cell is
-// a split pair: RING on the left, LID on the right (mutually exclusive
-// — uploading to one disables the other; see the `viewer-ui` /
-// `product-files` specs for the full rule).
+// SBT/BD/POD always render as single-role slots. The 4th grid cell
+// holds a split pair (RING on the left, LID on the right) — both
+// halves are independent slots and may be filled concurrently. See
+// the `viewer-ui` / `product-files` specs.
 const SINGLE_ROLES = ["SBT", "BD", "POD"];
 
 const $list = document.getElementById("product-list");
@@ -521,25 +521,13 @@ function slotCell(product, role, opts = {}) {
 }
 
 // The 4th grid cell is one container holding two adjacent `slotCell`
-// halves — RING on the left, LID on the right. When one half holds
-// ≥1 file, the other half renders as `slot.empty.disabled` (no
-// click, no drag/drop, `title` names a conflicting file id) so the
-// RING-XOR-LID server-side rule is mirrored in the UI.
+// halves — RING on the left, LID on the right — each rendered as an
+// independent single-role slot. Both halves may be filled.
 function ringLidPairCell(product) {
-  const ring = (product.files_by_role_all && product.files_by_role_all["RING"]) || [];
-  const lid  = (product.files_by_role_all && product.files_by_role_all["LID"])  || [];
   const cell = document.createElement("div");
   cell.className = "slot-pair";
-
-  const ringDisabled = ring.length === 0 && lid.length > 0
-    ? `LID file ${lid[0].id} already locked this product into a LID configuration. Remove it to upload a RING.`
-    : null;
-  const lidDisabled  = lid.length === 0 && ring.length > 0
-    ? `RING file ${ring[0].id} already locked this product into a RING configuration. Remove it to upload a LID.`
-    : null;
-
-  cell.appendChild(slotCell(product, "RING", { disabledReason: ringDisabled }));
-  cell.appendChild(slotCell(product, "LID",  { disabledReason: lidDisabled }));
+  cell.appendChild(slotCell(product, "RING"));
+  cell.appendChild(slotCell(product, "LID"));
   return cell;
 }
 

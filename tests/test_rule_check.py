@@ -155,6 +155,30 @@ def test_rule2_cross_dxf_count_mismatch_still_emits_subrules():
     assert parts == ["POD", "SBT"]
 
 
+def test_check_rules_accepts_both_ring_and_lid_in_bundle():
+    """RING and LID are independent roles and may both be populated in
+    `dxfs_by_role`. `check_rules` SHALL accept the five-role bundle
+    without error; current rules (Rule1/Rule2/Rule3) only consume
+    SBT/BD/POD by name, so RING and LID pass through untouched."""
+    bd  = _bundle({"substrate.0": [["S1"]], "smd_2t.0": [["A"]]},
+                  {"S1": _shape("S1", 0, 0), "A": _shape("A", 100, 0)})
+    sbt = _bundle({"bga_ball.0": [["a"]]}, {})
+    pod = _bundle({"bga_ball.0": [["x"]]}, {})
+    ring = _bundle({}, {})
+    lid  = _bundle({}, {})
+
+    r = check_rules("p", {
+        "SBT": sbt,
+        "BD":  bd,
+        "POD": pod,
+        "RING": ring,
+        "LID":  lid,
+    })
+    _check_envelope(r)
+    assert r["Rule1"]["pass"] is True
+    assert r["Rule2"]["pass"] is True
+
+
 # ---- Rule3: per-SMD-to-substrate proximity (mock) -----------------------
 def test_rule3_passes_when_every_smd_is_close():
     """SMD at (1, 0)–(2, 1) and substrate at (0, 0)–(10, 10): shortest

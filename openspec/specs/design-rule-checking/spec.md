@@ -221,7 +221,7 @@ Every `file_entry` SHALL carry exactly these four keys:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `role` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` | Functional role this DXF plays. The same role MAY appear in multiple entries — that is the multi-DXF case. A single product SHALL NOT contain entries with both `"RING"` and `"LID"` (mutual exclusion enforced at upload). |
+| `role` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` | Functional role this DXF plays. The same role MAY appear in multiple entries — that is the multi-DXF case. All five roles are independent; a single product MAY carry entries under any subset of them, including both `"RING"` and `"LID"` simultaneously. |
 | `file_id` | lowercase-hex string | SMDR2's content-hash-derived file identifier. The first 8 hex chars are the canonical short form used internally. |
 | `dxf` | bundle-relative POSIX path | The DXF file. MUST resolve to a regular file inside the bundle. |
 | `match_json` | bundle-relative POSIX path | The Match JSON for this DXF. Keys are `<class>.<index>` or `<view>.<class>.<index>` (see "RuleChecking JSON output shape" requirement above for `<view>` values). |
@@ -259,6 +259,12 @@ rather than emit a manifest with a missing or guessed customer.
 - **AND** exactly one entry carries `role: "LID"`
 - **AND** no entry carries `role: "RING"`
 
+#### Scenario: Product carries both RING and LID
+- **WHEN** a product has one DXF under `SBT`, `BD`, `POD`, `RING`, and `LID`
+- **THEN** `manifest.files` has length 5
+- **AND** the manifest validates against `drc-manifest.schema.json`
+- **AND** the bundle export SHALL NOT raise on the RING+LID combination
+
 #### Scenario: Multi-DXF-per-role product
 - **WHEN** a product has two DXFs under `BD` (e.g., top + bottom siblings) and one each under `SBT`, `POD`, `RING`
 - **THEN** `manifest.files` has length 5
@@ -269,11 +275,6 @@ rather than emit a manifest with a missing or guessed customer.
 - **WHEN** a consumer reads any Match JSON referenced from a `file_entry`
 - **THEN** every handle in every match group SHALL be a raw DXF handle
 - **AND** no handle SHALL begin with `^[0-9a-f]{8}:` (the internal merge prefix)
-
-#### Scenario: Manifest never mixes RING and LID for one product
-- **WHEN** a product's bundle is exported
-- **THEN** `manifest.files` SHALL NOT contain both an entry with `role: "RING"` and an entry with `role: "LID"`
-- **AND** the bundle export step SHALL fail loudly if upstream data violates this invariant
 
 #### Scenario: Major version mismatch is refused
 - **WHEN** a consumer reads a manifest whose `bundle_version` major component does not match a major version it implements

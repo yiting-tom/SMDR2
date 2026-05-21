@@ -327,10 +327,10 @@ def test_build_bundle_lid_configuration_validates(seeded_product, manifest_schem
     assert "RING" not in roles
 
 
-def test_build_bundle_refuses_mixed_ring_and_lid(seeded_product):
-    """If upstream data ever drifts so a product contains both RING
-    and LID files, `build_manifest` MUST fail loudly — the external
-    rule-checking team's contract forbids the combination."""
+def test_build_bundle_includes_both_ring_and_lid(seeded_product, manifest_schema):
+    """RING and LID are independent roles: a product holding files
+    under both SHALL produce a manifest whose `files` list carries
+    one entry per role."""
     from app.drc_bundle import build_bundle
     from app.files import FILE_STORE
 
@@ -339,8 +339,13 @@ def test_build_bundle_refuses_mixed_ring_and_lid(seeded_product):
     seed("LID")
 
     files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
-    with pytest.raises(ValueError, match="RING and LID"):
-        build_bundle(product, files_list)
+    zip_bytes, _ = build_bundle(product, files_list)
+    manifest = _read_manifest(zip_bytes)
+    jsonschema.validate(manifest, manifest_schema)
+
+    roles = {e["role"] for e in manifest["files"]}
+    assert "RING" in roles
+    assert "LID" in roles
 
 
 # ---- 3.7 customer fields ------------------------------------------------

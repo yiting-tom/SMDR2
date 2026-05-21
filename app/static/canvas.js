@@ -157,8 +157,8 @@ function renderRoleSwitcher(product, file) {
   for (const role of ["SBT", "BD", "POD"]) {
     $roleSwitcher.appendChild(renderRoleSlot(product, file, role));
   }
-  // 4th position: split RING | LID pair (mutually exclusive per
-  // product; the half opposite an uploaded file is disabled).
+  // 4th position: split RING | LID pair — both halves render
+  // independently and may both be populated.
   $roleSwitcher.appendChild(renderRingLidPair(product, file));
 }
 
@@ -196,30 +196,13 @@ function renderRoleSlot(product, file, role, opts = {}) {
   return buildRoleDropdown(role, siblings, isCurrentRole, file.id);
 }
 
-// 4th position: render RING and LID side-by-side. The half opposite an
-// already-uploaded file is disabled (no link, dimmed style, `title`
-// names a conflicting file id).
+// 4th position: render RING and LID side-by-side. Each half is an
+// independent role slot — both may be populated concurrently.
 function renderRingLidPair(product, file) {
-  const ring = product.files_by_role_all?.["RING"] ?? [];
-  const lid  = product.files_by_role_all?.["LID"]  ?? [];
-  if (ring.length > 0 && lid.length > 0) {
-    console.warn(
-      "Product has both RING and LID files (server upload-handler should reject this):",
-      { product_id: product.id, ring: ring.map(f => f.id), lid: lid.map(f => f.id) },
-    );
-  }
   const wrap = document.createElement("span");
   wrap.className = "role-btn-pair";
-
-  const ringDisabled = ring.length === 0 && lid.length > 0
-    ? `Locked by LID file ${lid[0].id}. Remove it to upload a RING.`
-    : null;
-  const lidDisabled  = lid.length === 0 && ring.length > 0
-    ? `Locked by RING file ${ring[0].id}. Remove it to upload a LID.`
-    : null;
-
-  wrap.appendChild(renderRoleSlot(product, file, "RING", { disabledReason: ringDisabled }));
-  wrap.appendChild(renderRoleSlot(product, file, "LID",  { disabledReason: lidDisabled }));
+  wrap.appendChild(renderRoleSlot(product, file, "RING"));
+  wrap.appendChild(renderRoleSlot(product, file, "LID"));
   return wrap;
 }
 

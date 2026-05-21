@@ -400,35 +400,11 @@ async def upload_product_file(
     if not file.filename or not file.filename.lower().endswith(".dxf"):
         raise HTTPException(status_code=400, detail="expected a .dxf file")
 
-    # RING / LID per-product mutual exclusion: a product is either a
-    # RING configuration or a LID configuration, never both. The first
-    # upload to either slot fixes the choice; opposite-role uploads
-    # afterwards are rejected with 409 so the dashboard's disabled-half
-    # placeholder matches the server-side truth.
-    if dxf_role in ("RING", "LID"):
-        opposite = "LID" if dxf_role == "RING" else "RING"
-        siblings = [
-            f for f in FILE_STORE.list_by_product(product_id)
-            if f.dxf_role == opposite
-        ]
-        if siblings:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"product already has {opposite} file(s) "
-                    f"({siblings[0].id}); RING and LID are mutually exclusive"
-                ),
-            )
-
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty upload")
 
     # Optional targeted eviction of a specific file in this product+role.
-    # The same-role check below also implicitly forbids using
-    # replace_file_id to cross from RING to LID (or vice versa) — the
-    # request would be rejected because the evictee's dxf_role would
-    # not match.
     if replace_file_id:
         evictee = FILE_STORE.get(replace_file_id)
         if (
