@@ -28,6 +28,38 @@ let libraries = [];
 let products = [];
 let pollTimer = null;
 let pendingSlot = null;   // when user clicks a slot or picks file: { productId, role }
+// product_id -> { jobId, name } for in-flight rule-check jobs. Used to
+// disable the button and to re-enable it on done/error from the
+// existing dashboard tick. Hydrated on every refresh from each
+// product's `latest_rule_check_job` so a user who navigates away
+// during a run still sees the result on return.
+const ruleCheckJobs = new Map();
+
+// Persists which finished rule-check job_ids the user has already been
+// notified about, so navigating back to the dashboard doesn't re-pop
+// the same modal forever. Survives full page reloads via localStorage.
+const SEEN_RC_JOBS_KEY = "smdr2.dashboard.seenRuleCheckJobs";
+function _loadSeenRuleCheckJobs() {
+  try {
+    const raw = localStorage.getItem(SEEN_RC_JOBS_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+function _saveSeenRuleCheckJobs(set) {
+  // Cap the set so a long-running dashboard doesn't accumulate forever.
+  // 200 is enough for many sessions; we drop the oldest by re-creating
+  // from the last N inserted entries.
+  const arr = [...set];
+  const trimmed = arr.length > 200 ? arr.slice(arr.length - 200) : arr;
+  try { localStorage.setItem(SEEN_RC_JOBS_KEY, JSON.stringify(trimmed)); } catch {}
+}
+let seenRuleCheckJobs = _loadSeenRuleCheckJobs();
+function _markRuleCheckJobSeen(jobId) {
+  seenRuleCheckJobs.add(jobId);
+  _saveSeenRuleCheckJobs(seenRuleCheckJobs);
+}
 
 // ---- developer mode -----------------------------------------------------
 // Persistent toggle (localStorage) that reveals dev-only download
@@ -145,7 +177,74 @@ async function refresh() {
   if (!res.ok) return;
   const data = await res.json();
   products = data.products;
+  await _syncRuleCheckJobsFromProducts();
   renderProducts();
+}
+
+// For each product, reconcile the in-memory `ruleCheckJobs` Map (and
+// "seen" set) against the server-reported `latest_rule_check_job`.
+// This is what lets the dashboard pick up a job kicked off in a prior
+// browser session: while we were on the viewer, the worker finished
+// and persisted `rule_check.json`; on return, we surface the result
+// (and auto-open the modal once) instead of leaving the user staring
+// at a stale "Re-run Rule Check" button.
+async function _syncRuleCheckJobsFromProducts() {
+  if (!products.length) return;
+  const completedThisSync = [];  // [{product, summary}]
+  for (const p of products) {
+    const lj = p.latest_rule_check_job;
+    if (!lj || !lj.job_id) continue;
+
+    if (lj.status === "queued" || lj.status === "running") {
+      // Server still has a live job for this product — make sure we're
+      // tracking it so the next tick polls and the button shows
+      // "Running…". No-op if we already started it from this tab.
+      if (!ruleCheckJobs.has(p.id)) {
+        ruleCheckJobs.set(p.id, { jobId: lj.job_id, name: p.name });
+        startPollingIfBusy();
+      }
+      continue;
+    }
+
+    if (lj.status === "done") {
+      // Cleanup any stale tracking entry for this product (e.g. the
+      // job we kicked off has just finished server-side).
+      if (ruleCheckJobs.has(p.id)) ruleCheckJobs.delete(p.id);
+      if (!seenRuleCheckJobs.has(lj.job_id)) {
+        _markRuleCheckJobSeen(lj.job_id);
+        completedThisSync.push({ product: p, summary: lj.result || {} });
+      }
+      continue;
+    }
+
+    if (lj.status === "error") {
+      if (ruleCheckJobs.has(p.id)) ruleCheckJobs.delete(p.id);
+      if (!seenRuleCheckJobs.has(lj.job_id)) {
+        _markRuleCheckJobSeen(lj.job_id);
+        $status.textContent =
+          `Rule check on "${p.name}" failed: ${lj.error || "(no detail)"}`;
+      }
+      continue;
+    }
+  }
+
+  // For any completed-while-away jobs, fetch the persisted result and
+  // pop the modal once. Sequential to keep the modal stack sane.
+  for (const { product, summary } of completedThisSync) {
+    try {
+      const r = await fetch(`/api/products/${product.id}/rule-check`);
+      if (!r.ok) continue;
+      const data = await r.json();
+      data.roles_covered = summary.roles_covered || [];
+      $status.textContent =
+        `Rule check on "${product.name}": ` +
+        `${data.pass_count}/${data.rule_count} pass ` +
+        `(roles: ${data.roles_covered.join(", ")})`;
+      showRuleResults(product, data);
+    } catch (e) {
+      console.error("failed to load persisted rule check", e);
+    }
+  }
 }
 
 // ---- customer fold state -------------------------------------------------
@@ -292,15 +391,22 @@ function productCard(p) {
   const rcBtn = document.createElement("button");
   rcBtn.type = "button";
   rcBtn.className = "rule-check-btn";
-  rcBtn.disabled = !p.ready_for_rule_check;
-  rcBtn.textContent = p.rule_check_available && p.ready_for_rule_check
-    ? "Re-run Rule Check"
-    : "Rule Check";
+  const jobInFlight = ruleCheckJobs.has(p.id);
+  rcBtn.disabled = !p.ready_for_rule_check || jobInFlight;
+  if (jobInFlight) {
+    rcBtn.textContent = "Running…";
+  } else {
+    rcBtn.textContent = p.rule_check_available && p.ready_for_rule_check
+      ? "Re-run Rule Check"
+      : "Rule Check";
+  }
   if (!p.ready_for_rule_check) {
     const remaining = prog.total === 0
       ? "upload at least one DXF first"
       : `${prog.total - prog.saved} file(s) still need Save Match`;
     rcBtn.title = remaining;
+  } else if (jobInFlight) {
+    rcBtn.title = "Rule check is running — see status bar.";
   }
   rcBtn.addEventListener("click", () => runRuleCheck(p));
   footer.appendChild(rcBtn);
@@ -631,20 +737,79 @@ async function deleteProduct(p) {
 }
 
 async function runRuleCheck(p) {
-  $status.textContent = `running rule check on "${p.name}"…`;
+  if (ruleCheckJobs.has(p.id)) return;  // already in flight; button should be disabled
+  $status.textContent = `submitting rule check on "${p.name}"…`;
   const res = await fetch(`/api/products/${p.id}/rule-check`, { method: "POST" });
   if (!res.ok) {
     const err = await res.text();
-    $status.textContent = `rule-check failed: ${res.status}`;
+    $status.textContent = `rule-check submit failed: ${res.status}`;
     console.error(err);
     return;
   }
-  const data = await res.json();
+  const { job_id: jobId } = await res.json();
+  ruleCheckJobs.set(p.id, { jobId, name: p.name });
   $status.textContent =
-    `Rule check on "${p.name}": ${data.pass_count}/${data.rule_count} pass ` +
-    `(roles: ${data.roles_covered.join(", ")})`;
-  await refresh();
-  showRuleResults(p, data);
+    `Rule check on "${p.name}" running (job ${jobId.slice(0, 8)}…)`;
+  renderProducts();      // reflect "Running…" on the button immediately
+  startPollingIfBusy();  // tick handler watches `ruleCheckJobs` too
+}
+
+// Poll a single rule-check job; called from the dashboard tick. Returns
+// `true` while the job is still in flight so the tick keeps running.
+async function _stepRuleCheckJob(productId) {
+  const entry = ruleCheckJobs.get(productId);
+  if (!entry) return false;
+  let job;
+  try {
+    const r = await fetch(`/api/jobs/${entry.jobId}`);
+    if (!r.ok) {
+      $status.textContent = `rule-check job lost: ${r.status}`;
+      ruleCheckJobs.delete(productId);
+      return false;
+    }
+    job = await r.json();
+  } catch (e) {
+    $status.textContent = `rule-check poll error: ${e}`;
+    return true;  // transient — try again next tick
+  }
+  if (job.status === "done") {
+    ruleCheckJobs.delete(productId);
+    _markRuleCheckJobSeen(entry.jobId);
+    const summary = job.result || {};
+    $status.textContent =
+      `Rule check on "${entry.name}": ` +
+      `${summary.pass_count}/${summary.rule_count} pass ` +
+      `(roles: ${(summary.roles_covered || []).join(", ")})`;
+    // Refresh products (so rule_check_available flips) and fetch the
+    // persisted result for the modal.
+    await refresh();
+    const product = products.find(p => p.id === productId);
+    if (product) {
+      try {
+        const r = await fetch(`/api/products/${productId}/rule-check`);
+        if (r.ok) {
+          const data = await r.json();
+          // The persisted GET returns `results / rule_count / pass_count /
+          // fail_count` but not roles_covered; merge the job summary in
+          // so `showRuleResults` can render the roles line.
+          data.roles_covered = summary.roles_covered || [];
+          showRuleResults(product, data);
+        }
+      } catch (e) {
+        console.error("failed to load persisted rule check", e);
+      }
+    }
+    return false;
+  }
+  if (job.status === "error") {
+    ruleCheckJobs.delete(productId);
+    _markRuleCheckJobSeen(entry.jobId);
+    $status.textContent = `Rule check on "${entry.name}" failed: ${job.error || "(no detail)"}`;
+    renderProducts();
+    return false;
+  }
+  // queued or running
+  return true;
 }
 
 const $ruleResultsModal = document.getElementById("rule-results-modal");
@@ -750,18 +915,28 @@ function startPollingIfBusy() {
   if (pollTimer) return;
   const tick = async () => {
     await refresh();
-    const busy = products.some(p =>
+    // Step every active rule-check job. _stepRuleCheckJob() removes
+    // entries from `ruleCheckJobs` once they reach done/error.
+    const ruleJobProducts = Array.from(ruleCheckJobs.keys());
+    await Promise.all(ruleJobProducts.map(pid => _stepRuleCheckJob(pid)));
+
+    const fileBusy = products.some(p =>
       Object.values(p.files_by_role).some(f => f && (
         f.status === "preprocessing"
         || f.status === "discovering_layers"
         || f.status === "checking_rules"
       ))
     );
-    if (busy) {
+    const ruleBusy = ruleCheckJobs.size > 0;
+    if (fileBusy || ruleBusy) {
       pollTimer = setTimeout(tick, 1500);
     } else {
       pollTimer = null;
-      $status.textContent = "idle";
+      if ($status.textContent.startsWith("submitting") || $status.textContent.startsWith("Rule check on")) {
+        // Leave the last rule-check status line in place.
+      } else {
+        $status.textContent = "idle";
+      }
     }
   };
   pollTimer = setTimeout(tick, 1500);

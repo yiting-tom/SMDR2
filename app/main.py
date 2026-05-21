@@ -26,7 +26,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -59,7 +59,6 @@ from app.matching import (
 )
 from app.products import PRODUCT_STORE, VALID_ROLES, Product
 from app.drc_bundle import build_bundle
-from app.rule_check import check_rules
 from app.side_regions import normalise_rect, split_matches_by_side
 from app.storage import (
     DATA_DIR,
@@ -222,6 +221,21 @@ def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
     return by_role, by_role_all
 
 
+def _project_rule_check_job(job: dict | None) -> dict | None:
+    """Trim a `_jobs` entry to the fields the dashboard needs. Returns
+    `None` when no job is recorded so the frontend can branch cleanly."""
+    if job is None:
+        return None
+    return {
+        "job_id": job.get("id"),
+        "status": job.get("status"),
+        "submitted_at": job.get("submitted_at"),
+        "completed_at": job.get("completed_at"),
+        "error": job.get("error"),
+        "result": job.get("result"),
+    }
+
+
 @app.get("/api/products")
 async def list_products() -> dict:
     """Every product with its files (per role) and rule-check readiness."""
@@ -241,6 +255,9 @@ async def list_products() -> dict:
             },
             "ready_for_rule_check": ready_for_rc,
             "rule_check_available": rule_check_path(p.id).exists(),
+            "latest_rule_check_job": _project_rule_check_job(
+                jobs.latest_rule_check_job(p.id)
+            ),
         })
     return {"products": items}
 
@@ -263,6 +280,9 @@ async def get_product(product_id: str) -> dict:
         },
         "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
         "rule_check_available": rule_check_path(product_id).exists(),
+        "latest_rule_check_job": _project_rule_check_job(
+            jobs.latest_rule_check_job(product_id)
+        ),
     }
 
 
@@ -994,10 +1014,14 @@ async def get_match_json(file_id: str) -> dict:
 
 # ---- Rule checking (product-scoped, cross-DXF) --------------------------
 @app.post("/api/products/{product_id}/rule-check")
-async def run_product_rule_check(product_id: str) -> dict:
-    """Run DRC across every uploaded DXF in the product. Every file's
-    `match_saved` must be true; otherwise we 400 with a list of missing
-    roles."""
+async def run_product_rule_check(product_id: str) -> JSONResponse:
+    """Submit a product-scoped DRC job. Returns 202 + `{job_id}`; the
+    front-end polls `GET /api/jobs/{job_id}` for completion. Every
+    file's `match_saved` must be true; otherwise we 400 with a list of
+    missing roles. The actual work (read every role's match JSON, load
+    parsed shapes, merge with handle-namespacing, run `check_rules`,
+    write `rule_check.json`) runs in a worker process via
+    `app.jobs._rule_check_worker`."""
     product = PRODUCT_STORE.get(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -1011,29 +1035,21 @@ async def run_product_rule_check(product_id: str) -> dict:
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
 
-    # Build the per-role payload the rule checker consumes. A role may
-    # be served by multiple files (multi + split views); the merge below
-    # produces ONE `match_json` and ONE `entity_shapes` per role so the
-    # rule_check.py contract (one bundle per role) is preserved.
-    #
-    # Handle namespacing rule: when a role has only one contributing file
-    # (the common case, including every legacy product) handles stay bare —
-    # the viewer's highlight path matches handles literally against its
-    # primitive index and bare strings keep that working. When a role has
-    # 2+ files, handles are prefixed with `<short_file_id>:<handle>` so
-    # they stay unique across the merged set; the rule_check code treats
-    # handles as opaque strings, so this is invisible to rule logic.
+    # Group files by role and build the lightweight role_specs the
+    # worker consumes. Each spec carries file paths only — no JSON is
+    # read here, so the event loop never blocks on DRC I/O. The worker
+    # reproduces the handle-namespacing rule (`<short_file_id>:` prefix
+    # when a role has 2+ files) — see `app/jobs.py:_rule_check_worker`.
     files_by_role_recs: dict[str, list[FileRecord]] = {}
     for f in files:
         files_by_role_recs.setdefault(f.dxf_role, []).append(f)
 
-    dxfs_by_role: dict[str, dict] = {}
+    role_specs: list[dict] = []
     for role, role_files in files_by_role_recs.items():
-        merged_mj: dict[str, list[list[str]]] = {}
-        merged_shapes: dict = {}
         file_ids: list[str] = []
+        match_json_paths: list[str] = []
+        parsed_paths: list[str] = []
         dxf_paths: list[str] = []
-        namespaced = len(role_files) > 1
         for f in role_files:
             mp = match_path(f.id)
             if not mp.exists():
@@ -1041,42 +1057,30 @@ async def run_product_rule_check(product_id: str) -> dict:
                     status_code=400,
                     detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
                 )
-            with open(mp) as fp:
-                mj = json.load(fp)
-            _, shapes = _shapes_for(f.id)
-            short = f.id[:8]
-            prefix = f"{short}:" if namespaced else ""
-            for h, shape in shapes.items():
-                merged_shapes[prefix + h] = shape
-            for key, groups in mj.items():
-                ns_groups = [[prefix + h for h in g] for g in groups]
-                merged_mj.setdefault(key, []).extend(ns_groups)
+            pp = parsed_path(f.id)
+            if not pp.exists():
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"{f.dxf_role}: parsed file missing at {pp.name}",
+                )
             file_ids.append(f.id)
+            match_json_paths.append(str(mp))
+            parsed_paths.append(str(pp))
             dxf_paths.append(str(upload_path(f.id)))
-        dxfs_by_role[role] = {
-            "file_id": file_ids[0],
-            "dxf_path": dxf_paths[0],
+        role_specs.append({
+            "role": role,
             "file_ids": file_ids,
+            "match_json_paths": match_json_paths,
+            "parsed_paths": parsed_paths,
             "dxf_paths": dxf_paths,
-            "match_json": merged_mj,
-            "entity_shapes": merged_shapes,
-        }
+            "namespaced": len(role_files) > 1,
+        })
 
-    result = check_rules(product_id, dxfs_by_role)
-    dst = rule_check_path(product_id)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "w") as fp:
-        json.dump(result, fp, indent=2)
-    n_pass = sum(1 for v in result.values() if v.get("pass"))
-    return {
-        "product_id": product_id,
-        "results": result,
-        "rule_count": len(result),
-        "pass_count": n_pass,
-        "fail_count": len(result) - n_pass,
-        "saved_to": str(dst.relative_to(DATA_DIR.parent)),
-        "roles_covered": sorted(dxfs_by_role.keys()),
-    }
+    job_id = jobs.submit_rule_check(product_id, role_specs)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "product_id": product_id},
+    )
 
 
 @app.get("/api/products/{product_id}/rule-check")

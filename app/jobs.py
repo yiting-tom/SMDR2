@@ -26,12 +26,14 @@ from threading import RLock
 from typing import Any
 
 from app.storage import (
+    DATA_DIR,
     layer_manifest_path,
     layer_preview_dir,
     layer_preview_primitives_path,
     layer_preview_svg_path,
     parsed_path,
     prematch_path,
+    rule_check_path,
     upload_path,
 )
 
@@ -369,6 +371,140 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
     FILE_STORE.update_status(file_id, AWAITING_LAYERS)
 
 
+# ---- Rule-check worker ---------------------------------------------------
+def _rule_check_worker(
+    product_id: str,
+    role_specs: list[dict[str, Any]],
+    dst: str,
+    dev_overrides_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run product-scoped DRC in a worker process.
+
+    `role_specs` carries only filesystem paths (no loaded JSON), so the
+    parent process never blocks on match/parsed reads. The worker
+    reproduces the merge that used to live in the request handler:
+    when a role has 2+ contributing files, every handle gets prefixed
+    with `<short_file_id>:` so they stay unique across the merged
+    bundle.
+    """
+    from app.library import build_handle_index
+    from app.matching import build_entity_shapes
+    from app.rule_check import check_rules
+
+    if dev_overrides_snapshot:
+        from app.dev_overrides import apply_snapshot
+        apply_snapshot(dev_overrides_snapshot)
+
+    dxfs_by_role: dict[str, dict[str, Any]] = {}
+    for spec in role_specs:
+        role = spec["role"]
+        file_ids = list(spec["file_ids"])
+        match_json_paths = list(spec["match_json_paths"])
+        parsed_paths = list(spec["parsed_paths"])
+        dxf_paths = list(spec["dxf_paths"])
+        namespaced = bool(spec["namespaced"])
+
+        merged_mj: dict[str, list[list[str]]] = {}
+        merged_shapes: dict[str, Any] = {}
+        for fid, mj_path, parsed_path_str in zip(
+            file_ids, match_json_paths, parsed_paths, strict=True,
+        ):
+            with open(mj_path) as fp:
+                mj = json.load(fp)
+            with open(parsed_path_str) as fp:
+                parsed = json.load(fp)
+            handle_index = build_handle_index(parsed["primitives"])
+            shapes = build_entity_shapes(parsed["primitives"], handle_index)
+            prefix = f"{fid[:8]}:" if namespaced else ""
+            for h, shape in shapes.items():
+                merged_shapes[prefix + h] = shape
+            for key, groups in mj.items():
+                ns_groups = [[prefix + h for h in g] for g in groups]
+                merged_mj.setdefault(key, []).extend(ns_groups)
+
+        dxfs_by_role[role] = {
+            "file_id": file_ids[0],
+            "dxf_path": dxf_paths[0],
+            "file_ids": file_ids,
+            "dxf_paths": dxf_paths,
+            "match_json": merged_mj,
+            "entity_shapes": merged_shapes,
+        }
+
+    result = check_rules(product_id, dxfs_by_role)
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_path, "w") as fp:
+        json.dump(result, fp, indent=2)
+
+    n_pass = sum(1 for v in result.values() if v.get("pass"))
+    try:
+        saved_to = str(dst_path.relative_to(DATA_DIR.parent))
+    except ValueError:
+        saved_to = str(dst_path)
+    return {
+        "product_id": product_id,
+        "saved_to": saved_to,
+        "rule_count": len(result),
+        "pass_count": n_pass,
+        "fail_count": len(result) - n_pass,
+        "roles_covered": sorted(dxfs_by_role.keys()),
+    }
+
+
+def submit_rule_check(
+    product_id: str,
+    role_specs: list[dict[str, Any]],
+) -> str:
+    """Submit a product-scoped rule check to the worker pool. Returns
+    the job_id immediately; the request handler should return 202 +
+    {job_id} so the front-end can poll `GET /api/jobs/{job_id}`."""
+    job_id = str(uuid.uuid4())
+    with _lock:
+        _jobs[job_id] = {
+            "id": job_id,
+            "product_id": product_id,
+            "kind": "rule_check",
+            "status": "queued",
+            "submitted_at": time.time(),
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
+    fut = _get_executor().submit(
+        _rule_check_worker,
+        product_id,
+        role_specs,
+        str(rule_check_path(product_id)),
+        _current_dev_overrides() or None,
+    )
+    fut.add_done_callback(lambda f: _on_rule_check_done(job_id, f))
+    with _lock:
+        _jobs[job_id]["status"] = "running"
+        _jobs[job_id]["started_at"] = time.time()
+    return job_id
+
+
+def _on_rule_check_done(job_id: str, fut: Future) -> None:
+    with _lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return
+    try:
+        result = fut.result()
+    except Exception as e:
+        tb = traceback.format_exc()
+        with _lock:
+            job["status"] = "error"
+            job["error"] = f"{e}\n{tb}"
+            job["completed_at"] = time.time()
+        return
+    with _lock:
+        job["status"] = "done"
+        job["completed_at"] = time.time()
+        job["result"] = result
+
+
 # ---- Re-process-all (dev mode) -------------------------------------------
 # Spec: POST /api/dev/reprocess-all returns ONE job_id whose progress
 # (`total` / `done`) covers every file in storage. We fan out one
@@ -475,3 +611,20 @@ def get(job_id: str) -> dict | None:
 def list_jobs() -> list[dict]:
     with _lock:
         return [dict(j) for j in _jobs.values()]
+
+
+def latest_rule_check_job(product_id: str) -> dict | None:
+    """Latest rule-check job dict for a product, or None. Used by
+    `GET /api/products` so a fresh dashboard load can pick up a job
+    that was kicked off in a previous browser session and is either
+    still running or finished while the user was elsewhere."""
+    latest: dict | None = None
+    with _lock:
+        for j in _jobs.values():
+            if j.get("kind") != "rule_check":
+                continue
+            if j.get("product_id") != product_id:
+                continue
+            if latest is None or (j.get("submitted_at") or 0) > (latest.get("submitted_at") or 0):
+                latest = j
+        return dict(latest) if latest else None
