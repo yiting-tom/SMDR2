@@ -97,6 +97,23 @@ EXPECTED_DIAGONAL_LOW_MM = 10.0
 EXPECTED_DIAGONAL_HIGH_MM = 5000.0
 
 
+# Maps the operator-facing unit-override strings (persisted in
+# `files.user_unit_override`) to the multiplier that brings coordinates
+# in that unit into mm. When an override is set, `_maybe_rescale` skips
+# `detect_scale_factor` and uses this directly.
+UNIT_TO_SCALE: dict[str, float] = {
+    "mm": 1.0,
+    "cm": 10.0,
+    "m": 1000.0,
+    "inch": 25.4,
+    "μm": 0.001,
+}
+
+# Reverse map used by the viewer to pre-select the picker option for a
+# file whose `applied_scale` is one of the known unit multipliers.
+SCALE_TO_UNIT: dict[float, str] = {v: k for k, v in UNIT_TO_SCALE.items()}
+
+
 def detect_scale_factor(insunits: int | None, bbox_diagonal: float) -> float:
     """Decide what multiplier to apply so a file's coordinates land in mm.
 
@@ -190,27 +207,45 @@ def _scale_primitive_coords(prim: dict[str, Any], factor: float) -> None:
         ]
 
 
-def _maybe_rescale(render: RenderOutput) -> tuple[RenderOutput, float]:
-    """Apply `detect_scale_factor` and, when non-trivial, scale every
+def _maybe_rescale(
+    render: RenderOutput,
+    user_unit_override: str | None = None,
+) -> tuple[RenderOutput, float]:
+    """Apply a scale multiplier and, when non-trivial, scale every
     primitive coordinate and the bbox in place. Returns the (possibly
-    mutated) render and the applied factor."""
+    mutated) render and the applied factor.
+
+    When `user_unit_override` is a recognised unit string, the
+    detector is skipped entirely and the override's multiplier is
+    used. An unrecognised override string falls through to the
+    detector path (treated as no override) — the API layer rejects
+    bad inputs before they reach here, so this is a defensive
+    fallback only."""
     if render.bbox is None:
         return render, 1.0
     xmin, ymin, xmax, ymax = render.bbox
     dx = float(xmax) - float(xmin)
     dy = float(ymax) - float(ymin)
     diagonal = math.hypot(max(dx, 0.0), max(dy, 0.0))
-    factor = detect_scale_factor(render.insunits, diagonal)
+    if user_unit_override in UNIT_TO_SCALE:
+        factor = UNIT_TO_SCALE[user_unit_override]
+        logger.info(
+            "user-unit-override: unit=%s, pre-diagonal=%.3g, factor=%.6g (detector skipped)",
+            user_unit_override, diagonal, factor,
+        )
+    else:
+        factor = detect_scale_factor(render.insunits, diagonal)
     if factor == 1.0:
         return render, 1.0
     for prim in render.primitives:
         _scale_primitive_coords(prim, factor)
     render.bbox = (xmin * factor, ymin * factor, xmax * factor, ymax * factor)
     render.applied_scale = factor
-    logger.info(
-        "auto-rescale: insunits=%s, pre-diagonal=%.3g, factor=%.6g → post-diagonal=%.3g",
-        render.insunits, diagonal, factor, diagonal * factor,
-    )
+    if user_unit_override not in UNIT_TO_SCALE:
+        logger.info(
+            "auto-rescale: insunits=%s, pre-diagonal=%.3g, factor=%.6g → post-diagonal=%.3g",
+            render.insunits, diagonal, factor, diagonal * factor,
+        )
     return render, factor
 
 
@@ -458,8 +493,16 @@ class JSONBackend(BackendInterface):
         return (self._xmin, self._ymin, self._xmax, self._ymax)
 
 
-def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
-    """Parse a DXF file and return drawing primitives + bbox."""
+def flatten_for_render(
+    dxf_path: str | Path,
+    user_unit_override: str | None = None,
+) -> RenderOutput:
+    """Parse a DXF file and return drawing primitives + bbox.
+
+    When `user_unit_override` is set, the rescale step uses that
+    unit's multiplier and skips `detect_scale_factor`. Callers reach
+    this path when the operator has used the viewer's unit picker;
+    standard uploads pass `None` and fall through to the detector."""
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
     # HATCH is pure decorative noise in packaging DXFs (solder-mask fills,
@@ -486,7 +529,7 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
         flatten_tolerance=tol,
         insunits=_read_insunits(doc),
     )
-    render, _ = _maybe_rescale(render)
+    render, _ = _maybe_rescale(render, user_unit_override=user_unit_override)
     return render
 
 

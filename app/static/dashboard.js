@@ -569,13 +569,24 @@ function slotFileRow(product, role, f, compact) {
 // applied a non-1.0 factor) or the legacy "⚠ unit" warning badge — never
 // both. The pill wins because once we've fixed the units the warning is
 // no longer actionable; the title text still spells out what happened.
+// When the rescale came from the viewer's unit picker rather than the
+// auto-rescale detector, the pill text is suffixed with `(user override)`
+// so a reviewer sees that a human chose the unit.
 function appendUnitScaleAnnotation(parent, f) {
   if (!parent) return;
   if (f.applied_scale && f.applied_scale !== 1.0 && f.applied_scale_label) {
     const pill = document.createElement("span");
     pill.className = "rescaled-pill";
-    pill.textContent = `ℹ rescaled ${f.applied_scale_label}`;
-    pill.title = f.unit_scale_warning_detail || "";
+    const override = f.user_unit_override;
+    const suffix = override ? " (user override)" : "";
+    pill.textContent = `ℹ rescaled ${f.applied_scale_label}${suffix}`;
+    let title = f.unit_scale_warning_detail || "";
+    if (override) {
+      title = title
+        ? `${title}; user_unit_override=${override}`
+        : `user_unit_override=${override}`;
+    }
+    pill.title = title;
     parent.appendChild(pill);
     return;
   }

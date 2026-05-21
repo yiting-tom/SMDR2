@@ -69,9 +69,15 @@ def _preprocess_worker(
     selected_layers: list[str] | None = None,
     transient_primitives: str | None = None,
     dev_overrides_snapshot: dict[str, Any] | None = None,
+    user_unit_override: str | None = None,
 ) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly.
-    from app.dxf import filter_primitives, flatten_for_render
+    import math
+    from app.dxf import (
+        detect_scale_factor,
+        filter_primitives,
+        flatten_for_render,
+    )
     from app.library import Store, build_handle_index
     from app.matching import build_entity_shapes, find_matches_from_pointsets
     from app.storage import DB_PATH
@@ -85,13 +91,21 @@ def _preprocess_worker(
         apply_snapshot(dev_overrides_snapshot)
 
     # 1. Get primitives — reuse Phase 1's transient cache if present, else
-    #    re-parse the DXF.
+    #    re-parse the DXF. The transient cache from Phase 1 has no
+    #    knowledge of a unit override, so when one is set we re-parse
+    #    instead of trusting the cache (cheap — only the override path
+    #    hits this, and only on operator action).
     bbox: tuple[float, float, float, float] | None
     background: str
     primitives: list[dict[str, Any]]
     insunits: int | None
     applied_scale: float
-    if transient_primitives and Path(transient_primitives).exists():
+    use_cache = (
+        user_unit_override is None
+        and transient_primitives
+        and Path(transient_primitives).exists()
+    )
+    if use_cache:
         with open(transient_primitives) as f:
             cached = json.load(f)
         primitives = cached["primitives"]
@@ -100,7 +114,7 @@ def _preprocess_worker(
         insunits = cached.get("insunits")
         applied_scale = float(cached.get("applied_scale", 1.0))
     else:
-        out = flatten_for_render(src)
+        out = flatten_for_render(src, user_unit_override=user_unit_override)
         primitives = out.primitives
         bbox = out.bbox
         background = out.background
@@ -167,6 +181,22 @@ def _preprocess_worker(
         except FileNotFoundError:
             pass
 
+    # `detector_factor` is what the auto-rescale detector *would* have
+    # chosen for this file's `(insunits, pre-rescale diagonal)`. The
+    # done-callback compares it against `applied_scale` to decide
+    # whether to clear a redundant override (operator picked the same
+    # unit the detector would have). When no override is active and
+    # the worker reused the transient Phase 1 cache, we have no
+    # original-bbox copy to derive it from — `None` skips the
+    # comparison without affecting normal preprocess.
+    detector_factor: float | None = None
+    if not use_cache and bbox is not None and applied_scale > 0:
+        dx = float(bbox[2]) - float(bbox[0])
+        dy = float(bbox[3]) - float(bbox[1])
+        post_diag = math.hypot(max(dx, 0.0), max(dy, 0.0))
+        pre_diag = post_diag / applied_scale
+        detector_factor = detect_scale_factor(insunits, pre_diag)
+
     return {
         "file_id": file_id,
         "primitive_count": len(primitives),
@@ -174,6 +204,8 @@ def _preprocess_worker(
         "background": background,
         "insunits": insunits,
         "applied_scale": applied_scale,
+        "detector_factor": detector_factor,
+        "user_unit_override_requested": user_unit_override,
         "prematch_total": sum(len(v) for v in by_class.values()),
     }
 
@@ -193,7 +225,20 @@ def submit_preprocess(
     file_id: str,
     library_id: str = "default",
     selected_layers: list[str] | None = None,
+    user_unit_override: str | None = None,
 ) -> str:
+    """Submit a preprocess job. When `user_unit_override` is None,
+    the worker reads the file row's persisted override (set in a
+    prior viewer-picker action). Callers that came in via the
+    `/unit-override` endpoint pass the new unit explicitly so the
+    job picks it up even before the row write commits."""
+    # Worker runs in a separate process and can't trivially read the
+    # row, so resolve the active override here and pass it through.
+    if user_unit_override is None:
+        from app.files import FILE_STORE
+        rec = FILE_STORE.get(file_id)
+        if rec is not None:
+            user_unit_override = rec.user_unit_override
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
@@ -207,6 +252,7 @@ def submit_preprocess(
             "started_at": None,
             "completed_at": None,
             "error": None,
+            "user_unit_override_requested": user_unit_override,
         }
     transient = layer_preview_primitives_path(file_id)
     fut = _get_executor().submit(
@@ -219,12 +265,50 @@ def submit_preprocess(
         list(selected_layers) if selected_layers is not None else None,
         str(transient),
         _current_dev_overrides() or None,
+        user_unit_override,
     )
     fut.add_done_callback(lambda f: _on_preprocess_done(job_id, f))
     with _lock:
         _jobs[job_id]["status"] = "running"
         _jobs[job_id]["started_at"] = time.time()
     return job_id
+
+
+def find_inflight_preprocess_job(file_id: str) -> str | None:
+    """Return the id of any queued / running preprocess job for the
+    given file, or None. Used by the unit-override endpoint to return
+    `409 Conflict` instead of double-enqueueing."""
+    with _lock:
+        for job in _jobs.values():
+            if (
+                job.get("kind") == "preprocess"
+                and job.get("file_id") == file_id
+                and job.get("status") in ("queued", "running")
+            ):
+                return job["id"]
+    return None
+
+
+def submit_unit_override_preprocess(file_id: str, unit: str) -> str:
+    """Operator-driven recompute triggered by the viewer's unit picker.
+    Writes the override to the file row, flips status to PREPROCESSING,
+    and enqueues the standard preprocess pipeline carrying the new
+    unit so the worker uses it directly. The done-callback may clear
+    the override back to NULL if it agrees with the detector — see
+    `_on_preprocess_done`."""
+    from app.files import FILE_STORE, PREPROCESSING
+
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise KeyError(file_id)
+    FILE_STORE.set_user_unit_override(file_id, unit)
+    FILE_STORE.update_status(file_id, PREPROCESSING)
+    return submit_preprocess(
+        file_id,
+        library_id=rec.library_id,
+        selected_layers=rec.selected_layers,
+        user_unit_override=unit,
+    )
 
 
 # Backwards-compat alias — older code may still call submit_parse.
@@ -262,6 +346,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
     )
     if factor_changed:
         _invalidate_match_after_rescale(file_id)
+    _maybe_clear_redundant_unit_override(file_id, result)
 
 
 def _invalidate_match_after_rescale(file_id: str) -> None:
@@ -278,6 +363,28 @@ def _invalidate_match_after_rescale(file_id: str) -> None:
     except FileNotFoundError:
         pass
     FILE_STORE.set_match_saved(file_id, False)
+
+
+def _maybe_clear_redundant_unit_override(file_id: str, result: dict[str, Any]) -> None:
+    """If the operator's override matches what the detector would have
+    chosen anyway, persist `user_unit_override = NULL` so future
+    detector improvements continue to apply automatically.
+
+    Only runs when an override was actively in use for this job (the
+    worker echoes back the requested unit). Skips when `detector_factor`
+    is None (worker reused the Phase 1 transient cache — no pre-rescale
+    diagonal available)."""
+    from app.files import FILE_STORE
+
+    requested = result.get("user_unit_override_requested")
+    if not requested:
+        return
+    detector_factor = result.get("detector_factor")
+    applied_scale = float(result.get("applied_scale", 1.0))
+    if detector_factor is None:
+        return
+    if abs(float(detector_factor) - applied_scale) < 1e-12:
+        FILE_STORE.set_user_unit_override(file_id, None)
 
 
 # ---- Discover-layers worker (Phase 1) ------------------------------------
@@ -607,6 +714,7 @@ def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
     )
     if factor_changed:
         _invalidate_match_after_rescale(file_id)
+    _maybe_clear_redundant_unit_override(file_id, result)
     with _lock:
         job = _jobs.get(parent_id)
         if job is not None:

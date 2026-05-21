@@ -413,3 +413,85 @@ def test_migration_renames_old_columns_and_adds_side_view(tmp_path):
     assert rec.top_view_rect == {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0}
     assert rec.bottom_view_rect == {"x0": 50.0, "y0": 50.0, "x1": 60.0, "y1": 60.0}
     assert rec.side_view_rect is None
+
+
+# ---- user_unit_override column + persistence ------------------------------
+def test_fresh_db_has_user_unit_override_column_default_null(tmp_db):
+    fs = FileStore(tmp_db)
+    cols = [r["name"] for r in fs.conn.execute("PRAGMA table_info(files)")]
+    assert "user_unit_override" in cols
+    fs.register("a", "a.dxf", 1)
+    rec = fs.get("a")
+    assert rec.user_unit_override is None
+    assert rec.to_dict()["user_unit_override"] is None
+
+
+def test_set_user_unit_override_persists(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("b", "b.dxf", 1)
+    fs.set_user_unit_override("b", "inch")
+    rec = fs.get("b")
+    assert rec.user_unit_override == "inch"
+    assert rec.to_dict()["user_unit_override"] == "inch"
+
+
+def test_set_user_unit_override_to_none_clears(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("c", "c.dxf", 1)
+    fs.set_user_unit_override("c", "inch")
+    fs.set_user_unit_override("c", None)
+    rec = fs.get("c")
+    assert rec.user_unit_override is None
+
+
+def test_legacy_db_alter_adds_user_unit_override(tmp_path):
+    """Open a DB created before user_unit_override existed and confirm
+    the ALTER fires and old data survives."""
+    import sqlite3
+    db_path = tmp_path / "legacy_no_user_unit_override.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            size            INTEGER NOT NULL,
+            uploaded_at     REAL NOT NULL,
+            status          TEXT NOT NULL,
+            error           TEXT,
+            parsed_at       REAL,
+            primitive_count INTEGER,
+            bbox_xmin       REAL,
+            bbox_ymin       REAL,
+            bbox_xmax       REAL,
+            bbox_ymax       REAL,
+            background      TEXT,
+            library_id      TEXT NOT NULL DEFAULT 'default',
+            product_id      TEXT,
+            dxf_role        TEXT,
+            dxf_view        TEXT,
+            match_saved     INTEGER NOT NULL DEFAULT 0,
+            selected_layers TEXT,
+            top_view_rect   TEXT,
+            bottom_view_rect TEXT,
+            side_view_rect  TEXT,
+            insunits        INTEGER,
+            applied_scale   REAL NOT NULL DEFAULT 1.0
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO files (id, name, size, uploaded_at, status, applied_scale) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("legacy-uuo", "x.dxf", 1, 0.0, "ready_to_match", 25.4),
+    )
+    conn.commit()
+    conn.close()
+    fs = FileStore(db_path)
+    cols = [r["name"] for r in fs.conn.execute("PRAGMA table_info(files)")]
+    assert "user_unit_override" in cols
+    rec = fs.get("legacy-uuo")
+    # Legacy rows default to NULL — detector still has authority.
+    assert rec.user_unit_override is None
+    # Existing applied_scale survived the ALTER.
+    assert rec.applied_scale == pytest.approx(25.4)

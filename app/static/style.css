@@ -1412,6 +1412,52 @@ body.dashboard header .spacer { flex: 1; }
   cursor: not-allowed;
 }
 
+/* ---- Unit-override picker (viewer header) ----------------------------- */
+#unit-picker-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: #9aa5b1;
+}
+#unit-picker {
+  font: inherit;
+  background: #1a1f26;
+  border: 1px solid #2a3340;
+  color: #c0cad6;
+  border-radius: 4px;
+  padding: 0.15rem 0.35rem;
+}
+#unit-picker:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.unit-picker-badge {
+  font-size: 0.72rem;
+  color: #ffb84d;
+  background: rgba(255, 184, 77, 0.12);
+  border: 1px solid rgba(255, 184, 77, 0.35);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+.unit-picker-badge.job-inflight {
+  color: #4dd0e1;
+  background: rgba(77, 208, 225, 0.12);
+  border-color: rgba(77, 208, 225, 0.35);
+}
+.unit-picker-hint {
+  font-size: 0.72rem;
+  color: #ffd54f;
+}
+.unit-override-modal-body { padding: 1rem; line-height: 1.5; }
+.unit-override-modal-body ul { margin: 0.4rem 0 0.8rem 1.2rem; padding: 0; }
+.unit-override-modal-body li { margin: 0.2rem 0; }
+.unit-override-modal-body .affected-products {
+  color: #c0cad6;
+  margin-top: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- Dev parameter modal ---------------------------------------------- */
 #dev-params-toggle {
   background: transparent;

@@ -491,6 +491,87 @@ def test_upload_lid_to_product_with_ring_succeeds():
         assert [f["id"] for f in g["files_by_role_all"]["LID"]]  == [lid_id]
 
 
+def test_unit_override_endpoint_happy_path(monkeypatch):
+    """POST with a recognised unit returns 202, schedules a recompute,
+    writes the override to the file row, and reports the affected
+    product list. The job pool is stubbed so no real preprocess fires.
+    """
+    from fastapi.testclient import TestClient
+    from app.files import FILE_STORE
+    from app.main import app
+    from app import jobs
+
+    fid = "unit-override-test-happy"
+    FILE_STORE.register(fid, "stub.dxf", 1)
+
+    submitted = {}
+    def fake_submit(file_id, unit):
+        submitted["file_id"] = file_id
+        submitted["unit"] = unit
+        return "fake-job-1"
+    monkeypatch.setattr(jobs, "submit_unit_override_preprocess", fake_submit)
+
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/unit-override", json={"unit": "inch"})
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["file_id"] == fid
+        assert body["unit"] == "inch"
+        assert body["job_id"] == "fake-job-1"
+        # Stand-alone file (no product attached) → empty affected list.
+        assert body["affected_products"] == []
+    assert submitted == {"file_id": fid, "unit": "inch"}
+
+
+def test_unit_override_endpoint_rejects_unknown_unit():
+    from fastapi.testclient import TestClient
+    from app.files import FILE_STORE
+    from app.main import app
+
+    fid = "unit-override-test-bad-unit"
+    FILE_STORE.register(fid, "stub.dxf", 1)
+
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/unit-override", json={"unit": "feet"})
+        assert r.status_code == 400
+        # File row was not modified.
+        g = client.get(f"/api/files/{fid}").json()
+        assert g["user_unit_override"] is None
+
+
+def test_unit_override_endpoint_returns_409_when_job_inflight(monkeypatch):
+    """An in-flight preprocess job for the same file blocks a new
+    unit-override POST — the response carries the live job id so the
+    viewer can resume polling."""
+    from fastapi.testclient import TestClient
+    from app.files import FILE_STORE
+    from app.main import app
+    from app import jobs
+
+    fid = "unit-override-test-409"
+    FILE_STORE.register(fid, "stub.dxf", 1)
+
+    monkeypatch.setattr(jobs, "find_inflight_preprocess_job",
+                         lambda file_id: "inflight-job-xyz")
+
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/unit-override", json={"unit": "mm"})
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert body["job_id"] == "inflight-job-xyz"
+
+
+def test_unit_override_endpoint_404_on_missing_file():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/files/nonexistent-file-id/unit-override",
+            json={"unit": "mm"},
+        )
+        assert r.status_code == 404
+
+
 def test_upload_ring_to_product_with_lid_succeeds():
     """Symmetric to the above: LID first, then RING also succeeds."""
     from fastapi.testclient import TestClient

@@ -11,6 +11,18 @@
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
     <span id="product-context"></span>
     <span id="role-switcher"></span>
+    <span id="unit-picker-wrap" title="Unit override — pick to re-run preprocess with the chosen unit">
+      Unit:
+      <select id="unit-picker">
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="inch">inch</option>
+        <option value="μm">μm</option>
+      </select>
+      <span id="unit-picker-badge" class="unit-picker-badge" hidden></span>
+      <span id="unit-picker-hint" class="unit-picker-hint" hidden></span>
+    </span>
     <select id="library-switcher" title="Library this file uses (set by its product)"></select>
     <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">📚 Library</button>
     <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">🔍 Scan All</button>
@@ -86,6 +98,27 @@
         <button type="button" id="dev-params-reset" class="link-btn">Reset to defaults</button>
         <span class="spacer"></span>
         <button type="button" id="dev-params-apply" class="primary">Apply</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Unit-override confirm modal — fires before POST /unit-override.
+       Lists the downstream cost (preprocess re-run, connectivity rebuild,
+       Match JSON invalidation per affected product) so the operator
+       commits to it explicitly. -->
+  <div id="unit-override-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel" role="dialog" aria-label="Confirm unit override">
+      <header class="modal-header">
+        <h2>Confirm unit override</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body" id="unit-override-modal-body"></div>
+      <footer class="modal-footer">
+        <button type="button" id="unit-override-cancel" class="link-btn">Cancel</button>
+        <span class="spacer"></span>
+        <button type="button" id="unit-override-confirm" class="primary">Apply</button>
       </footer>
     </div>
   </div>

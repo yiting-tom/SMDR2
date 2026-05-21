@@ -68,7 +68,12 @@ CREATE TABLE IF NOT EXISTS files (
     bottom_view_rect TEXT,
     side_view_rect   TEXT,
     insunits        INTEGER,
-    applied_scale   REAL NOT NULL DEFAULT 1.0
+    applied_scale   REAL NOT NULL DEFAULT 1.0,
+    -- Operator-chosen unit interpretation, set from the viewer's unit
+    -- picker. One of 'mm' | 'cm' | 'm' | 'inch' | 'μm', or NULL when
+    -- the auto-rescale detector has authority. See
+    -- `app.dxf.UNIT_TO_SCALE` for the multiplier table.
+    user_unit_override TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -113,6 +118,11 @@ class FileRecord:
     # into mm. `rescaled_coord = original_coord * applied_scale`. `1.0`
     # means "no rescale". See `app.dxf.detect_scale_factor`.
     applied_scale: float = 1.0
+    # Operator-chosen unit interpretation from the viewer's unit picker.
+    # When set, the preprocessor uses `app.dxf.UNIT_TO_SCALE[value]` as
+    # the multiplier and skips the detector. `None` means detector has
+    # authority. The viewer's "set by you" badge keys off this field.
+    user_unit_override: str | None = None
 
     def to_dict(self) -> dict:
         # When the preprocessor applied a rescale, the persisted bbox is
@@ -159,6 +169,7 @@ class FileRecord:
                 format_applied_scale_label(self.applied_scale, self.insunits)
                 if self.applied_scale != 1.0 else None
             ),
+            "user_unit_override": self.user_unit_override,
         }
 
 
@@ -331,6 +342,13 @@ class FileStore:
                 self.conn.execute(
                     "ALTER TABLE files ADD COLUMN applied_scale REAL NOT NULL DEFAULT 1.0"
                 )
+            if "user_unit_override" not in cols:
+                # Legacy rows default to NULL (no override → detector
+                # authority). The column is unconstrained at the DB level;
+                # the API layer validates the enum.
+                self.conn.execute(
+                    "ALTER TABLE files ADD COLUMN user_unit_override TEXT"
+                )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -420,6 +438,17 @@ class FileStore:
                 "UPDATE files SET top_view_rect = NULL, bottom_view_rect = NULL, "
                 "side_view_rect = NULL WHERE id = ?",
                 (file_id,),
+            )
+
+    def set_user_unit_override(self, file_id: str, unit: str | None) -> None:
+        """Persist or clear the operator's unit-override choice. The
+        caller is responsible for validating `unit` against the
+        five-string allowlist; this method accepts whatever it is given
+        (or `None` to clear)."""
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET user_unit_override = ? WHERE id = ?",
+                (unit, file_id),
             )
 
     def set_match_saved(self, file_id: str, value: bool = True) -> None:
@@ -553,6 +582,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         side_view_rect=side_view_rect,
         insunits=_get("insunits"),
         applied_scale=float(_get("applied_scale", 1.0) or 1.0),
+        user_unit_override=_get("user_unit_override"),
     )
 
 

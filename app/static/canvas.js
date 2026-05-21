@@ -24,6 +24,7 @@ import {
   applyOrtho as _applyOrthoCore,
 } from "./measure_core.js";
 import { mountDevParamsModal } from "./dev_params.js";
+import { initUnitPicker } from "./unit_picker.js";
 
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
@@ -128,12 +129,23 @@ async function loadFileInfo() {
       const p = await pRes.json();
       $productContext.textContent = `${p.name} / ${file.dxf_role}`;
       renderRoleSwitcher(p, file);
+      // Stash the product name on the file object so the unit-picker's
+      // confirm modal can show "Clear saved Match JSON for <name>"
+      // without re-fetching products.
+      file.product_name = p.name;
     }
   } else {
     $productContext.textContent = "";
     closeRoleMenu();
     $roleSwitcher.innerHTML = "";
   }
+
+  // Bootstrap the unit-override picker now that the file payload (and
+  // optional product context) is loaded. Recompute completions reload
+  // the page so the canvas re-reads the new geometry from /primitives.
+  initUnitPicker(file, {
+    onComplete: () => window.location.reload(),
+  });
 }
 
 // ---- Role switcher with per-role sibling-DXF dropdown -------------------

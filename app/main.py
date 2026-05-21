@@ -465,6 +465,12 @@ class FilePatchRequest(BaseModel):
     library_id: str
 
 
+class UnitOverrideRequest(BaseModel):
+    # One of 'mm' | 'cm' | 'm' | 'inch' | 'μm'. Validated against the
+    # canonical map in `app.dxf.UNIT_TO_SCALE` inside the handler.
+    unit: str
+
+
 class RectModel(BaseModel):
     x0: float
     y0: float
@@ -501,6 +507,59 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
         selected_layers=rec.selected_layers,
     )
     return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
+
+
+@app.post("/api/files/{file_id}/unit-override")
+async def post_unit_override(file_id: str, req: UnitOverrideRequest) -> JSONResponse:
+    """Apply an operator-chosen unit interpretation to a file. Enqueues
+    a background preprocess that re-runs with the new multiplier; the
+    response carries the job id and the list of products whose Match
+    JSON the recompute will invalidate (so the viewer can show the
+    confirm modal's "N products affected" line).
+
+    Returns 202 on success, 400 on bad `unit`, 404 on missing file,
+    409 when a preprocess for this file is already in flight."""
+    from app.dxf import UNIT_TO_SCALE
+
+    if req.unit not in UNIT_TO_SCALE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown unit {req.unit!r}; expected one of {sorted(UNIT_TO_SCALE)}",
+        )
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    inflight = jobs.find_inflight_preprocess_job(file_id)
+    if inflight is not None:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "preprocess in flight", "job_id": inflight},
+        )
+    job_id = jobs.submit_unit_override_preprocess(file_id, req.unit)
+    affected = _affected_products_for_file(rec)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "file_id": file_id,
+            "unit": req.unit,
+            "job_id": job_id,
+            "affected_products": affected,
+        },
+    )
+
+
+def _affected_products_for_file(rec: FileRecord) -> list[dict]:
+    """Return the products whose Match JSON will be cleared when this
+    file's `applied_scale` changes. A file row carries at most one
+    `product_id`, so the list has 0 or 1 entry today; shaping it as a
+    list keeps the API forward-compatible if file→product becomes
+    many-to-many."""
+    if not rec.product_id:
+        return []
+    product = PRODUCT_STORE.get(rec.product_id)
+    if product is None:
+        return []
+    return [{"id": product.id, "name": product.name}]
 
 
 @app.patch("/api/files/{file_id}/side-regions")
