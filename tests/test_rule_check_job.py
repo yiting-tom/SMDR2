@@ -1,14 +1,18 @@
 """Tests for the rule-check background-job path.
 
-Covers the submit + poll contract introduced by
-`rule-check-as-background-job`:
-- worker reproduces what the old synchronous handler did, including the
-  multi-file handle-namespacing rule
-- POST returns 202 + job_id and the work runs in a worker process
-- the persisted `rule_check.json` matches the worker's summary
-- worker exceptions surface as `status: "error"` without overwriting a
-  prior persisted `rule_check.json`
-- the FastAPI event loop stays responsive while a slow rule-check runs
+The worker materialises the DRC handoff bundle on disk and hands the
+directory to the external rule function (``app.external_rule_check``).
+Rule logic is owned by the external team; these tests cover the
+boundary contract:
+
+- worker materialises the bundle layout `build_bundle_dir` writes
+- worker forwards the bundle path to `check_rules` and persists the
+  return value verbatim
+- worker errors (external raises, bundle materialisation fails)
+  surface as ``status: "error"`` without overwriting a prior result
+- POST returns 202 + job_id
+- ``/api/products`` carries ``latest_rule_check_job`` for dashboard
+  reload-resume support
 """
 
 from __future__ import annotations
@@ -22,35 +26,6 @@ import pytest
 
 # ---- Fixture helpers -----------------------------------------------------
 
-def _polygon(handle: str, x: float, y: float, w: float = 1.0, h: float = 1.0,
-             layer: str = "0") -> dict:
-    """Synthesize a closed polyline primitive `build_entity_shapes` will
-    happily eat. Coordinates control where the SMD / substrate sits, so
-    Rule1 and Rule3 distances are deterministic."""
-    return {
-        "type": "polyline",
-        "handle": handle,
-        "layer": layer,
-        "closed": True,
-        "points": [
-            [x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y],
-        ],
-    }
-
-
-def _write_parsed(file_id: str, primitives: list[dict]) -> Path:
-    from app.storage import parsed_path
-    pp = parsed_path(file_id)
-    pp.parent.mkdir(parents=True, exist_ok=True)
-    pp.write_text(json.dumps({
-        "primitives": primitives,
-        "bbox": [0, 0, 200, 200],
-        "background": "#ffffff",
-        "selected_layers": None,
-    }))
-    return pp
-
-
 def _write_match(file_id: str, match_json: dict) -> Path:
     from app.storage import match_path
     mp = match_path(file_id)
@@ -59,11 +34,19 @@ def _write_match(file_id: str, match_json: dict) -> Path:
     return mp
 
 
+def _write_dxf_bytes(file_id: str, payload: bytes = b"FAKE DXF\n") -> Path:
+    from app.storage import upload_path
+    up = upload_path(file_id)
+    up.parent.mkdir(parents=True, exist_ok=True)
+    up.write_bytes(payload)
+    return up
+
+
 def _make_product_ready_for_drc(client, tag: str) -> tuple[str, str]:
-    """Create a product with a single BD file, persist a parsed JSON and
-    a match JSON on disk, and flip match_saved. Returns (product_id,
-    file_id). `tag` keeps file_ids unique across tests so we never alias
-    a prior run's `rule_check/{pid}.json`."""
+    """Create a product with a single BD file, write a DXF + match JSON on
+    disk, flip match_saved. Returns (product_id, file_id). `tag` keeps
+    file_ids unique across tests so they never alias each other's
+    `rule_check/{pid}.json`."""
     from app.files import FILE_STORE, READY
 
     cr = client.post(
@@ -73,20 +56,12 @@ def _make_product_ready_for_drc(client, tag: str) -> tuple[str, str]:
     assert cr.status_code == 200, cr.text
     pid = cr.json()["id"]
 
-    # Use 8-hex-char file_ids so the prefix scheme `_split_handle_prefix`
-    # accepts is honored. Tag must stay lowercase hex.
     fid = f"bd{tag:>06}".replace(" ", "0")[:8]
     FILE_STORE.register(
         fid, f"{fid}.dxf", 1,
         product_id=pid, dxf_role="BD", initial_status=READY,
     )
-    # Substrate at (0,0)–(10,10), SMD ~2 mm away so Rule1 and Rule3
-    # both pass cleanly. Substrate inside SMD bbox would make distance 0.
-    primitives = [
-        _polygon("S", 0, 0, 10, 10),
-        _polygon("A", 12, 4, 1, 1),
-    ]
-    _write_parsed(fid, primitives)
+    _write_dxf_bytes(fid)
     _write_match(fid, {
         "substrate.0": [["S"]],
         "smd_2t.0": [["A"]],
@@ -109,124 +84,131 @@ def _poll_job(client, job_id: str, timeout: float = 30.0) -> dict:
     pytest.fail(f"job {job_id} did not finish within {timeout}s")
 
 
-# ---- 5.1 Unit test for the worker ----------------------------------------
+def _ok_external_result():
+    return {
+        "Rule1": {
+            "pass": True,
+            "text": "substrate-to-SMD distance check",
+            "rules": [{
+                "part": "BD",
+                "file_id": "abc12345",
+                "from": "S",
+                "to":   "A",
+                "text": "distance = 12.5 mm (> 5)",
+                "tol":      None,
+                "tol_text": None,
+            }],
+        },
+    }
 
-def test_rule_check_worker_matches_check_rules_direct(tmp_path):
-    """End-to-end worker test: build a synthetic two-file product (one
-    role with bare handles, one role with multi-file namespacing),
-    invoke `_rule_check_worker` directly (no subprocess), assert the
-    returned summary lines up with what `check_rules` would have
-    produced for the same merged bundle."""
+
+# ---- Direct worker test (in-process, monkey-patchable) ------------------
+
+def test_worker_materialises_bundle_and_persists_external_result(tmp_path, monkeypatch):
+    """End-to-end direct call of `_rule_check_worker`: register a
+    product + BD file, monkey-patch the external rule function to
+    return a canned result, run the worker in-process, assert the
+    bundle was materialised (we capture its path via the monkey-patch)
+    and the result lands on disk verbatim."""
+    from app.files import FILE_STORE, READY
     from app.jobs import _rule_check_worker
-    from app.matching import build_entity_shapes
-    from app.library import build_handle_index
-    from app.rule_check import check_rules
-    from app.storage import match_path, parsed_path
+    from app.products import PRODUCT_STORE
 
-    # Two files for BD (multi-file → namespacing), one file for SBT
-    # (bare handles). The handle names overlap intentionally so the
-    # namespacing rule actually matters.
-    bd_a = "aaaa0001"
-    bd_b = "aaaa0002"
-    sbt = "bbbb0001"
+    pid = PRODUCT_STORE.create("worker-direct", "default").id
+    fid = "ccaa0001"
+    FILE_STORE.register(fid, f"{fid}.dxf", 1, product_id=pid, dxf_role="BD",
+                        initial_status=READY)
+    _write_dxf_bytes(fid, b"DXF payload\n")
+    _write_match(fid, {"substrate.0": [["S"]], "smd_2t.0": [["A"]]})
+    FILE_STORE.set_match_saved(fid, True)
 
-    _write_parsed(bd_a, [_polygon("S", 0, 0, 10, 10), _polygon("A", 12, 4, 1, 1)])
-    _write_parsed(bd_b, [_polygon("S", 0, 0, 10, 10), _polygon("A", 12, 6, 1, 1)])
-    _write_parsed(sbt, [_polygon("BALL", 0, 0)])
+    captured: dict = {}
 
-    _write_match(bd_a, {"substrate.0": [["S"]], "smd_2t.0": [["A"]]})
-    _write_match(bd_b, {"substrate.0": [["S"]], "smd_2t.0": [["A"]]})
-    _write_match(sbt, {"bga_ball.0": [["BALL"]]})
+    def fake_external(product_id, bundle_dir):
+        captured["product_id"] = product_id
+        captured["bundle_dir"] = bundle_dir
+        # Bundle layout MUST be on disk by the time the external
+        # function is called.
+        bd = Path(bundle_dir)
+        assert (bd / "manifest.json").exists()
+        assert (bd / "dxfs" / f"{fid}.dxf").exists()
+        assert (bd / "match" / f"{fid}.json").exists()
+        manifest = json.loads((bd / "manifest.json").read_text())
+        assert manifest["product_id"] == pid
+        return _ok_external_result()
 
-    role_specs = [
-        {
-            "role": "BD",
-            "file_ids": [bd_a, bd_b],
-            "match_json_paths": [str(match_path(bd_a)), str(match_path(bd_b))],
-            "parsed_paths": [str(parsed_path(bd_a)), str(parsed_path(bd_b))],
-            "dxf_paths": [f"{bd_a}.dxf", f"{bd_b}.dxf"],
-            "namespaced": True,
-        },
-        {
-            "role": "SBT",
-            "file_ids": [sbt],
-            "match_json_paths": [str(match_path(sbt))],
-            "parsed_paths": [str(parsed_path(sbt))],
-            "dxf_paths": [f"{sbt}.dxf"],
-            "namespaced": False,
-        },
-    ]
+    monkeypatch.setattr("app.rule_check._external_check_rules", fake_external)
 
     dst = tmp_path / "rule_check.json"
-    summary = _rule_check_worker("pid-worker-unit", role_specs, str(dst), None)
+    summary = _rule_check_worker(pid, [fid], str(dst))
 
-    # `rule_check.json` exists on disk and parses cleanly.
+    assert captured["product_id"] == pid
     assert dst.exists()
     on_disk = json.loads(dst.read_text())
-
-    # Worker summary matches what `check_rules` says directly.
-    n_pass = sum(1 for v in on_disk.values() if v.get("pass"))
-    assert summary["rule_count"] == len(on_disk)
-    assert summary["pass_count"] == n_pass
-    assert summary["fail_count"] == len(on_disk) - n_pass
-    assert summary["roles_covered"] == ["BD", "SBT"]
-    assert summary["saved_to"].endswith("rule_check.json")
-
-    # Reproduce the merged bundle independently and compare the rule
-    # check output: the worker's merge is correct iff its on-disk JSON
-    # equals what we get calling `check_rules` ourselves.
-    def _bundle_for(fids: list[str], namespaced: bool) -> dict:
-        merged_mj: dict[str, list[list[str]]] = {}
-        merged_shapes: dict = {}
-        for fid in fids:
-            mj = json.loads(match_path(fid).read_text())
-            parsed = json.loads(parsed_path(fid).read_text())
-            hi = build_handle_index(parsed["primitives"])
-            shapes = build_entity_shapes(parsed["primitives"], hi)
-            prefix = f"{fid[:8]}:" if namespaced else ""
-            for h, shape in shapes.items():
-                merged_shapes[prefix + h] = shape
-            for key, groups in mj.items():
-                ns_groups = [[prefix + h for h in g] for g in groups]
-                merged_mj.setdefault(key, []).extend(ns_groups)
-        return {
-            "file_id": fids[0],
-            "dxf_path": f"{fids[0]}.dxf",
-            "file_ids": fids,
-            "dxf_paths": [f"{f}.dxf" for f in fids],
-            "match_json": merged_mj,
-            "entity_shapes": merged_shapes,
-        }
-
-    expected = check_rules(
-        "pid-worker-unit",
-        {
-            "BD": _bundle_for([bd_a, bd_b], namespaced=True),
-            "SBT": _bundle_for([sbt], namespaced=False),
-        },
-    )
-    # Compare pass/fail flags and rule names — full structural equality
-    # would also require matching sub-rule ordering, which is preserved
-    # but not the point of the contract.
-    assert {k: v["pass"] for k, v in on_disk.items()} == {
-        k: v["pass"] for k, v in expected.items()
-    }
-    assert set(on_disk.keys()) == set(expected.keys())
+    assert on_disk == _ok_external_result()
+    assert summary["rule_count"] == 1
+    assert summary["pass_count"] == 1
+    assert summary["fail_count"] == 0
+    assert summary["roles_covered"] == ["BD"]
+    # Bundle directory is cleaned up after the materialise_bundle
+    # context manager exits — captured path should no longer exist.
+    assert not Path(captured["bundle_dir"]).exists()
 
 
-# ---- 5.2 + 5.3 HTTP submit/poll happy path -------------------------------
+def test_worker_bundle_dir_cleaned_up_on_external_failure(tmp_path, monkeypatch):
+    """If the external function raises, the worker's
+    `materialise_bundle` context still removes the temp dir."""
+    from app.files import FILE_STORE, READY
+    from app.jobs import _rule_check_worker
+    from app.products import PRODUCT_STORE
 
-def test_post_returns_202_and_job_runs_to_done():
-    """POST returns 202 + job_id, GET /api/jobs/{job_id} eventually
-    reports `done` with a populated `result`, and GET on the read-side
-    endpoint returns the same persisted result."""
+    pid = PRODUCT_STORE.create("worker-fail", "default").id
+    fid = "ccaa0002"
+    FILE_STORE.register(fid, f"{fid}.dxf", 1, product_id=pid, dxf_role="BD",
+                        initial_status=READY)
+    _write_dxf_bytes(fid)
+    _write_match(fid, {"substrate.0": [["S"]]})
+    FILE_STORE.set_match_saved(fid, True)
+
+    captured: dict = {}
+
+    def boom(product_id, bundle_dir):
+        captured["bundle_dir"] = bundle_dir
+        assert Path(bundle_dir).exists()
+        raise RuntimeError("external blew up")
+
+    monkeypatch.setattr("app.rule_check._external_check_rules", boom)
+
+    dst = tmp_path / "rule_check.json"
+    with pytest.raises(RuntimeError, match="external blew up"):
+        _rule_check_worker(pid, [fid], str(dst))
+
+    assert not Path(captured["bundle_dir"]).exists()
+    # Persisted result is NOT written on failure.
+    assert not dst.exists()
+
+
+# ---- HTTP submit/poll happy path ----------------------------------------
+# These tests go through the worker pool. The default external stub
+# raises `NotImplementedError`, so the job lands in `status: error` until
+# the external team commits their real module. That validates the
+# error-path contract end-to-end.
+
+
+def test_post_returns_202_and_stub_pushes_job_to_error():
+    """POST returns 202 + job_id BEFORE the worker has finished. With
+    the default stub, the worker fails fast with `NotImplementedError`
+    and the job ends up in `status: error` — that's the expected
+    behaviour until the external team commits their real module.
+
+    Once that lands, this test pivots to assert `status: done` and a
+    populated `result` summary."""
     from fastapi.testclient import TestClient
     from app.main import app
 
     with TestClient(app) as client:
         pid, _ = _make_product_ready_for_drc(client, "5p2")
 
-        # POST returns 202 + job_id BEFORE the worker has finished.
         r = client.post(f"/api/products/{pid}/rule-check")
         assert r.status_code == 202, r.text
         job_id = r.json()["job_id"]
@@ -237,34 +219,24 @@ def test_post_returns_202_and_job_runs_to_done():
         assert rec["kind"] == "rule_check"
         assert rec["product_id"] == pid
 
-        # Poll to done.
         job = _poll_job(client, job_id)
-        assert job["status"] == "done", job
-        assert job["completed_at"] is not None
-        result = job["result"]
-        assert result["product_id"] == pid
-        assert result["rule_count"] >= 1
-        assert "BD" in result["roles_covered"]
-
-        # `rule_check.json` exists on disk and matches the read endpoint.
+        # External stub raises ⇒ worker raises ⇒ job: error.
+        assert job["status"] == "error", job
+        assert "external rule module" in (job.get("error") or "")
+        # No persisted rule_check.json on failure.
         from app.storage import rule_check_path
-        on_disk_path = rule_check_path(pid)
-        assert on_disk_path.exists()
-        on_disk = json.loads(on_disk_path.read_text())
+        assert not rule_check_path(pid).exists()
 
-        g = client.get(f"/api/products/{pid}/rule-check")
-        assert g.status_code == 200, g.text
-        assert g.json()["results"] == on_disk
-        assert g.json()["rule_count"] == result["rule_count"]
-
-
-# ---- 5.4 Worker error surfaces via job status ----------------------------
 
 def test_worker_error_does_not_overwrite_prior_result(monkeypatch):
-    """If the worker raises (e.g. a match JSON disappears between submit
-    and worker start), the job status flips to `error`, the error
-    message is non-empty, and any prior persisted `rule_check.json` is
-    untouched."""
+    """If the worker fails (here: match JSON gets corrupted between
+    POST and worker start), the job flips to `error`, error is
+    populated, and any prior persisted `rule_check.json` is untouched.
+
+    We seed the prior result manually instead of running a happy-path
+    job (which would require the external stub to be replaced) — the
+    invariant is "error path leaves on-disk state untouched", and that
+    holds regardless of how the baseline got written."""
     from fastapi.testclient import TestClient
     from app.main import app
     from app.storage import match_path, rule_check_path
@@ -272,21 +244,17 @@ def test_worker_error_does_not_overwrite_prior_result(monkeypatch):
     with TestClient(app) as client:
         pid, fid = _make_product_ready_for_drc(client, "5p4")
 
-        # First run succeeds and persists a baseline rule_check.json.
-        r1 = client.post(f"/api/products/{pid}/rule-check")
-        assert r1.status_code == 202
-        job1 = _poll_job(client, r1.json()["job_id"])
-        assert job1["status"] == "done"
-        baseline = json.loads(rule_check_path(pid).read_text())
+        # Hand-seed a baseline rule_check.json so we can prove a worker
+        # error doesn't clobber it.
+        baseline = _ok_external_result()
+        rule_check_path(pid).parent.mkdir(parents=True, exist_ok=True)
+        rule_check_path(pid).write_text(json.dumps(baseline))
 
-        # Force the worker to fail next time by deleting the match JSON
-        # AFTER the handler's existence check (`match_path(...).exists()`
-        # in `app/main.py`) — so we monkeypatch `json.load` inside the
-        # worker module to raise. Simpler: monkeypatch
-        # `app.jobs.check_rules` via the worker's local import path
-        # doesn't work cross-process. Instead, swap the match JSON for
-        # invalid bytes right after POST returns; the worker will
-        # explode reading it.
+        # Break the match JSON so bundle materialisation can still read
+        # the file (any bytes — `shutil.copyfile` doesn't validate JSON),
+        # but the eventual stub-raise from the external function still
+        # surfaces as a job-level error. Either way the prior on-disk
+        # result must survive.
         r2 = client.post(f"/api/products/{pid}/rule-check")
         assert r2.status_code == 202
         match_path(fid).write_text("not valid json {")
@@ -297,12 +265,9 @@ def test_worker_error_does_not_overwrite_prior_result(monkeypatch):
         # Persisted result is untouched (still equal to the baseline).
         assert json.loads(rule_check_path(pid).read_text()) == baseline
 
-        # Re-write a valid match JSON so other tests sharing FILE_STORE
-        # don't see broken state.
-        _write_match(fid, {
-            "substrate.0": [["S"]],
-            "smd_2t.0": [["A"]],
-        })
+        # Restore the match JSON so other tests sharing FILE_STORE don't
+        # see broken state.
+        _write_match(fid, {"substrate.0": [["S"]], "smd_2t.0": [["A"]]})
 
 
 # ---- /api/products carries `latest_rule_check_job` ----------------------
@@ -311,7 +276,11 @@ def test_products_endpoint_exposes_latest_rule_check_job():
     """`GET /api/products` (and the single-product GET) include the most
     recent rule-check job per product, so a dashboard reloaded after
     the user navigates away can resume polling — or show the result if
-    the job already finished while they were elsewhere."""
+    the job already finished while they were elsewhere.
+
+    With the external stub raising, the job lands in `status: error`,
+    but the dashboard-resume contract still applies: the field MUST be
+    populated with the latest job's metadata regardless of outcome."""
     from fastapi.testclient import TestClient
     from app.main import app
 
@@ -326,62 +295,46 @@ def test_products_endpoint_exposes_latest_rule_check_job():
         assert r.status_code == 202
         job_id = r.json()["job_id"]
 
-        # The list endpoint also surfaces the job (per-product field).
         lst = client.get("/api/products").json()
         match = next((p for p in lst["products"] if p["id"] == pid), None)
         assert match is not None
         live = match["latest_rule_check_job"]
         assert live is not None
         assert live["job_id"] == job_id
-        assert live["status"] in ("queued", "running", "done")
+        assert live["status"] in ("queued", "running", "done", "error")
 
-        # After completion the same field reports `done` + a result
-        # summary the dashboard can render without polling /api/jobs.
         _poll_job(client, job_id)
         g1 = client.get(f"/api/products/{pid}").json()
         finished = g1["latest_rule_check_job"]
         assert finished is not None
         assert finished["job_id"] == job_id
-        assert finished["status"] == "done"
+        assert finished["status"] in ("done", "error")
         assert finished["completed_at"] is not None
-        assert finished["result"] is not None
-        assert finished["result"]["product_id"] == pid
 
 
-# ---- 5.5 Event loop stays responsive while DRC runs ----------------------
+# ---- Event loop stays responsive while DRC runs -------------------------
 
-def test_event_loop_stays_responsive_during_drc(monkeypatch):
-    """While a slow rule-check job is in flight, an unrelated endpoint
-    returns quickly. We slow the worker by patching `time.sleep`-style
-    delay into the call chain via the dev-overrides snapshot hook
-    isn't reachable from here; instead we observe that the POST itself
-    returns far faster than the work would take if run inline. That's
-    the contract that matters for the event loop: the handler does not
-    wait for `check_rules`."""
+def test_event_loop_stays_responsive_during_drc():
+    """While a rule-check job is in flight, an unrelated endpoint
+    returns quickly. The POST itself must return before the worker
+    finishes (regardless of whether the worker succeeds or fails)."""
     from fastapi.testclient import TestClient
     from app.main import app
 
     with TestClient(app) as client:
         pid, _ = _make_product_ready_for_drc(client, "5p5")
 
-        # Time only the POST. It must return before the worker finishes.
         t0 = time.perf_counter()
         r = client.post(f"/api/products/{pid}/rule-check")
         post_elapsed = time.perf_counter() - t0
         assert r.status_code == 202, r.text
         job_id = r.json()["job_id"]
 
-        # POST must be cheap (validation + submit only). 2s is a very
-        # generous ceiling — in practice it's milliseconds; we just want
-        # to assert the handler isn't running DRC synchronously.
         assert post_elapsed < 2.0, (
             f"POST took {post_elapsed:.2f}s — handler is doing work "
             f"it should have delegated to the worker"
         )
 
-        # While the job is queued/running, an unrelated endpoint serves
-        # quickly. If `check_rules` were still on the event loop, this
-        # request would queue behind it.
         t0 = time.perf_counter()
         g = client.get("/api/products")
         unrelated_elapsed = time.perf_counter() - t0
@@ -391,5 +344,4 @@ def test_event_loop_stays_responsive_during_drc(monkeypatch):
             f"rule-check job was in flight"
         )
 
-        # Drain the job so it doesn't bleed into other tests.
         _poll_job(client, job_id)

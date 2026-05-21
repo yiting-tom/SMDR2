@@ -31,8 +31,12 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import tempfile
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.files import FileRecord
 from app.library import LIBRARIES
@@ -144,3 +148,56 @@ def build_bundle(
             zf.write(dxf_src, arcname=f"{DXF_DIR}/{rec.id}.dxf")
             zf.write(match_src, arcname=f"{MATCH_DIR}/{rec.id}.json")
     return buf.getvalue(), f"drc-bundle-{product.id}.zip"
+
+
+def build_bundle_dir(
+    product: Product,
+    files: list[FileRecord],
+    dst_dir: str | Path,
+    *,
+    now: datetime | None = None,
+) -> Path:
+    """Materialise the DRC handoff bundle as a directory tree.
+
+    Writes the same layout :func:`build_bundle` packages into its zip —
+    ``manifest.json`` at the root plus ``dxfs/<file_id>.dxf`` and
+    ``match/<file_id>.json`` per file — directly under ``dst_dir``.
+    Used by the rule-check worker to hand the external rule function an
+    on-disk bundle without paying for the zip step.
+
+    The DXF and Match JSON files are byte-copied from their on-disk
+    sources so the external function sees the same content hash SMDR2
+    ingested.
+    """
+    dst = Path(dst_dir)
+    dst.mkdir(parents=True, exist_ok=True)
+    (dst / DXF_DIR).mkdir(parents=True, exist_ok=True)
+    (dst / MATCH_DIR).mkdir(parents=True, exist_ok=True)
+
+    manifest = build_manifest(product, files, now=now)
+    (dst / MANIFEST_FILENAME).write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False)
+    )
+    for rec in files:
+        shutil.copyfile(upload_path(rec.id), dst / DXF_DIR / f"{rec.id}.dxf")
+        shutil.copyfile(match_path(rec.id), dst / MATCH_DIR / f"{rec.id}.json")
+    return dst
+
+
+@contextmanager
+def materialise_bundle(
+    product: Product,
+    files: list[FileRecord],
+    *,
+    now: datetime | None = None,
+):
+    """Yield a temporary directory containing the materialised handoff
+    bundle; clean it up on exit (success OR exception).
+
+    The rule-check worker uses this to hand the external rule function
+    a bundle path that exists for the duration of the call and nothing
+    longer.
+    """
+    with tempfile.TemporaryDirectory(prefix=f"drc-bundle-{product.id}-") as td:
+        bundle_dir = build_bundle_dir(product, files, td, now=now)
+        yield bundle_dir

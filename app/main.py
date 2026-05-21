@@ -520,9 +520,7 @@ async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
     side = normalise_rect(req.side_view_rect.model_dump()) if req.side_view_rect else None
     # Each file's region rects are independent — when a (product, role)
     # has multiple DXFs, every file may legitimately mark its own top /
-    # bottom / side rectangles, and downstream rule-check merges all of
-    # them into one role-level bundle. No cross-file uniqueness check
-    # here.
+    # bottom / side rectangles. No cross-file uniqueness check here.
     FILE_STORE.update_side_regions(file_id, top, bottom, side)
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
@@ -1055,9 +1053,8 @@ async def run_product_rule_check(product_id: str) -> JSONResponse:
     """Submit a product-scoped DRC job. Returns 202 + `{job_id}`; the
     front-end polls `GET /api/jobs/{job_id}` for completion. Every
     file's `match_saved` must be true; otherwise we 400 with a list of
-    missing roles. The actual work (read every role's match JSON, load
-    parsed shapes, merge with handle-namespacing, run `check_rules`,
-    write `rule_check.json`) runs in a worker process via
+    missing roles. The worker materialises the DRC handoff bundle on
+    disk and hands the directory to the external rule function — see
     `app.jobs._rule_check_worker`."""
     product = PRODUCT_STORE.get(product_id)
     if product is None:
@@ -1072,48 +1069,25 @@ async def run_product_rule_check(product_id: str) -> JSONResponse:
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
 
-    # Group files by role and build the lightweight role_specs the
-    # worker consumes. Each spec carries file paths only — no JSON is
-    # read here, so the event loop never blocks on DRC I/O. The worker
-    # reproduces the handle-namespacing rule (`<short_file_id>:` prefix
-    # when a role has 2+ files) — see `app/jobs.py:_rule_check_worker`.
-    files_by_role_recs: dict[str, list[FileRecord]] = {}
+    # Validate that every role-attached file's Match JSON and DXF
+    # exist on disk before submitting — the worker materialises a
+    # handoff bundle from these and would fail late otherwise. No
+    # parsed-JSON read happens here; the bundle ships DXF + Match
+    # JSON only, no `parsed/{file_id}.json` involvement.
     for f in files:
-        files_by_role_recs.setdefault(f.dxf_role, []).append(f)
+        mp = match_path(f.id)
+        if not mp.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
+            )
+        if not upload_path(f.id).exists():
+            raise HTTPException(
+                status_code=500,
+                detail=f"{f.dxf_role}: source DXF missing at {f.id}.dxf",
+            )
 
-    role_specs: list[dict] = []
-    for role, role_files in files_by_role_recs.items():
-        file_ids: list[str] = []
-        match_json_paths: list[str] = []
-        parsed_paths: list[str] = []
-        dxf_paths: list[str] = []
-        for f in role_files:
-            mp = match_path(f.id)
-            if not mp.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
-                )
-            pp = parsed_path(f.id)
-            if not pp.exists():
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"{f.dxf_role}: parsed file missing at {pp.name}",
-                )
-            file_ids.append(f.id)
-            match_json_paths.append(str(mp))
-            parsed_paths.append(str(pp))
-            dxf_paths.append(str(upload_path(f.id)))
-        role_specs.append({
-            "role": role,
-            "file_ids": file_ids,
-            "match_json_paths": match_json_paths,
-            "parsed_paths": parsed_paths,
-            "dxf_paths": dxf_paths,
-            "namespaced": len(role_files) > 1,
-        })
-
-    job_id = jobs.submit_rule_check(product_id, role_specs)
+    job_id = jobs.submit_rule_check(product_id, [f.id for f in files])
     return JSONResponse(
         status_code=202,
         content={"job_id": job_id, "product_id": product_id},
@@ -1143,9 +1117,9 @@ async def get_product_rule_check(product_id: str) -> dict:
 @app.get("/api/products/{product_id}/drc-bundle")
 async def get_drc_bundle(product_id: str) -> Response:
     """Return a zip bundle of every role-attached DXF + per-file Match
-    JSON + a manifest the external rule-checking team consumes. The
-    Match JSONs are shipped raw (no `<file_id[:8]>:` merge prefix);
-    each DXF stays in its own coordinate space.
+    JSON + a manifest the external rule-checking team consumes. Each
+    DXF stays in its own coordinate space; every Match JSON ships with
+    raw DXF handles.
 
     Preconditions match `POST .../rule-check`: 404 on unknown product,
     400 when no role-attached DXFs exist or any file still needs Save

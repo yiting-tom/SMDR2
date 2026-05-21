@@ -28,6 +28,9 @@ open http://localhost:8000
 
 ```
 app/                  FastAPI 後端 + frontend (static / templates)
+  external_rule_check/  量測組（外部 DRC team）的 in-tree module — 目前是 _stub.py
+  rule_check.py         Adapter：呼叫 external_rule_check.check_rules + 驗 envelope
+  tools/                CLI 小工具（drc_dry_run 等）
   static/             dashboard.js / canvas.js / style.css / layer_modal.js
   templates/          dashboard.html / viewer.html
 data/                 持久化資料（uploads / parsed / match / rule_check / library.sqlite）
@@ -98,15 +101,87 @@ tests/                pytest 套件
 
 調整這些會影響「圓被識別為 circle 還是 polyline」、layer 縮圖細緻度。
 
-### 3) Mock 規則閥值 — `app/rule_check.py`
+### 3) DRC 介接 — `app/rule_check.py` + `app/external_rule_check/`
 
-| 常數 | 預設 | 行 | 作用 |
-|---|---|---|---|
-| `SUBSTRATE_TO_SMD_MIN_DIST` | `5.0` mm | 51 | Rule1：BD 上 substrate 與第一顆 SMD-2T 的最小距離 |
-| `SMD_TO_SUBSTRATE_MAX_DIST` | `5.0` mm | 52 | Rule3：每顆 SMD-2T 到 substrate 的最大距離 |
+Rule 邏輯由**量測組（外部 DRC team）**負責，他們的 code 以 in-tree
+Python module 形式 commit 在 `app/external_rule_check/`。SMDR2 端只負責：
 
-正式版 DRC 由外部團隊執行（見 [DRC 串接指南](openspec/specs/design-rule-checking/INTEGRATION.md)）；
-這兩條只是 SMDR2 內部 mock，供開發測試。
+1. 把要檢查的 product material 化成一個 handoff bundle 目錄
+   （`manifest.json` + `dxfs/<file_id>.dxf` + `match/<file_id>.json`）
+2. 呼叫量測組的 `check_rules(product_id, bundle_dir)`
+3. 收 RuleChecking JSON、跑 envelope 驗證、寫到
+   `data/rule_check/{product_id}.json`
+
+整條 boundary 沒有可調的閥值 — 距離 / 數量門檻都在量測組的 module 內。
+正式契約見 `openspec/specs/design-rule-checking/spec.md` 兩個 requirement：
+**RuleChecking JSON output shape** 與 **External rule function contract**。
+
+#### 整合量測組程式碼
+
+**檔案擺哪**：`app/external_rule_check/` 是一個 subpackage，量測組可以
+自由拆檔（`rules.py` / `geometry.py` / …）。SMDR2 端的 import 只看
+`__init__.py` re-export 的 `check_rules`，內部結構量測組自決。
+
+```
+app/external_rule_check/
+├── __init__.py     # re-exports check_rules（由量測組維護）
+├── _stub.py        # 預設 placeholder：raise NotImplementedError
+└── ...             # 量測組的 rules.py / geometry.py / 等等
+```
+
+**交付步驟**（量測組那邊 → 我們 merge 的當下）：
+
+1. 量測組把檔案放進 `app/external_rule_check/`、改 `__init__.py` 的
+   `from app.external_rule_check._stub import check_rules` 指向他們自己的
+   entry point、刪 `_stub.py`。
+2. 他們的 `requirements.txt`（如 `shapely`, `rtree` 等）逐項 merge 進
+   `pyproject.toml`（不要直接套他們的鎖檔）。
+3. 跑 adapter 測試確認 envelope 契約守得住：
+   ```bash
+   uv run pytest tests/test_rule_check.py tests/test_rule_check_job.py -x
+   ```
+4. 他們自己的 unit test 可以放 `tests/` 或 `app/external_rule_check/tests/`，
+   `pytest` 一起跑。
+
+**量測組怎麼自測（不用起 SMDR2 server）**：
+
+用 `app/tools/drc_dry_run.py` CLI — 給一個 product_id，腳本直接 materialise
+bundle、呼叫 `check_rules`、印結果：
+
+```bash
+uv run python -m app.tools.drc_dry_run <product_id>
+uv run python -m app.tools.drc_dry_run <product_id> --keep-bundle /tmp/out
+```
+
+`--keep-bundle` 會把材料 dump 一份出來方便他們翻 `manifest.json` / 拆 DXF。
+
+**Stub 在的時候會怎樣**：任何 rule-check job 跑起來都會以
+`status: error` 收場，訊息含 `"external rule module not yet committed"`
+— 這是設計的失敗訊號，不是 bug。Adapter 測試（20 條）即使在 stub
+階段仍應全綠（它們都 monkeypatch `_external_check_rules`）。
+
+#### 開發用 mock checker
+
+`_stub.py` 在環境變數 `SMDR2_DEV_MOCK_DRC=1` 時會 dispatch 到
+`app/external_rule_check/_dev_mock.py`，回傳一份 3 條規則的假資料、
+故意涵蓋 viewer 全部三種顯示模式：
+
+```bash
+SMDR2_DEV_MOCK_DRC=1 uv run uvicorn app.main:app --reload
+# 或
+SMDR2_DEV_MOCK_DRC=1 uv run python -m app.tools.drc_dry_run <product_id>
+```
+
+| Mock 規則 | 顯示模式 | text 範例 |
+|---|---|---|
+| **MockDistance** | from + to（虛線 + 中點 label）| `[mock] substrate ↔ smd_2t = 12.34 mm (> 5.0)` |
+| **MockHighlight** | from 單獨（高亮 + 旁邊 label）| `[mock] first substrate on this DXF` |
+| **MockTolerance** | tol + tol_text（紅色標註）| `⚠ [mock] smd_2t ±0.5 mm` |
+
+Handle 從 bundle 內各檔的 match JSON 第一個 match group 取，所以**只要
+產品的 Save Match 跑過、bundle 拿得到 match**，mock 就有料可用。
+所有 text 都帶 `[mock]` 標記，永遠不會跟正式結果混淆。預設不開（stub
+仍然 fail loud）；正式部署不會用到。
 
 ### 4) DRC handoff bundle — `app/drc_bundle.py`
 
@@ -179,7 +254,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 |---|---|---|
 | `smdr2.dashboard.selectedLibrary` | `dashboard.js:93` | dashboard library 下拉的選項 |
 | `smdr2.hiddenLayers.<file_id>` | `canvas.js:49` | viewer 隱藏的 layer 集合（per file）|
-| `smdr2.viewer.ruleFolded` | `canvas.js:1260` | rule sidebar 摺疊狀態 |
+| `smdr2.viewer.ruleOpened` | `canvas.js:1422` | rule sidebar 中被使用者展開的 rule 名稱集合（預設全部摺疊；fail 排在 pass 前面）|
 
 清除方法：DevTools → Application → Storage → 該域名。
 
@@ -188,8 +263,9 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | 變數 | 預設 | 用途 |
 |---|---|---|
 | `SMDR2_N_JOBS` | `1` | 比對引擎的 worker 數，見 `matching.py:65` |
+| `SMDR2_DEV_MOCK_DRC` | unset | `"1"` → `app/external_rule_check/_stub.py` dispatch 到 `_dev_mock.py`，回傳 3 條 mock 規則（涵蓋 viewer 全部三種顯示模式）給開發 smoke 用；正式部署留空 |
 
-目前只有這一支；其他 host / port 等請傳給 `uvicorn` CLI。
+其他 host / port 等請傳給 `uvicorn` CLI。
 
 ## 主要功能與位置
 
@@ -204,8 +280,9 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | Product / 多 DXF per role | `app/products.py` + `files.py` | `static/dashboard.js` | `openspec/specs/product-files/spec.md` |
 | Side regions (top/bottom/side view rect) | `app/side_regions.py` | viewer 框選 | `openspec/specs/viewer-ui/spec.md` |
 | Viewer UI | — | `static/canvas.js` | `openspec/specs/viewer-ui/spec.md` |
-| Design Rule Check (mock) | `app/rule_check.py` | dashboard rule modal + viewer rule sidebar | `openspec/specs/design-rule-checking/spec.md` |
-| DRC handoff bundle export | `app/drc_bundle.py` + `main.py` | dashboard dev-mode 按鈕 | 同上 + `INTEGRATION.md` |
+| Design Rule Check (adapter → 量測組 module) | `app/rule_check.py` + `app/external_rule_check/` | dashboard rule modal + viewer rule sidebar | `openspec/specs/design-rule-checking/spec.md` |
+| DRC handoff bundle (handoff zip + 內部 bundle dir) | `app/drc_bundle.py` + `main.py` | dashboard dev-mode 按鈕 | 同上 + `INTEGRATION.md` |
+| DRC dry-run CLI | `app/tools/drc_dry_run.py` | — | （給量測組自測，不入 spec） |
 | Dashboard developer mode | — | `static/dashboard.js` | `openspec/specs/dashboard-ui/spec.md`（archive 後生效）|
 
 ## HTTP API 速查

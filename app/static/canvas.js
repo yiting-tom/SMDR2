@@ -949,14 +949,24 @@ function render() {
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
-// Collects edges (segments) for the given handle group. A point is emitted
-// as a degenerate segment whose endpoints coincide.
-function collectHandlesSegments(handles) {
+// The external rule function pre-resolves each sub-rule's `from`/`to`/`tol`
+// into single primitive handles. The viewer's job is presentational:
+// highlight whichever of those entities are set, and when `from` + `to`
+// are both set, draw a dashed segment between the closest pair of points
+// across the two primitives' geometries (vertex-vs-edge search, see
+// `shortestSegmentBetween` below) — bbox-centre would put the line
+// through the entity interior on long thin shapes; perpendicular-foot
+// search keeps it pinned to the actual nearest edges.
+
+// Segments (edge pairs) for a single primitive handle. A point is emitted
+// as a degenerate segment whose endpoints coincide. Mirrors the old
+// list-based collector but takes a single handle since `from`/`to`/`tol`
+// are now single-handle fields.
+function collectHandleSegments(handle) {
   const segs = [];
-  if (!handles || !handles.length) return segs;
-  const wanted = new Set(handles);
+  if (!handle) return segs;
   for (const p of primitives) {
-    if (!wanted.has(p.handle)) continue;
+    if (p.handle !== handle) continue;
     switch (p.type) {
       case "line":
         segs.push([p.start, p.end]);
@@ -964,8 +974,6 @@ function collectHandlesSegments(handles) {
       case "polyline": {
         const pts = p.points;
         for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1], pts[i]]);
-        // Add the closing edge if the polyline is closed and the points list
-        // doesn't already include the closing duplicate vertex.
         if (p.closed && pts.length > 2) {
           const a = pts[pts.length - 1], b = pts[0];
           if (a[0] !== b[0] || a[1] !== b[1]) segs.push([a, b]);
@@ -985,9 +993,7 @@ function collectHandlesSegments(handles) {
         break;
       case "circle": {
         // Sample the ring into 32 tangent segments so the shortest-segment
-        // search treats the circle as its discretised polygon (faithful to
-        // the pre-change closed-polyline emit, accurate enough for the
-        // rule-check annotation line).
+        // search treats the circle as its discretised polygon.
         const cx = p.center[0], cy = p.center[1], r = p.r;
         const N = 32;
         let px = cx + r, py = cy;
@@ -1000,27 +1006,25 @@ function collectHandlesSegments(handles) {
         break;
       }
     }
+    // A handle maps to at most one primitive; stop after finding it.
+    break;
   }
   return segs;
 }
 
-// Note: closestPointOnSegment (used here and by resolveSnap below) is
-// imported from measure_core.js so it stays pure / unit-testable.
-
-// True shortest segment between two handle groups: for every vertex of
-// one shape, find its closest point on every edge of the other (and vice
-// versa); the global minimum is the answer. Captures the perpendicular-
-// foot case that pure vertex-to-vertex misses (e.g., two parallel SMD
-// edges where the nearest pair sits in the middle of both edges, not at
-// either's corner).
-function shortestSegmentBetween(handlesA, handlesB) {
-  const segsA = collectHandlesSegments(handlesA);
-  const segsB = collectHandlesSegments(handlesB);
+// True shortest segment between two single primitives: for every vertex
+// of one shape, find its closest point on every edge of the other (and
+// vice versa); the global minimum is the answer. Captures the
+// perpendicular-foot case that pure vertex-to-vertex misses (e.g., two
+// parallel SMD edges where the nearest pair sits in the middle of both
+// edges, not at either's corner).
+function shortestSegmentBetween(handleA, handleB) {
+  const segsA = collectHandleSegments(handleA);
+  const segsB = collectHandleSegments(handleB);
   if (!segsA.length || !segsB.length) return null;
 
   let best = Infinity, bestA = null, bestB = null;
 
-  // Vertices of A vs edges of B.
   const seenA = new Set();
   for (const [u, v] of segsA) {
     for (const p of [u, v]) {
@@ -1035,7 +1039,6 @@ function shortestSegmentBetween(handlesA, handlesB) {
       }
     }
   }
-  // Vertices of B vs edges of A.
   const seenB = new Set();
   for (const [u, v] of segsB) {
     for (const p of [u, v]) {
@@ -1053,72 +1056,120 @@ function shortestSegmentBetween(handlesA, handlesB) {
   return bestA && bestB ? [bestA, bestB] : null;
 }
 
+// Fallback for the from-only / tol-only label position when there's no
+// from↔to segment to anchor against — bbox centre is still a reasonable
+// single deterministic point inside the entity.
+function primitiveCenter(handle) {
+  if (!handle) return null;
+  for (const p of primitives) {
+    if (p.handle !== handle) continue;
+    const [xmin, ymin, xmax, ymax] = bboxOf(p);
+    if (!Number.isFinite(xmin)) return null;
+    return [(xmin + xmax) / 2, (ymin + ymax) / 2];
+  }
+  return null;
+}
+
 function drawFocusedSubRule(hairline) {
   const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
   const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1.5);
-  const handles = new Set([...(focusedSubRule.from ?? []), ...(focusedSubRule.to ?? [])]);
+  const handles = new Set();
+  if (focusedSubRule.from) handles.add(focusedSubRule.from);
+  if (focusedSubRule.to)   handles.add(focusedSubRule.to);
+  if (focusedSubRule.tol)  handles.add(focusedSubRule.tol);
   for (const p of primitives) {
     if (handles.has(p.handle)) {
       drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
     }
   }
-  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
-  if (segment) {
-    const [fc, tc] = segment;
-    ctx.strokeStyle = FOCUS_COLOR;
-    ctx.lineWidth = hairline * 2.2;
-    ctx.setLineDash([8 * hairline, 5 * hairline]);
-    ctx.beginPath();
-    ctx.moveTo(fc[0], fc[1]);
-    ctx.lineTo(tc[0], tc[1]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    drawEndpointMarker(fc, hairline);
-    drawEndpointMarker(tc, hairline);
+  if (focusedSubRule.from && focusedSubRule.to) {
+    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+    if (segment) {
+      const [fc, tc] = segment;
+      ctx.strokeStyle = FOCUS_COLOR;
+      ctx.lineWidth = hairline * 2.2;
+      ctx.setLineDash([8 * hairline, 5 * hairline]);
+      ctx.beginPath();
+      ctx.moveTo(fc[0], fc[1]);
+      ctx.lineTo(tc[0], tc[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      drawEndpointMarker(fc, hairline);
+      drawEndpointMarker(tc, hairline);
+    }
   }
 }
 
 function drawEndpointMarker(pt, hairline) {
-  ctx.fillStyle = ctx.strokeStyle;
+  // Cross-hair (×) — pins the measurement point precisely to its xy.
+  // Two diagonal strokes; sized to read clearly at typical viewer
+  // zooms (the marker should be obvious without crowding the dashed
+  // connector or the highlighted entity).
+  const half = hairline * 7;
+  ctx.save();
+  ctx.lineWidth = hairline * 2.4;
   ctx.beginPath();
-  ctx.arc(pt[0], pt[1], hairline * 2.5, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.moveTo(pt[0] - half, pt[1] - half);
+  ctx.lineTo(pt[0] + half, pt[1] + half);
+  ctx.moveTo(pt[0] + half, pt[1] - half);
+  ctx.lineTo(pt[0] - half, pt[1] + half);
+  ctx.stroke();
+  ctx.restore();
 }
 
-function drawFocusedLabel() {
-  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
-  const fc = segment ? segment[0] : null;
-  const tc = segment ? segment[1] : null;
-  let midX, midY;
-  if (fc && tc) {
-    [midX, midY] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
-  } else if (fc) {
-    [midX, midY] = worldToScreen(fc[0], fc[1]);
-  } else if (tc) {
-    [midX, midY] = worldToScreen(tc[0], tc[1]);
-  } else {
-    return;
-  }
-  const text = focusedSubRule.text || focusedSubRule.ruleText || "";
+function drawLabelBox(text, screenX, screenY, color) {
   if (!text) return;
-  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
   ctx.save();
   ctx.font = `${13 * dpr}px ui-monospace, monospace`;
   const m = ctx.measureText(text);
   const padX = 9 * dpr, padY = 5 * dpr;
   const tw = m.width + padX * 2;
   const th = 16 * dpr + padY * 2;
-  const x = midX - tw / 2, y = midY - th - 10 * dpr;
+  const x = screenX - tw / 2, y = screenY - th - 10 * dpr;
   ctx.fillStyle = "rgba(0,0,0,0.85)";
   ctx.fillRect(x, y, tw, th);
-  ctx.strokeStyle = FOCUS_COLOR;
+  ctx.strokeStyle = color;
   ctx.lineWidth = 1 * dpr;
   ctx.strokeRect(x, y, tw, th);
-  ctx.fillStyle = FOCUS_COLOR;
+  ctx.fillStyle = color;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, midX, y + th / 2);
+  ctx.fillText(text, screenX, y + th / 2);
   ctx.restore();
+}
+
+function drawFocusedLabel() {
+  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
+
+  // from + to: text at the midpoint of the shortest segment between the
+  // two entities (so the label lands on the same line the user sees).
+  // from only: text adjacent to `from`'s bbox centre.
+  // tol + tol_text: rendered independently next to `tol` (may coexist
+  // with the from/to label when both groups are populated).
+  if (focusedSubRule.from && focusedSubRule.to) {
+    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+    if (segment) {
+      const [fc, tc] = segment;
+      const [mx, my] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
+      drawLabelBox(focusedSubRule.text || focusedSubRule.ruleText || "",
+                   mx, my, FOCUS_COLOR);
+    }
+  } else if (focusedSubRule.from) {
+    const fc = primitiveCenter(focusedSubRule.from);
+    if (fc) {
+      const [mx, my] = worldToScreen(fc[0], fc[1]);
+      drawLabelBox(focusedSubRule.text || focusedSubRule.ruleText || "",
+                   mx, my, FOCUS_COLOR);
+    }
+  }
+
+  if (focusedSubRule.tol && focusedSubRule.tol_text) {
+    const tc = primitiveCenter(focusedSubRule.tol);
+    if (tc) {
+      const [mx, my] = worldToScreen(tc[0], tc[1]);
+      drawLabelBox(focusedSubRule.tol_text, mx, my, FOCUS_COLOR);
+    }
+  }
 }
 
 // ---- Measure tool overlay -----------------------------------------------
@@ -1368,13 +1419,18 @@ const $ruleSidebarSummary = document.getElementById("rule-sidebar-summary");
 const $ruleSidebarBody = document.getElementById("rule-sidebar-body");
 const $ruleSidebarClose = document.getElementById("rule-sidebar-close");
 
-const RULE_FOLD_KEY = "smdr2.viewer.ruleFolded";
-function getRuleFolded() {
-  try { return new Set(JSON.parse(sessionStorage.getItem(RULE_FOLD_KEY) ?? "[]")); }
+// Rule sidebar defaults every rule to folded; the user-opened rules
+// are remembered per session so re-render (e.g. focusing a sub-rule)
+// doesn't snap them shut again. Inverted from the prior "remember the
+// folded ones" scheme — production rule sets are long, the user reads
+// fails first, and most rules stay closed by default.
+const RULE_OPEN_KEY = "smdr2.viewer.ruleOpened";
+function getOpenedRules() {
+  try { return new Set(JSON.parse(sessionStorage.getItem(RULE_OPEN_KEY) ?? "[]")); }
   catch { return new Set(); }
 }
-function setRuleFolded(s) {
-  sessionStorage.setItem(RULE_FOLD_KEY, JSON.stringify([...s]));
+function setOpenedRules(s) {
+  sessionStorage.setItem(RULE_OPEN_KEY, JSON.stringify([...s]));
 }
 
 let currentProductInfo = null;     // /api/products/{id} response cached for sibling links
@@ -1421,15 +1477,21 @@ function renderRuleSidebar(role) {
   $ruleSidebarSummary.textContent =
     `${d.pass_count}/${d.rule_count} pass`;
 
-  const folded = getRuleFolded();
-  for (const [name, rule] of Object.entries(d.results)) {
+  const opened = getOpenedRules();
+  // Fail rules render first so the engineer sees what needs attention
+  // without scrolling past the passes. Stable order within each group
+  // preserves the external rule function's emission sequence.
+  const entries = Object.entries(d.results).sort(([, a], [, b]) =>
+    a.pass === b.pass ? 0 : a.pass ? 1 : -1
+  );
+  for (const [name, rule] of entries) {
     const details = document.createElement("details");
     details.dataset.ruleName = name;
-    details.open = !folded.has(name);
+    details.open = opened.has(name);
     details.addEventListener("toggle", () => {
-      const f = getRuleFolded();
-      if (details.open) f.delete(name); else f.add(name);
-      setRuleFolded(f);
+      const o = getOpenedRules();
+      if (details.open) o.add(name); else o.delete(name);
+      setOpenedRules(o);
     });
 
     const summary = document.createElement("summary");
@@ -1519,8 +1581,10 @@ function focusSubRule(ruleName, idx, rulePass, sub) {
     ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
     idx,
     part: sub.part,
-    from: sub.from || [],
-    to:   sub.to   || [],
+    from:     sub.from     ?? null,
+    to:       sub.to       ?? null,
+    tol:      sub.tol      ?? null,
+    tol_text: sub.tol_text ?? null,
     text: sub.text || "",
   };
   render();

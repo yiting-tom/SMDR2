@@ -220,12 +220,14 @@ DXF 內部統一用 snake_case key：
 ## 6. DXF Handle 怎麼用
 
 Handle 就是 DXF 內 `EntityDB` 的索引字串（十六進位）。Match JSON
-裡每個 handle 都是該檔案的 **原始 handle**，**沒有** 任何前綴。
+裡每個 handle 都是該檔案的 **原始 handle**，**沒有** 任何前綴 —
+不管是外部交付的 zip bundle，或 SMDR2 內部呼叫你方 function 時
+materialise 出來的 bundle dir，handle 一律保持原樣。
 
 如果你看到 `^[0-9a-f]{8}:` 開頭的 handle（例如
-`a3f12b9c:7AF`），那是 SMDR2 內部 mock checker 為了把同一個 role
-的多張 DXF 合成一個 bundle 而加的前綴 — **這個前綴不會出現在外
-部交付的 bundle 裡**。若你看到，請回報是 SMDR2 的 bug。
+`a3f12b9c:7AF`），那是 SMDR2 早期 mock checker 的合併前綴遺留 —
+現在那條 path 已經完全移除（rule logic 走你方的 in-tree module，
+SMDR2 不再做任何 merge）。若你看到，請回報是 SMDR2 的 bug。
 
 ### 在 Python 用 ezdxf 查 handle
 
@@ -409,35 +411,80 @@ for view in set(sub_by_view) & set(smd_by_view):
 | Manifest schema 驗證失敗 | 寫 log + 拒收；contract 被打破，應該開 issue 給 SMDR2 team |
 | Manifest 主版號不認得 | 拒收（見上面的 loader 範例） |
 | 同一 role 出現 ≥ 2 個 file，但你的舊 rule 只看 `files[0]` | 修 rule，**不要** 預設 length 1 |
-| `match_json` 內出現 `^[0-9a-f]{8}:` 前綴 handle | SMDR2 bug，回報；勿自行處理 |
+| `match_json` 內出現 `^[0-9a-f]{8}:` 前綴 handle | SMDR2 bug（內部合併前綴外洩），回報；勿自行處理 |
 
 ---
 
 ## 10. 結果該怎麼回傳？
 
-**TBD**。目前 SMDR2 跟你方之間沒有定義「DRC 結果回傳路徑」契約。
-SMDR2 內部 mock checker 用的格式長這樣（供參考；正式接通需要雙方對齊）：
+SMDR2 會以 `from app.external_rule_check import check_rules` 直接 import
+你方的 module，呼叫 `check_rules(product_id: str, bundle_dir: str) -> dict`。
+你方 return 的 dict 就是 rule check 結果，SMDR2 會：
+
+1. 跑 envelope 驗證（不符合就 raise，job 變 `status: "error"`）
+2. 寫到 `data/rule_check/{product_id}.json` 原樣保存
+3. viewer 直接 render
+
+正式契約見 `spec.md` 兩個 requirement：
+- **RuleChecking JSON output shape** — sub-rule 欄位與不變式
+- **External rule function contract** — 邊界呼叫 + envelope 驗證規則
+
+### 回傳格式
 
 ```json
 {
   "Rule1": {
     "pass": false,
-    "text": "Substrate-to-first-SMD-2T distance must exceed 5 mm in every view/DXF",
+    "text": "Substrate-to-first-SMD-2T distance must exceed 5 mm",
     "rules": [
       {
         "part": "BD",
-        "from": ["319B"],
-        "to": ["4D", "4E", "4F"],
-        "text": "[top_view] distance = 3.214 mm (<= 5.0 mm)"
+        "file_id": "f7683af846df4d15",
+        "from": "319B",
+        "to":   "4D",
+        "text": "distance = 3.214 mm (<= 5.0 mm)",
+        "tol":      null,
+        "tol_text": null
       }
     ]
   }
 }
 ```
 
-要 align 結果格式時請聯絡 SMDR2 team；屆時會在 `spec.md` 新增
-「External DRC report ingest format」requirement，這份文件也會
-同步更新。
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `<ruleName>.pass` | bool | 整條 rule 通過與否 |
+| `<ruleName>.text` | str | 整條 rule 的描述（pass 或 fail reason） |
+| `<ruleName>.rules` | list | 0+ 個 sub-rule（可以是空 list） |
+| `rules[].part` | enum | `"SBT"` / `"BD"` / `"POD"` / `"RING"` / `"LID"` — 對應的 role |
+| `rules[].file_id` | str \| null | 該 sub-rule 幾何所在的 DXF id；只要 from/to/tol 任一非 null 就必須有值 |
+| `rules[].from` | str \| null | 單一 source handle（不再是 list） |
+| `rules[].to` | str \| null | 單一 target handle；只在 `from` 也有值時可以設定 |
+| `rules[].text` | str | sub-rule 訊息；rules 非空時必填 |
+| `rules[].tol` | str \| null | 獨立高亮 entity（跟 from/to 距離無關的標註） |
+| `rules[].tol_text` | str \| null | 顯示在 `tol` 旁的文字；只在 `tol` 有值時可以設定 |
+
+### Viewer 顯示語意（你方 emit 時請預先決定）
+
+| 你 emit | Viewer 行為 |
+|---|---|
+| `from` + `to` | 兩 entity 間畫虛線，`text` 顯示在中點 |
+| 只有 `from` | 高亮 `from`，`text` 顯示在 `from` 旁 |
+| `tol`（可同時有 from/to） | 高亮 `tol` entity |
+| `tol` + `tol_text` | 高亮 `tol`，`tol_text` 顯示在 `tol` 旁 |
+
+你方只需挑出 from/to **是哪一對 entity**（哪兩個 handle）；連線時
+落在 entity 上的哪兩個點由 viewer 自己跑 vertex-vs-edge perpendicular-foot
+搜尋決定（最短距離的兩個點）。所以「from 距離 to 多少」的 text 你可以
+照算的數值寫，但畫線的端點是 viewer 拿這對 entity 自己找出來的。
+
+### 不變式（違反會被 SMDR2 reject）
+
+- `rules` 可以是空 list；非空時每個 sub-rule 必須有非空 `text`
+- 任一 handle 欄位（`from` / `to` / `tol`）非 null 時，`file_id` 也必須非 null
+- 每個 sub-rule 至少要有 `from` 或 `tol` 其中一個（不能全空）
+- `to` 只能在 `from` 也有設的情況下出現
+- `tol_text` 只能在 `tol` 也有設的情況下出現
 
 ---
 

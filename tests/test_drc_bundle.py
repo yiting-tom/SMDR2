@@ -421,3 +421,73 @@ def test_bundle_version_bumped_to_1_2_0():
     from app.drc_bundle import BUNDLE_VERSION
 
     assert BUNDLE_VERSION == "1.2.0"
+
+
+# ---- build_bundle_dir parity ------------------------------------------
+def test_build_bundle_dir_matches_zip_contents(seeded_product, tmp_path):
+    """The directory layout `build_bundle_dir` writes MUST match what
+    `build_bundle` packages into its zip — same manifest JSON, same
+    file paths, same file bytes. The rule-check worker hands the
+    directory path to the external rule function; the external team
+    also consumes the zip for offline debugging, so any drift between
+    the two transports would break their tooling."""
+    from app.drc_bundle import (
+        DXF_DIR,
+        MANIFEST_FILENAME,
+        MATCH_DIR,
+        build_bundle,
+        build_bundle_dir,
+    )
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("BD", dxf_bytes=b"DXF#one\x00\x01\x02")
+    seed("BD", dxf_bytes=b"DXF#two\xff\xfe")
+    seed("SBT")
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    frozen = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+
+    zip_bytes, _ = build_bundle(product, files_list, now=frozen)
+    bundle_dir = build_bundle_dir(product, files_list, tmp_path, now=frozen)
+
+    # Manifests match byte-for-byte.
+    with _open_zip(zip_bytes) as zf:
+        zip_manifest = zf.read(MANIFEST_FILENAME).decode()
+    dir_manifest = (bundle_dir / MANIFEST_FILENAME).read_text()
+    assert zip_manifest == dir_manifest
+
+    # Every per-file entry is byte-equal across the two transports.
+    with _open_zip(zip_bytes) as zf:
+        for rec in files_list:
+            assert zf.read(f"{DXF_DIR}/{rec.id}.dxf") == (
+                bundle_dir / DXF_DIR / f"{rec.id}.dxf"
+            ).read_bytes()
+            assert zf.read(f"{MATCH_DIR}/{rec.id}.json") == (
+                bundle_dir / MATCH_DIR / f"{rec.id}.json"
+            ).read_bytes()
+
+
+def test_materialise_bundle_cleans_up_after_context(seeded_product):
+    """`materialise_bundle` yields a real bundle dir during the `with`
+    block and removes it on exit, even when the body raises."""
+    from app.drc_bundle import MANIFEST_FILENAME, materialise_bundle
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    seed("BD")
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+
+    captured: list[Path] = []
+    with materialise_bundle(product, files_list) as bundle_dir:
+        assert bundle_dir.is_dir()
+        assert (bundle_dir / MANIFEST_FILENAME).exists()
+        captured.append(bundle_dir)
+    assert not captured[0].exists(), "bundle dir must be removed on context exit"
+
+    # Cleanup also fires when the body raises.
+    with pytest.raises(RuntimeError):
+        with materialise_bundle(product, files_list) as bundle_dir:
+            captured.append(bundle_dir)
+            raise RuntimeError("boom")
+    assert not captured[1].exists()
