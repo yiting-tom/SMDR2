@@ -444,7 +444,7 @@ const HIGHLIGHT_WIDTH_MULT = 2.5;
 // as a "filled dot" rather than its outline, but in dense packaging arrays
 // that's already what the eye sees, and the pan FPS gain at mid-zoom is
 // massive. Bump back down to ~1 px if visual fidelity becomes a concern.
-const DOT_THRESHOLD_CSS_PX = 3.0;
+const DOT_THRESHOLD_CSS_PX = 12.0;
 
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
 // dark background and for mutual distinguishability. SMD-2T/3T/8T/14T share

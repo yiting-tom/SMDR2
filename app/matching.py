@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 # ---- Tunables -----------------------------------------------------------
-SCALE_MIN = 0.9999
-SCALE_MAX = 1.0001
-TOLERANCE_ABS = 0.01            # ε for chamfer (world units / mm)
+SCALE_MIN = 0.99
+SCALE_MAX = 1.01
+TOLERANCE_ABS = 0.2             # ε for chamfer (world units / mm)
 VERTEX_COUNT_RATIO = 0.3       # candidate must be within ±25% vertex count
 PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
 RADIUS_RATIO = 0.20             # ±20% max-radius-from-centroid (rotation-invariant)

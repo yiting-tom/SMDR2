@@ -58,7 +58,7 @@ CURVE_FLATTENING_DISTANCE = BASE_TOLERANCE
 # radial layout would otherwise sail through `CIRCLE_RADIAL_TOL`.
 CIRCLE_MIN_VERTS = 8
 CIRCLE_MIN_VERTS_NOCURVE = 11
-CIRCLE_RADIAL_TOL = 0.0001
+CIRCLE_RADIAL_TOL = 0.002
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
