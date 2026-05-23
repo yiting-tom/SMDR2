@@ -831,3 +831,310 @@ def _match_multi(
                 break  # don't try other sign variants — first hit wins
 
     return MatchOutput(matches=matches, near_misses=near)
+
+
+# ---- Diagnostic: why does A-as-template find B but B-as-template not find A?
+# Used by /api/files/{file_id}/match-swap. Dumps per-pair gate + alignment
+# breakdown in both directions plus a focused trace of the multi-entity pose
+# search, so a reported asymmetry can be pinpointed without re-instrumenting.
+def _shape_summary(s: EntityShape) -> dict:
+    return {
+        "handle": s.handle,
+        "kind": s.kind,
+        "vertex_count": s.vertex_count,
+        "path_length": s.path_length,
+        "radius": s.radius,
+        "pca_sigma1": s.pca_sigma1,
+        "pca_sigma2": s.pca_sigma2,
+        "sigma_ratio": _sigma_ratio(s),
+        "centroid": [float(s.centroid[0]), float(s.centroid[1])],
+    }
+
+
+def _gate_detail(a: EntityShape, b: EntityShape) -> dict:
+    """Per-gate breakdown of signatures_compatible(a, b). Asymmetric: a is the
+    template side, b the candidate side."""
+    out: dict = {"vertex_count_ok": a.vertex_count >= 2 and b.vertex_count >= 2}
+    if a.path_length > 0 and b.path_length > 0:
+        ratio = a.path_length / b.path_length
+        out["path_length_ratio"] = ratio
+        out["path_length_ok"] = (
+            (1 - PATH_LENGTH_RATIO) <= ratio <= (1 + PATH_LENGTH_RATIO)
+        )
+    else:
+        out["path_length_ratio"] = None
+        out["path_length_ok"] = True
+    if a.radius > 0 and b.radius > 0:
+        r_ratio = a.radius / b.radius
+        out["radius_ratio"] = r_ratio
+        out["radius_ok"] = (1 - RADIUS_RATIO) <= r_ratio <= (1 + RADIUS_RATIO)
+    else:
+        out["radius_ratio"] = None
+        out["radius_ok"] = True
+    s_diff = abs(_sigma_ratio(a) - _sigma_ratio(b))
+    out["sigma_ratio_diff"] = s_diff
+    out["sigma_ratio_ok"] = s_diff <= SIGMA_RATIO_TOL
+    out["compatible"] = signatures_compatible(a, b)
+    return out
+
+
+def _align_detail(t: EntityShape, c: EntityShape, tolerance: float) -> dict:
+    """align_score(t, c) with the reason-it-failed surfaced when None."""
+    res = align_score(t.points, c.points)
+    if res is not None:
+        chamfer, scale = res
+        return {
+            "scale": scale,
+            "scale_in_range": SCALE_MIN <= scale <= SCALE_MAX,
+            "chamfer": chamfer,
+            "chamfer_in_tol": chamfer <= tolerance,
+            "tolerance": tolerance,
+        }
+    # Re-derive to expose why None was returned.
+    tp = _resample_arclength(t.points, RESAMPLE_N)
+    cp = _resample_arclength(c.points, RESAMPLE_N)
+    if tp.shape[0] < 2 or cp.shape[0] < 2:
+        return {"degenerate": True, "scale": None, "chamfer": None}
+    t_c = tp - tp.mean(axis=0)
+    c_c = cp - cp.mean(axis=0)
+    tn = float(np.linalg.norm(t_c, axis=1).mean())
+    cn = float(np.linalg.norm(c_c, axis=1).mean())
+    if tn < 1e-9 or cn < 1e-9:
+        return {"degenerate_norm": True, "scale": None, "chamfer": None}
+    scale = tn / cn
+    return {
+        "scale": scale,
+        "scale_in_range": False,
+        "scale_min": SCALE_MIN, "scale_max": SCALE_MAX,
+        "chamfer": None,
+    }
+
+
+def _multi_seed_trace(
+    template_shapes: list[EntityShape],
+    drawing: dict[str, EntityShape],
+    skip: set[str],
+    tolerance: float,
+    focus_handles: set[str],
+) -> dict:
+    """Trace the _match_multi seed/pose loop, restricted to candidate seeds
+    whose handle is in `focus_handles` to keep output bounded."""
+    handles = list(drawing.keys())
+    if not handles:
+        return {"seed": None, "candidate_counts": {}, "candidates_tried": []}
+    centroids = np.stack([drawing[h].centroid for h in handles])
+    tree = cKDTree(centroids)
+
+    counts = {
+        t.handle: sum(
+            1 for h in handles
+            if h not in skip and signatures_compatible(t, drawing[h])
+        )
+        for t in template_shapes
+    }
+    seed = min(template_shapes, key=lambda t: counts[t.handle])
+    others = [t for t in template_shapes if t is not seed]
+
+    seed_centered = seed.points - seed.centroid
+    seed_axes, _ = _pca_axes(seed_centered)
+    others_local: list[tuple[EntityShape, np.ndarray]] = []
+    for t in others:
+        local = (t.centroid - seed.centroid) @ seed_axes.T
+        others_local.append((t, local))
+
+    pos_tol = max(0.1, tolerance * 2)
+    sign_variants = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
+
+    cand_traces = []
+    for cand_handle in handles:
+        if cand_handle in skip:
+            continue
+        if cand_handle not in focus_handles:
+            continue
+        cand = drawing[cand_handle]
+        seed_gate = _gate_detail(seed, cand)
+        if not seed_gate["compatible"]:
+            cand_traces.append({
+                "candidate_seed": cand_handle,
+                "seed_gate": seed_gate,
+                "skipped": "seed_gate_failed",
+            })
+            continue
+        cand_axes, _ = _pca_axes(cand.points - cand.centroid)
+        variants_trace = []
+        consistent_found = False
+        for sx, sy in sign_variants:
+            scaled_axes = cand_axes * np.array([[sx], [sy]])
+            matched_handles = [cand_handle]
+            others_trace = []
+            consistent = True
+            for t, local_pos in others_local:
+                expected = local_pos @ scaled_axes + cand.centroid
+                nearby_idx = tree.query_ball_point(expected, r=pos_tol)
+                nearby = []
+                best_handle: str | None = None
+                best_score = float("inf")
+                for ni in nearby_idx:
+                    h = handles[ni]
+                    if h in skip or h in matched_handles:
+                        nearby.append({"handle": h, "skipped": True})
+                        continue
+                    sig_ok = signatures_compatible(t, drawing[h])
+                    entry: dict = {"handle": h, "sig_ok": sig_ok}
+                    if sig_ok:
+                        res = align_score(t.points, drawing[h].points)
+                        if res is not None:
+                            entry["chamfer"] = res[0]
+                            entry["scale"] = res[1]
+                            if res[0] <= tolerance and res[0] < best_score:
+                                best_handle = h
+                                best_score = res[0]
+                        else:
+                            entry["align_rejected"] = True
+                    nearby.append(entry)
+                others_trace.append({
+                    "template_handle": t.handle,
+                    "expected_pos": [float(expected[0]), float(expected[1])],
+                    "nearby": nearby,
+                    "chosen": best_handle,
+                    "chosen_score": (
+                        best_score if best_handle is not None else None
+                    ),
+                })
+                if best_handle is None:
+                    consistent = False
+                    break
+                matched_handles.append(best_handle)
+            variants_trace.append({
+                "sign": [sx, sy],
+                "consistent": consistent,
+                "matched_handles": matched_handles,
+                "others": others_trace,
+            })
+            if consistent:
+                consistent_found = True
+                break
+        cand_traces.append({
+            "candidate_seed": cand_handle,
+            "seed_gate": seed_gate,
+            "consistent_found": consistent_found,
+            "variants": variants_trace,
+        })
+
+    return {
+        "seed": seed.handle,
+        "candidate_counts": counts,
+        "candidates_tried": cand_traces,
+        "pos_tol": pos_tol,
+    }
+
+
+def diagnose_swap(
+    handles_a: list[str],
+    handles_b: list[str],
+    drawing_shapes: dict[str, EntityShape],
+    tolerance: float | None = None,
+    *,
+    strategy: str = "chamfer",
+    bbox_ratio: float | None = None,
+) -> dict:
+    """Run find_matches in both directions (A→drawing, B→drawing) and emit
+    everything needed to pinpoint where the two directions diverge:
+
+    - per-entity raw signatures for both patterns
+    - per-pair (a_i, b_j) gate breakdown + alignment, in both directions
+    - focused multi-seed pose trace restricted to the other pattern's handles
+    - the two match outputs and a one-line asymmetry summary
+
+    Used by /api/files/{file_id}/match-swap. The result is large but bounded:
+    O(|A|·|B|) pairs + per-pattern multi trace over the opposing handle set.
+    """
+    if tolerance is None:
+        tolerance = TOLERANCE_ABS
+    a_shapes = [drawing_shapes[h] for h in handles_a if h in drawing_shapes]
+    b_shapes = [drawing_shapes[h] for h in handles_b if h in drawing_shapes]
+
+    pairs = []
+    for a in a_shapes:
+        for b in b_shapes:
+            pairs.append({
+                "a_handle": a.handle,
+                "b_handle": b.handle,
+                "forward": {
+                    "gates": _gate_detail(a, b),
+                    "align": _align_detail(a, b, tolerance),
+                },
+                "reverse": {
+                    "gates": _gate_detail(b, a),
+                    "align": _align_detail(b, a, tolerance),
+                },
+            })
+
+    out_ab = find_matches(
+        handles_a, drawing_shapes, tolerance=tolerance,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
+    out_ba = find_matches(
+        handles_b, drawing_shapes, tolerance=tolerance,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
+
+    def _match_summary(out: MatchOutput) -> dict:
+        return {
+            "matches": [
+                {"handles": m.handles, "score": m.score, "scale": m.scale}
+                for m in out.matches
+            ],
+            "near_misses": [
+                {"handles": n.handles, "score": n.score,
+                 "scale": n.scale, "reason": n.reason}
+                for n in out.near_misses
+            ],
+        }
+
+    a_set, b_set = set(handles_a), set(handles_b)
+
+    def _found_opposing(out: MatchOutput, target: set[str]) -> bool:
+        for m in out.matches:
+            if set(m.handles) & target:
+                return True
+        return False
+
+    multi_trace: dict = {}
+    if (
+        strategy == "chamfer"
+        and len(a_shapes) > 1
+        and len(b_shapes) > 1
+    ):
+        multi_trace = {
+            "a_template": _multi_seed_trace(
+                a_shapes, drawing_shapes, a_set, tolerance, focus_handles=b_set,
+            ),
+            "b_template": _multi_seed_trace(
+                b_shapes, drawing_shapes, b_set, tolerance, focus_handles=a_set,
+            ),
+        }
+
+    return {
+        "tolerance": tolerance,
+        "strategy": strategy,
+        "bbox_ratio": bbox_ratio,
+        "tunables": {
+            "PATH_LENGTH_RATIO": PATH_LENGTH_RATIO,
+            "RADIUS_RATIO": RADIUS_RATIO,
+            "SIGMA_RATIO_TOL": SIGMA_RATIO_TOL,
+            "SCALE_MIN": SCALE_MIN,
+            "SCALE_MAX": SCALE_MAX,
+            "RESAMPLE_N": RESAMPLE_N,
+        },
+        "pattern_a": [_shape_summary(s) for s in a_shapes],
+        "pattern_b": [_shape_summary(s) for s in b_shapes],
+        "pairs": pairs,
+        "ab_match": _match_summary(out_ab),
+        "ba_match": _match_summary(out_ba),
+        "asymmetric": {
+            "a_template_finds_b": _found_opposing(out_ab, b_set),
+            "b_template_finds_a": _found_opposing(out_ba, a_set),
+        },
+        "multi_trace": multi_trace,
+    }

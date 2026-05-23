@@ -11,6 +11,7 @@ from app.matching import (
     EntityShape,
     NearMiss,
     align_score,
+    diagnose_swap,
     find_matches,
     find_matches_from_pointsets,
     signatures_compatible,
@@ -486,3 +487,68 @@ def test_default_strategy_is_chamfer():
     drawing = {"t": shape("t", RECT), "a": shape("a", translate(RECT, 10, 0))}
     out = find_matches(["t"], drawing)
     assert {m.handles[0] for m in out.matches} == {"a"}
+
+
+# ---- diagnose_swap (instrumentation for /match-swap) ---------------------
+def _pad(handle, cx, cy, w=1.0, h=0.5):
+    return shape(handle, [
+        (cx - w/2, cy - h/2), (cx + w/2, cy - h/2),
+        (cx + w/2, cy + h/2), (cx - w/2, cy + h/2),
+        (cx - w/2, cy - h/2),
+    ])
+
+
+def test_diagnose_swap_bit_identical_multi_pattern_is_symmetric():
+    """Two bit-identical 4-pad patterns translated apart must come out
+    symmetric: both directions find the opposing pattern, every per-pair
+    gate passes both ways, and per-pair forward and reverse path-length
+    ratios are reciprocals."""
+    # Pattern A at origin, Pattern B translated by (50, 0).
+    a_pads = [_pad(f"A{i}", *pos) for i, pos in enumerate(
+        [(0, 0), (3, 0), (0, 2), (3, 2)]
+    )]
+    b_pads = [_pad(f"B{i}", 50 + cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2), (3, 2)]
+    )]
+    drawing = {s.handle: s for s in a_pads + b_pads}
+    res = diagnose_swap(
+        [p.handle for p in a_pads], [p.handle for p in b_pads], drawing,
+    )
+    assert res["asymmetric"]["a_template_finds_b"]
+    assert res["asymmetric"]["b_template_finds_a"]
+    for pair in res["pairs"]:
+        assert pair["forward"]["gates"]["compatible"]
+        assert pair["reverse"]["gates"]["compatible"]
+        fwd = pair["forward"]["gates"]["path_length_ratio"]
+        rev = pair["reverse"]["gates"]["path_length_ratio"]
+        assert fwd is not None and rev is not None
+        assert abs(fwd * rev - 1.0) < 1e-9
+
+
+def test_diagnose_swap_pair_count_is_cartesian_product():
+    """O(|A|·|B|) pair-wise dump. Documents the size budget so users grep'ing
+    a large response know what to expect."""
+    a_pads = [_pad(f"A{i}", i * 3.0, 0) for i in range(3)]
+    b_pads = [_pad(f"B{i}", 50 + i * 3.0, 0) for i in range(4)]
+    drawing = {s.handle: s for s in a_pads + b_pads}
+    res = diagnose_swap(
+        [p.handle for p in a_pads], [p.handle for p in b_pads], drawing,
+    )
+    assert len(res["pairs"]) == 3 * 4
+
+
+def test_diagnose_swap_multi_trace_present_only_when_both_multi():
+    """multi_trace is the seed/pose dump; single-entity templates use a
+    different code path (single-serial), so omit the multi trace then."""
+    a_pads = [_pad("A0", 0, 0), _pad("A1", 3, 0)]
+    b_pads = [_pad("B0", 50, 0), _pad("B1", 53, 0)]
+    drawing = {s.handle: s for s in a_pads + b_pads}
+
+    multi = diagnose_swap(
+        ["A0", "A1"], ["B0", "B1"], drawing,
+    )
+    assert "a_template" in multi["multi_trace"]
+    assert "b_template" in multi["multi_trace"]
+
+    single = diagnose_swap(["A0"], ["B0"], drawing)
+    assert single["multi_trace"] == {}

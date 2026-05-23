@@ -57,6 +57,7 @@ from app.library import (
 from app.matching import (
     EntityShape,
     build_entity_shapes,
+    diagnose_swap,
     find_matches,
     find_matches_from_pointsets,
 )
@@ -932,6 +933,43 @@ async def match(file_id: str, req: MatchRequest) -> dict:
         "count": len(out.matches),
         "near_count": len(out.near_misses),
     }
+
+
+class MatchSwapRequest(BaseModel):
+    pattern_a: list[str]
+    pattern_b: list[str]
+    class_name: str | None = None
+
+
+@app.post("/api/files/{file_id}/match-swap")
+async def match_swap(file_id: str, req: MatchSwapRequest) -> dict:
+    """Diagnostic: run find_matches with pattern_a as template AND with
+    pattern_b as template, and dump per-pair gate + alignment breakdown so an
+    asymmetric "A finds B but B doesn't find A" outcome can be pinpointed.
+
+    Curl from the viewer when the bug shows up — body is two handle lists.
+    """
+    if not req.pattern_a or not req.pattern_b:
+        raise HTTPException(
+            status_code=400, detail="both pattern_a and pattern_b required",
+        )
+    rec = _resolve_file(file_id)
+    _, shapes = _shapes_for(file_id)
+    missing = [h for h in req.pattern_a + req.pattern_b if h not in shapes]
+    if missing:
+        raise HTTPException(
+            status_code=400, detail=f"unknown handles: {missing[:5]}",
+        )
+    strategy = "chamfer"
+    bbox_ratio: float | None = None
+    if req.class_name:
+        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(
+            req.class_name,
+        )
+    return diagnose_swap(
+        req.pattern_a, req.pattern_b, shapes,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
 
 
 class CommitRequest(BaseModel):
