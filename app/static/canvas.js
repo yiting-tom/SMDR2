@@ -2344,11 +2344,30 @@ function renderClassToolbar() {
         : "sig";
       btn.appendChild(tag);
     }
-    btn.title = isSig
+    // Live match count from the active scan-all / prematch overlay. Only
+    // rendered when scan-all has actually been computed for this file
+    // (scanAllSummary is null until loadPrematch or runScanAll populates
+    // it). A class with zero hits in the current scan still gets the chip
+    // so "did the matcher run vs. has it not been touched" reads clearly:
+    // missing chip = scan not run; "×0" = scan ran but this class has no
+    // matches in this image.
+    const matchN = scanAllSummary?.byClass?.[cls.name];
+    if (scanAllSummary && matchN !== undefined) {
+      const cnt = document.createElement("span");
+      cnt.className = "class-match-count";
+      cnt.textContent = `×${matchN}`;
+      if (matchN === 0) cnt.classList.add("zero");
+      btn.appendChild(cnt);
+    }
+    const matchedSuffix = scanAllSummary && matchN !== undefined
+      ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
+      : "";
+    btn.title = (isSig
       ? `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
         `signature-only match (bbox/aspect/vertex-count) at ±${(cls.bbox_ratio ?? 0.05) * 100}% — right-click to edit`
       : `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
-        `chamfer match (default) — right-click to switch to signature mode`;
+        `chamfer match (default) — right-click to switch to signature mode`
+    ) + matchedSuffix;
     btn.addEventListener("click", () => enterAddMode(cls.name));
     btn.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -2361,10 +2380,24 @@ function renderClassToolbar() {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "class-btn class-btn-more";
-    toggle.textContent = expanded ? "Less ▴" : "More ▾";
+    // When collapsed and scan-all has hits in the hidden classes, surface
+    // the count on the toggle so the user doesn't have to open "More" to
+    // discover that SMD-3T / SMD-8T / SMD-14T actually matched something
+    // in this image.
+    let hiddenHits = 0;
+    if (!expanded && scanAllSummary) {
+      for (const name of COLLAPSED_TOOLBAR_CLASSES) {
+        hiddenHits += scanAllSummary.byClass?.[name] ?? 0;
+      }
+    }
+    toggle.textContent = expanded
+      ? "Less ▴"
+      : (hiddenHits > 0 ? `More ▾ ×${hiddenHits}` : "More ▾");
     toggle.title = expanded
       ? "Hide less-common SMD variants"
-      : "Show SMD-3T / SMD-8T / SMD-14T";
+      : `Show SMD-3T / SMD-8T / SMD-14T${
+          hiddenHits > 0 ? ` (${hiddenHits} matched in this image)` : ""
+        }`;
     toggle.addEventListener("click", () => {
       setToolbarExpanded(!expanded);
       renderClassToolbar();
@@ -2492,6 +2525,7 @@ async function runScanAll() {
     const breakdown = Object.entries(byClass)
       .map(([c, n]) => `${c}:${n}`).join(" ");
     setBaseStatus(`scan-all: ${filteredTotal} hits in ${dt}ms · ${breakdown || "(empty library)"}`);
+    renderClassToolbar();
     updateStatus();
     render();
   } catch (e) {
@@ -2506,6 +2540,7 @@ function clearScanAll() {
   scanAllByHandle = null;
   scanAllSummary = null;
   $scanAllBtn.classList.remove("active");
+  renderClassToolbar();
   render();
 }
 
@@ -2777,6 +2812,7 @@ async function loadPrematch() {
   scanAllByHandle = byHandle;
   scanAllSummary = { byClass, total: byHandle.size };
   $scanAllBtn.classList.add("active");
+  renderClassToolbar();
   render();
 }
 

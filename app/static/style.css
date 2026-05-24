@@ -315,6 +315,20 @@ nav#class-toolbar .class-btn .class-strategy-tag {
   opacity: 0.75;
   font-variant-numeric: tabular-nums;
 }
+/* Live match count from the active scan-all / prematch overlay. Absent
+   when scan-all hasn't been computed yet; present (incl. "×0") once it
+   has, so the toolbar telegraphs both "matched N" and "scanned but
+   found none." Inherits the per-class accent colour, but at lower
+   opacity so the class name still reads as the primary label. */
+nav#class-toolbar .class-btn .class-match-count {
+  margin-left: 0.3rem;
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+nav#class-toolbar .class-btn .class-match-count.zero {
+  opacity: 0.4;
+}
 nav#class-toolbar .class-btn-more {
   color: #8794a3;
   border-color: #2a3340;
