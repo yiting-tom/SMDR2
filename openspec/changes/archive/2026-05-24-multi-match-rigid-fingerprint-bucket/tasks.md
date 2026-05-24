@@ -36,7 +36,7 @@
 
 - [x] 5.1 Update `_match_multi`'s docstring to describe the rigid-transform / fingerprint-bucket model and call out the degenerate-PCA (square pad) limitation
 - [x] 5.2 Quick perf sanity check: synthetic 4-pad-pattern grid scan, baseline vs new, report ratio in the commit message
-- [ ] 5.3 Commit + push following the project's commit-message convention (`Matching: rigid-transform fingerprint-bucket multi-match (…)`)
+- [x] 5.3 Commit + push following the project's commit-message convention (`Matching: rigid-transform fingerprint-bucket multi-match (…)`)
 - [ ] 5.4 Run `openspec archive multi-match-rigid-fingerprint-bucket` once the user confirms the change is shipped and validated
 
 ## Audit results
