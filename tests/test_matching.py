@@ -644,6 +644,55 @@ def test_match_multi_reports_scale_exactly_one():
         assert m.score == 0.0
 
 
+@pytest.mark.parametrize("r", [0.05, 0.5, 1.0, 5.0, 50.0])
+def test_from_circle_matches_from_points_reference(r):
+    """Analytical CIRCLE fast-path (`EntityShape.from_circle`) must
+    produce values numerically equivalent to the reference
+    `from_points`-on-synthesised-samples path that `build_entity_shapes`
+    used for circles pre-optimisation. Locks in the contract that
+    `build_entity_shapes`'s CIRCLE short-circuit is observably
+    indistinguishable from the prior generic path."""
+    import math
+    cx, cy = 10.0, -3.0
+    # Reference: same sample sequence collect_entity_points uses.
+    n_ref = max(8, min(64, round(2.0 * math.pi * r / 0.01)))
+    sampled = [
+        (cx + r * math.cos(2 * math.pi * i / n_ref),
+         cy + r * math.sin(2 * math.pi * i / n_ref))
+        for i in range(n_ref)
+    ]
+    ref = EntityShape.from_points("R", sampled, kind="circle")
+    ana = EntityShape.from_circle("R", cx, cy, r)
+    assert ana.kind == "circle"
+    assert ana.vertex_count == ref.vertex_count
+    assert abs(ana.radius - ref.radius) < 1e-12
+    assert abs(ana.path_length - ref.path_length) < 1e-12
+    assert abs(ana.pca_sigma1 - ref.pca_sigma1) < 1e-12
+    assert abs(ana.pca_sigma2 - ref.pca_sigma2) < 1e-12
+    # Centroid is analytically exact (cx, cy); from_points hits FP noise
+    # in the mean. Compare with a small tolerance.
+    assert abs(ana.centroid[0] - ref.centroid[0]) < 1e-12
+    assert abs(ana.centroid[1] - ref.centroid[1]) < 1e-12
+    assert ana.points.shape == ref.points.shape
+
+
+def test_fingerprint_bucket_skips_circles():
+    """Spec hint: multi-entity templates never include CIRCLE entities.
+    The bucket cache SHALL exclude them so they don't bloat the seed
+    enumeration space (and so circles' all-zero fingerprint doesn't
+    collide with degenerate non-circle entities)."""
+    from app.matching import _get_fingerprint_buckets, _fingerprint_bucket_cache
+    _fingerprint_bucket_cache.clear()
+    pad = _pad("P", 0, 0)
+    circle = EntityShape.from_circle("C", 5, 5, 1.0)
+    drawing = {"P": pad, "C": circle}
+    buckets = _get_fingerprint_buckets(drawing)
+    # Pad's fingerprint bucket contains only the pad's handle.
+    all_handles = {h for hs in buckets.values() for h in hs}
+    assert all_handles == {"P"}
+    assert "C" not in all_handles
+
+
 def test_fingerprint_bucket_cache_reuses_per_drawing_identity():
     """Spec: cache is keyed by drawing dict identity. Same dict → same
     bucket object; fresh dict → fresh bucket object."""
