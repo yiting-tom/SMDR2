@@ -710,6 +710,65 @@ def test_fingerprint_bucket_cache_reuses_per_drawing_identity():
     assert fresh is not first, "fresh drawing dict must build a new bucket object"
 
 
+@pytest.mark.parametrize("seed", list(range(20)))
+def test_match_multi_symmetry_property(seed):
+    """Property: for any pair of bit-identical multi-entity patterns L and R
+    in the same drawing, `find_matches([L_handles], drawing)` SHALL return
+    exactly R's handles AND `find_matches([R_handles], drawing)` SHALL
+    return exactly L's handles. The two match-handle sets MUST be each
+    other's complement.
+
+    Locks in the structural symmetry of the rigid-transform matcher.
+    Every comparison in the multi-match pipeline (fingerprint tuple
+    equality, centroid KDTree nearest-neighbor) is commutative, so the
+    "L finds R but R doesn't find L" asymmetry the old chamfer matcher
+    suffered from is impossible by construction. This test runs 20
+    random pattern shapes / sizes / counts to catch any regression that
+    would reintroduce an asymmetric comparison.
+    """
+    rng = np.random.RandomState(seed)
+    n_entities = int(rng.randint(2, 6))
+    # Random non-square rectangles at random positions. Non-square ensures
+    # PCA σ-ratio < 1 → axes are stable.
+    template_entities = []
+    for _ in range(n_entities):
+        w = float(rng.uniform(0.6, 2.0))
+        h = float(rng.uniform(0.1, 0.4))
+        cx = float(rng.uniform(-5, 5))
+        cy = float(rng.uniform(-5, 5))
+        template_entities.append((cx, cy, w, h))
+
+    def build_pattern(prefix, ox, oy):
+        return [
+            _pad(f"{prefix}{i}", ox + cx, oy + cy, w=w, h=h)
+            for i, (cx, cy, w, h) in enumerate(template_entities)
+        ]
+
+    # Pattern L at origin, pattern R translated far enough that bucket-radius
+    # neighbours don't bleed across.
+    L_pads = build_pattern("L", 0.0, 0.0)
+    R_pads = build_pattern("R", 100.0, 0.0)
+    drawing = {s.handle: s for s in L_pads + R_pads}
+
+    L_handles = {p.handle for p in L_pads}
+    R_handles = {p.handle for p in R_pads}
+
+    out_LR = find_matches([p.handle for p in L_pads], drawing)
+    L_match_handles = {h for m in out_LR.matches for h in m.handles}
+
+    out_RL = find_matches([p.handle for p in R_pads], drawing)
+    R_match_handles = {h for m in out_RL.matches for h in m.handles}
+
+    assert L_match_handles == R_handles, (
+        f"seed={seed}: L as template should find exactly R's handles, "
+        f"got {L_match_handles} (expected {R_handles})"
+    )
+    assert R_match_handles == L_handles, (
+        f"seed={seed}: R as template should find exactly L's handles, "
+        f"got {R_match_handles} (expected {L_handles})"
+    )
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities
