@@ -158,6 +158,32 @@ header #role-switcher .role-menu__item--current:hover {
   background: #003e4d;
   color: #00ffff;
 }
+/* "Matched" = every sibling DXF under the role has saved its match.
+   Placed after the .current / .empty rules so the green wins when both
+   apply (e.g., the role you're viewing is also fully matched). Same
+   mint #69f0ae the dashboard's "✓ matched" badge uses, for visual
+   consistency across pages. */
+header #role-switcher .role-btn.matched,
+header #role-switcher .role-btn.matched.current,
+header #role-switcher .role-btn--multi.matched {
+  color: #69f0ae;
+  border-color: #69f0ae;
+}
+header #role-switcher .role-btn.matched.current {
+  background: #0d3320;
+}
+header #role-switcher .role-btn.matched:hover,
+header #role-switcher .role-btn--multi.matched:hover {
+  border-color: #69f0ae;
+  color: #b9f6ca;
+}
+header #role-switcher .role-menu__item--matched {
+  color: #69f0ae;
+}
+header #role-switcher .role-menu__item--matched.role-menu__item--current {
+  color: #69f0ae;
+  background: #0d3320;
+}
 
 header button {
   background: transparent;

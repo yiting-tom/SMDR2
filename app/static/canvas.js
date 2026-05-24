@@ -174,6 +174,30 @@ function renderRoleSwitcher(product, file) {
   $roleSwitcher.appendChild(renderRingLidPair(product, file));
 }
 
+// A role is "matched" once every sibling DXF under it has had its match
+// saved — mirrors the rule-check-readiness predicate used on the dashboard
+// (`ready_for_rc = all(f.match_saved for f in uploaded)`). Empty roles
+// don't qualify so the dashed-empty styling stays untouched.
+function isRoleMatched(siblings) {
+  return siblings.length > 0 && siblings.every(s => s.match_saved);
+}
+
+// Re-pull the product payload so the role switcher reflects fresh
+// `match_saved` flags. Callers: after Save Match JSON succeeds, and after
+// a region edit clears match_saved server-side. No-op outside a product
+// context (the switcher is hidden in that case).
+async function refreshRoleSwitcher() {
+  if (!currentFileInfo?.product_id) return;
+  try {
+    const r = await fetch(`/api/products/${currentFileInfo.product_id}`);
+    if (!r.ok) return;
+    const p = await r.json();
+    renderRoleSwitcher(p, currentFileInfo);
+  } catch (e) {
+    console.warn("refreshRoleSwitcher failed:", e);
+  }
+}
+
 function renderRoleSlot(product, file, role, opts = {}) {
   const { disabledReason = null } = opts;
   const siblings = product.files_by_role_all?.[role] ?? [];
@@ -203,6 +227,7 @@ function renderRoleSlot(product, file, role, opts = {}) {
     } else {
       btn.href = `/viewer/${sibling.id}`;
     }
+    if (isRoleMatched(siblings)) btn.classList.add("matched");
     return btn;
   }
   return buildRoleDropdown(role, siblings, isCurrentRole, file.id);
@@ -226,6 +251,7 @@ function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
   trigger.type = "button";
   trigger.className = "role-btn role-btn--multi";
   if (isCurrentRole) trigger.classList.add("current");
+  if (isRoleMatched(siblings)) trigger.classList.add("matched");
   trigger.dataset.role = role;
   trigger.setAttribute("aria-haspopup", "menu");
   trigger.setAttribute("aria-expanded", "false");
@@ -249,6 +275,7 @@ function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
       item.className = "role-menu__item";
       item.href = `/viewer/${sib.id}`;
     }
+    if (sib.match_saved) item.classList.add("role-menu__item--matched");
     item.setAttribute("role", "menuitem");
     item.textContent = label;
     li.appendChild(item);
@@ -2507,6 +2534,8 @@ async function saveMatchJson() {
       `match saved: ${data.template_keys.length} template variant(s), ` +
       `${data.total_matches} total matches → ${data.saved_to} (${dt}ms)`
     );
+    if (currentFileInfo) currentFileInfo.match_saved = true;
+    refreshRoleSwitcher();
   } catch (e) {
     console.error(e);
     setBaseStatus(`save-match error: ${e.message}`);
@@ -3118,8 +3147,10 @@ async function patchSideRegions() {
       return false;
     }
     // The server clears match_saved on any region edit — refresh local copy
-    // so the dashboard / save-match button reflects the new state.
+    // so the dashboard / save-match button reflects the new state, and re-
+    // render the role switcher so a previously-green tab drops back.
     if (currentFileInfo) currentFileInfo.match_saved = false;
+    refreshRoleSwitcher();
     return true;
   } catch (e) {
     console.error(e);
