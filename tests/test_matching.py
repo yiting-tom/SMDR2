@@ -16,6 +16,7 @@ from app.matching import (
     find_matches_from_pointsets,
     signatures_compatible,
 )
+from app.matching import _get_fingerprint_buckets  # private — bucket cache contract
 
 
 # ---- helpers --------------------------------------------------------------
@@ -552,3 +553,138 @@ def test_diagnose_swap_multi_trace_present_only_when_both_multi():
 
     single = diagnose_swap(["A0"], ["B0"], drawing)
     assert single["multi_trace"] == {}
+
+
+# ---- _match_multi reference outputs --------------------------------------
+# Rigid-transform / fingerprint-bucket matcher contract: matches use
+# `score == 0.0` exactly (chamfer is gone from the multi path) and
+# `scale == 1.0` exactly (no scale search). Handle sets are pinned per
+# scenario.
+def test_match_multi_triangle_parity():
+    drawing = {
+        "L1": shape("L1", [(0, 0), (1, 0)]),
+        "L2": shape("L2", [(1, 0), (0.5, 1)]),
+        "L3": shape("L3", [(0.5, 1), (0, 0)]),
+        "L4": shape("L4", [(10, 10), (11, 10)]),
+        "L5": shape("L5", [(11, 10), (10.5, 11)]),
+        "L6": shape("L6", [(10.5, 11), (10, 10)]),
+    }
+    out = find_matches(["L1", "L2", "L3"], drawing)
+    assert len(out.matches) == 1
+    m = out.matches[0]
+    assert sorted(m.handles) == ["L4", "L5", "L6"]
+    assert m.scale == 1.0
+    assert m.score == 0.0
+
+
+def test_match_multi_four_pad_smd_parity():
+    a_pads = [_pad(f"A{i}", cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2), (3, 2)]
+    )]
+    b_pads = [_pad(f"B{i}", 50 + cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2), (3, 2)]
+    )]
+    drawing = {s.handle: s for s in a_pads + b_pads}
+    out = find_matches([p.handle for p in a_pads], drawing)
+    assert len(out.matches) == 1
+    m = out.matches[0]
+    assert sorted(m.handles) == ["B0", "B1", "B2", "B3"]
+    assert m.scale == 1.0
+    assert m.score == 0.0
+
+
+def test_match_multi_dense_neighbours_parity():
+    """Three 3-pad rows placed close enough that their bbox radii overlap.
+    Each non-template row must surface as exactly one match, with no
+    handle absorbed into another match group."""
+    drawing = {}
+    for prefix, ox in [("T", 0), ("U", 10), ("V", 20)]:
+        for i, cx in enumerate([0, 2, 4]):
+            s = _pad(f"{prefix}{i}", ox + cx, 0)
+            drawing[s.handle] = s
+    out = find_matches(["T0", "T1", "T2"], drawing)
+    groups = sorted(tuple(sorted(m.handles)) for m in out.matches)
+    assert groups == [("U0", "U1", "U2"), ("V0", "V1", "V2")]
+    for m in out.matches:
+        assert m.scale == 1.0
+        assert m.score == 0.0
+
+
+def test_match_multi_mirrored_pattern_matches():
+    """A multi-entity template mirrored across the y-axis SHALL match via
+    one of the four PCA sign variants. Use an asymmetric pad layout so
+    mirrored ≠ rotated and the sign variant has to actually do work."""
+    # Template = 3 pads in an L: (0,0), (3,0), (0,2)
+    t_pads = [_pad(f"T{i}", cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2)]
+    )]
+    # Mirror across the y-axis → (-cx, cy), translated far away.
+    m_pads = [_pad(f"M{i}", 100 - cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2)]
+    )]
+    drawing = {s.handle: s for s in t_pads + m_pads}
+    out = find_matches([p.handle for p in t_pads], drawing)
+    assert len(out.matches) == 1
+    assert sorted(out.matches[0].handles) == ["M0", "M1", "M2"]
+
+
+def test_match_multi_reports_scale_exactly_one():
+    """Spec: every multi-entity match SHALL carry `scale = 1.0` exactly."""
+    a_pads = [_pad(f"A{i}", cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2)]
+    )]
+    b_pads = [_pad(f"B{i}", 50 + cx, cy) for i, (cx, cy) in enumerate(
+        [(0, 0), (3, 0), (0, 2)]
+    )]
+    drawing = {s.handle: s for s in a_pads + b_pads}
+    out = find_matches([p.handle for p in a_pads], drawing)
+    assert len(out.matches) >= 1
+    for m in out.matches:
+        assert m.scale == 1.0  # exact, not approximate
+        assert m.score == 0.0
+
+
+def test_fingerprint_bucket_cache_reuses_per_drawing_identity():
+    """Spec: cache is keyed by drawing dict identity. Same dict → same
+    bucket object; fresh dict → fresh bucket object."""
+    drawing = {s.handle: s for s in (
+        _pad("A", 0, 0), _pad("B", 5, 0), _pad("C", 0, 5),
+    )}
+    first = _get_fingerprint_buckets(drawing)
+    second = _get_fingerprint_buckets(drawing)
+    assert first is second, "same drawing dict must reuse the same bucket object"
+
+    # Rebuild as a new dict object — same content but different identity.
+    rebuilt = dict(drawing)
+    assert rebuilt is not drawing
+    fresh = _get_fingerprint_buckets(rebuilt)
+    assert fresh is not first, "fresh drawing dict must build a new bucket object"
+
+
+def test_match_multi_wrong_shape_seed_rejected():
+    """A drawing entity with a different shape than the seed template
+    must not produce a match — even when "other" template entities
+    happen to align at predicted positions. Closed under the rigid-
+    transform / fingerprint-bucket matcher by the fingerprint gate (the
+    wrong-shape candidate sits in a different bucket and is never
+    enumerated as a candidate seed)."""
+    t_seed = _pad("Tseed", 0, 0, w=1.0, h=0.4)
+    t_other = _pad("Tother", 5, 0, w=1.0, h=0.4)
+    # Chamfered rect: rect with one corner notched off, picked because PCA
+    # still points along the x-axis (so pose hypothesis aligns with the
+    # template's frame) but the chamfer floor against the original rect
+    # blows past tolerance.
+    wrong_seed = shape("X", [
+        (49.5, -0.2), (50.5, -0.2), (50.5, 0.2),
+        (49.7, 0.2), (49.5, 0.1), (49.5, -0.2),
+    ])
+    other_correct = _pad("Xother", 55, 0, w=1.0, h=0.4)
+    drawing = {
+        "Tseed": t_seed, "Tother": t_other,
+        "X": wrong_seed, "Xother": other_correct,
+    }
+    out = find_matches(["Tseed", "Tother"], drawing)
+    for m in out.matches:
+        assert "X" not in m.handles, (
+            f"wrong-shape seed leaked into a match: handles={m.handles}"
+        )

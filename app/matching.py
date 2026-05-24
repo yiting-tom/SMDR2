@@ -589,6 +589,72 @@ def _get_radius_buckets(
     return buckets
 
 
+# ---- Multi-entity fingerprint bucket -----------------------------------
+# Decimal digits kept when bucketing the (path_length, radius, sigma_ratio)
+# triple that fingerprints each EntityShape for the rigid-transform
+# multi-entity matcher. For mm-unit DXFs the meaningful coordinate
+# resolution is ~1e-4 mm (100 nm), well below any packaging tolerance; six
+# digits give 1e-6 mm (1 nm) headroom to absorb numerical noise from block
+# inserts while still distinguishing real design steps. Sits two digits
+# tighter than `CIRCLE_RADIUS_KEY_DIGITS = 4` because three composed
+# signals make incidental collisions more likely if we round too loosely.
+FINGERPRINT_DIGITS = 6
+
+# Centroid-distance tolerance for the rigid-transform "is this entity at
+# the predicted spot" check. The transform composes a centroid
+# subtraction + 2x2 matrix multiply + centroid addition; on mm-coords of
+# magnitude ≤ 10³ the accumulated FP error sits around 1e-12–1e-10. 1e-6
+# gives four orders of safety margin while still rejecting entities at
+# the wrong predicted position by even sub-µm. Replaces the old
+# `pos_tol = max(0.1, tolerance * 2)` that was sized for chamfer-tolerant
+# matching.
+CENTROID_NOISE_TOL = 1e-6
+
+
+def _fingerprint(shape: EntityShape) -> tuple[int, int, int]:
+    """Translation-/rotation-/mirror-invariant identity key for an
+    `EntityShape` under the rigid-transform multi-match model.
+
+    Returns a triple of ints (multiply-then-round) so two visually
+    identical shapes — even when stored with different vertex orderings
+    or starting points — hash to the same bucket. Floats would risk dict
+    keys not comparing equal across copies due to ULP-level noise.
+    """
+    sigma_ratio = _sigma_ratio(shape)
+    mult = 10 ** FINGERPRINT_DIGITS
+    return (
+        round(shape.path_length * mult),
+        round(shape.radius * mult),
+        round(sigma_ratio * mult),
+    )
+
+
+# Same lifetime / invalidation contract as `_radius_bucket_cache` — bound
+# to drawing dict identity, replaced when `_shapes_for(file_id)` produces
+# a fresh dict (library swap, re-preprocess).
+_fingerprint_bucket_cache: dict[int, dict[tuple[int, int, int], list[str]]] = {}
+
+
+def _get_fingerprint_buckets(
+    drawing: dict[str, EntityShape],
+) -> dict[tuple[int, int, int], list[str]]:
+    """Return (and cache) the per-drawing fingerprint bucket dict.
+
+    Bucket index used by `_match_multi` to enumerate candidate seeds in
+    O(bucket_size) instead of scanning the whole drawing with a
+    signatures gate.
+    """
+    cache_id = id(drawing)
+    cached = _fingerprint_bucket_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    buckets: dict[tuple[int, int, int], list[str]] = {}
+    for h, s in drawing.items():
+        buckets.setdefault(_fingerprint(s), []).append(h)
+    _fingerprint_bucket_cache[cache_id] = buckets
+    return buckets
+
+
 def _match_single_circle(
     template: EntityShape,
     drawing: dict[str, EntityShape],
@@ -734,42 +800,61 @@ def _match_multi(
     template_shapes: list[EntityShape],
     drawing: dict[str, EntityShape],
     skip: set[str],
-    tolerance: float,
+    tolerance: float,  # noqa: ARG001 — kept for signature parity; unused in rigid path
 ) -> MatchOutput:
-    """Pose-based multi-entity matching.
+    """Rigid-transform multi-entity matching.
 
-    The previous "gather everything in radius + bulk chamfer" approach failed
-    when neighbouring patterns were close together: extra entities got swept
-    in, blowing the point-count gate.
+    Assumes the drawing's named-object instances are translate / rotate /
+    mirror copies of the template — no scale, no shape drift. Pipeline:
 
-    New approach: pick the rarest template entity as a seed; encode every
-    other template entity's centroid in the seed's PCA-local frame; for each
-    candidate seed in the drawing, hypothesise the same pose and look up
-    each other template entity at its *predicted* position (not anywhere in
-    a radius). Then verify each per-entity shape match independently.
+      1. Pick the seed: rarest template entity by drawing-side bucket size
+         (`_get_fingerprint_buckets`).
+      2. Encode every other template entity's centroid in the seed's
+         PCA-local frame.
+      3. Enumerate candidate seeds from `buckets[fingerprint(seed)]` only
+         — no full-drawing scan, no `signatures_compatible` filter.
+      4. For each candidate seed, derive the rigid transform (R, t) by
+         aligning the seed template's PCA axes to the candidate's,
+         enumerating 4 sign variants for mirror / 180° ambiguity.
+      5. For each other template entity, predict its world centroid via
+         (R, t); look up the nearest drawing centroid in the KDTree.
+         Accept only when the distance is within `CENTROID_NOISE_TOL`
+         AND the fingerprint matches.
+      6. A match is reported when every other template entity is found.
+
+    No chamfer / `align_score` calls. Match `score` is always 0.0 and
+    `scale` always 1.0 — the rigid contract has no degrees of freedom
+    for either to deviate.
+
+    Limitation: square / isotropic seeds (σ-ratio ≈ 1) make PCA axes
+    rotationally ambiguous beyond the 4-sign variants — the matcher may
+    miss rotated copies in that case. Seed selection picks the rarest
+    template entity by bucket size, which usually avoids isotropic
+    candidates if the template has any non-isotropic entity. If the
+    entire template is isotropic, splitting it differently is the
+    workaround.
     """
     handles = list(drawing.keys())
     centroids = np.stack([drawing[h].centroid for h in handles])
     tree = cKDTree(centroids)
 
-    # Rarest template entity = best seed (smallest signature-compatible set).
-    def candidate_count(t: EntityShape) -> int:
-        return sum(1 for h in handles if h not in skip and signatures_compatible(t, drawing[h]))
+    buckets = _get_fingerprint_buckets(drawing)
 
-    seed = min(template_shapes, key=candidate_count)
+    # Rarest template entity = smallest fingerprint bucket in the drawing.
+    seed = min(
+        template_shapes,
+        key=lambda t: len(buckets.get(_fingerprint(t), [])),
+    )
     others = [t for t in template_shapes if t is not seed]
+    other_fingerprints = [_fingerprint(t) for t in others]
 
     # Encode other template entities' positions in seed's PCA-local frame.
     seed_centered = seed.points - seed.centroid
     seed_axes, _ = _pca_axes(seed_centered)
-    others_local: list[tuple[EntityShape, np.ndarray]] = []
-    for t in others:
+    others_local: list[tuple[EntityShape, np.ndarray, tuple[int, int, int]]] = []
+    for t, fp in zip(others, other_fingerprints):
         local = (t.centroid - seed.centroid) @ seed_axes.T
-        others_local.append((t, local))
-
-    # Position tolerance for "is this entity at the predicted spot": small
-    # absolute buffer above chamfer tolerance to absorb PCA + scale noise.
-    pos_tol = max(0.1, tolerance * 2)
+        others_local.append((t, local, fp))
 
     sign_variants = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
 
@@ -777,12 +862,13 @@ def _match_multi(
     near: list[NearMiss] = []
     seen_groups: set[tuple[str, ...]] = set()
 
-    for cand_handle in handles:
+    seed_fp = _fingerprint(seed)
+    seed_bucket = buckets.get(seed_fp, [])
+
+    for cand_handle in seed_bucket:
         if cand_handle in skip:
             continue
         cand = drawing[cand_handle]
-        if not signatures_compatible(seed, cand):
-            continue
 
         # Candidate's PCA frame in world.
         cand_axes, _ = _pca_axes(cand.points - cand.centroid)
@@ -792,32 +878,22 @@ def _match_multi(
             scaled_axes = cand_axes * np.array([[sx], [sy]])
 
             matched_handles = [cand_handle]
-            scores: list[float] = []
             consistent = True
 
-            for t, local_pos in others_local:
+            for t, local_pos, t_fp in others_local:
                 expected = local_pos @ scaled_axes + cand.centroid
-                nearby_idx = tree.query_ball_point(expected, r=pos_tol)
-                best_handle: str | None = None
-                best_score = float("inf")
-                for ni in nearby_idx:
-                    h = handles[ni]
-                    if h in skip or h in matched_handles:
-                        continue
-                    if not signatures_compatible(t, drawing[h]):
-                        continue
-                    res = align_score(t.points, drawing[h].points)
-                    if res is None:
-                        continue
-                    score, _ = res
-                    if score <= tolerance and score < best_score:
-                        best_handle = h
-                        best_score = score
-                if best_handle is None:
+                dist, idx = tree.query(expected, k=1)
+                if dist > CENTROID_NOISE_TOL:
                     consistent = False
                     break
-                matched_handles.append(best_handle)
-                scores.append(best_score)
+                h = handles[idx]
+                if h in skip or h in matched_handles:
+                    consistent = False
+                    break
+                if _fingerprint(drawing[h]) != t_fp:
+                    consistent = False
+                    break
+                matched_handles.append(h)
 
             if consistent:
                 group = tuple(sorted(matched_handles))
@@ -825,7 +901,7 @@ def _match_multi(
                     seen_groups.add(group)
                     matches.append(MatchResult(
                         handles=list(group),
-                        score=max(scores) if scores else 0.0,
+                        score=0.0,
                         scale=1.0,
                     ))
                 break  # don't try other sign variants — first hit wins
