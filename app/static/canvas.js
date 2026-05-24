@@ -80,6 +80,7 @@ const ctx = $canvas.getContext("2d");
 const FILE_ID = document.body.dataset.fileId;
 const API = {
   primitives:    () => `/api/files/${FILE_ID}/primitives`,
+  warmShapes:    () => `/api/files/${FILE_ID}/warm-shapes`,
   fileInfo:      () => `/api/files/${FILE_ID}`,
   match:         () => `/api/files/${FILE_ID}/match`,
   commit:        () => `/api/files/${FILE_ID}/commit`,
@@ -3380,6 +3381,14 @@ async function load() {
   ]);
   const data = await primRes.json();
   const tFetch = (performance.now() - t0).toFixed(0);
+
+  // Fire-and-forget warm-up of the server-side EntityShape cache
+  // (`_cached_shapes` LRU). Without this the user's first /api/match or
+  // /api/scan-all pays the ~1–2 s `build_entity_shapes` cost on large
+  // drawings; with it, the build runs in the server's worker thread
+  // while the canvas is still drawing primitives. Errors are ignored —
+  // the cache will be populated lazily by the first scan if this fails.
+  fetch(API.warmShapes(), { method: "POST" }).catch(() => {});
 
   primitives = data.primitives;
   background = data.background || "#1a1f26";

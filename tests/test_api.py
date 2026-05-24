@@ -81,6 +81,14 @@ def test_match_swap_endpoint_on_missing_file_404s():
         assert r.status_code == 404
 
 
+def test_warm_shapes_endpoint_on_missing_file_404s():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.post("/api/files/nonexistent/warm-shapes")
+        assert r.status_code == 404
+
+
 def test_side_regions_patch_persists_and_normalises(tmp_path, monkeypatch):
     """PATCH /api/files/{id}/side-regions stores normalised rectangles and
     surfaces them on the next GET. Uses a freshly-registered stub file so

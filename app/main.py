@@ -899,6 +899,17 @@ async def primitives(file_id: str) -> dict:
     }
 
 
+# Sync (not async) so FastAPI dispatches to the worker thread pool — the
+# ~1–2 s `build_entity_shapes` on a 25k-entity drawing must NOT block the
+# async event loop. Viewer fires this fire-and-forget after `/primitives`
+# returns so the user's first /match scan finds the LRU cache populated.
+@app.post("/api/files/{file_id}/warm-shapes")
+def warm_shapes(file_id: str) -> dict:
+    _resolve_file(file_id)
+    _, shapes = _shapes_for(file_id)
+    return {"entity_count": len(shapes)}
+
+
 class MatchRequest(BaseModel):
     handles: list[str]
     # Optional class hint for add-mode preview: the viewer sends the active
