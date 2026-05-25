@@ -844,6 +844,79 @@ def test_match_multi_three_rect_smd_with_real_dxf_noise():
         assert set(m.handles).isdisjoint(template_handles)
 
 
+def test_match_multi_frame_select_with_stacked_duplicates():
+    """Real-DXF symptom: frame-selecting an SMD grabs every overlapping
+    polyline (outline + fill, layered representations) — 6 handles for
+    a 3-rect visual SMD — while click-selecting grabs 3 (one per
+    visible rect). The user reported click-select worked, frame-select
+    found nothing.
+
+    Two things must hold:
+    (a) The 6-handle frame-select template is internally deduped to 3
+        visually-distinct entities, so the rigid alignment doesn't
+        over-constrain.
+    (b) Each matched group is expanded to include every stacked
+        duplicate in the drawing's clusters, so highlighting shows the
+        full set of polylines per copy regardless of how the user
+        selected the template.
+    """
+    def _rect_corners(cx, cy, w, h):
+        hw, hh = w / 2, h / 2
+        return [
+            (cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh),
+        ]
+
+    def _xform(corners, theta, dx, dy):
+        c, s = math.cos(theta), math.sin(theta)
+        R = np.array([[c, -s], [s, c]])
+        arr = np.asarray(corners) @ R.T + np.array([dx, dy])
+        return arr.tolist() + [arr[0].tolist()]
+
+    # Each of left/right/middle stored twice — the stacked-polyline
+    # pattern.
+    template_corners = [
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0, 0, 0.6, 0.3),
+        _rect_corners(0, 0, 0.6, 0.3),
+    ]
+    copies = [
+        (0.0, 0.0, 0.0),
+        (10.0, 0.0, math.pi / 3),
+        (0.0, 10.0, math.pi / 2),
+        (-5.0, 5.0, -math.pi / 4),
+        (3.0, -7.0, 0.7),
+    ]
+
+    drawing: dict[str, EntityShape] = {}
+    handles: list[str] = []
+    for i, (dx, dy, theta) in enumerate(copies):
+        for j, pts in enumerate(template_corners):
+            h = f"h{i}_{j}"
+            xformed = _xform(pts, theta, dx, dy)
+            drawing[h] = EntityShape.from_points(
+                h, [tuple(p) for p in xformed],
+            )
+            handles.append(h)
+
+    # User frame-selects copy 0 → all 6 handles.
+    template_handles = handles[:6]
+    output = find_matches(template_handles, drawing)
+
+    assert len(output.matches) == 4, (
+        f"expected 4 matches, got {len(output.matches)}"
+    )
+    for m in output.matches:
+        assert len(m.handles) == 6, (
+            f"each match should expand to the 6-handle cluster: {m.handles}"
+        )
+        # No template handle leaks into a match group.
+        assert set(m.handles).isdisjoint(template_handles)
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities

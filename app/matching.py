@@ -738,6 +738,61 @@ def _fingerprint_matches(
 _fingerprint_bucket_cache: dict[int, dict[tuple[int, int, int], list[str]]] = {}
 
 
+def _cluster_key(shape: EntityShape) -> tuple[int, int, tuple[int, int, int]]:
+    """Identity key for "this entity is a stacked duplicate of that one".
+
+    Two entities at the same centroid (within `CENTROID_NOISE_TOL`) with
+    the same fingerprint collapse to the same key. Used by
+    `_get_position_clusters` so the multi-entity matcher can (a) dedupe
+    the user's template selection — frame-select grabs every overlapping
+    polyline, click-select grabs one, and the matcher needs them to
+    behave identically — and (b) expand each matched handle back into
+    the full set of overlapping drawing handles for highlighting.
+    """
+    cx, cy = float(shape.centroid[0]), float(shape.centroid[1])
+    grid = 1.0 / CENTROID_NOISE_TOL
+    return (round(cx * grid), round(cy * grid), _fingerprint(shape))
+
+
+_position_cluster_cache: dict[int, dict[tuple[int, int, tuple[int, int, int]], list[str]]] = {}
+
+
+def _get_position_clusters(
+    drawing: dict[str, EntityShape],
+) -> dict[tuple[int, int, tuple[int, int, int]], list[str]]:
+    """Cluster drawing handles by `_cluster_key`. Cached per drawing dict
+    identity, same contract as `_radius_bucket_cache`."""
+    cache_id = id(drawing)
+    cached = _position_cluster_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    clusters: dict[tuple[int, int, tuple[int, int, int]], list[str]] = {}
+    for h, s in drawing.items():
+        clusters.setdefault(_cluster_key(s), []).append(h)
+    _position_cluster_cache[cache_id] = clusters
+    return clusters
+
+
+def _dedupe_template_shapes(
+    template_shapes: list[EntityShape],
+) -> list[EntityShape]:
+    """Drop entities sharing a cluster key with one already kept.
+
+    Order-preserving: returns the first occurrence of each cluster so
+    `find_matches`' template-handle semantics (seed = first selected
+    handle) stay deterministic.
+    """
+    seen: set[tuple[int, int, tuple[int, int, int]]] = set()
+    unique: list[EntityShape] = []
+    for t in template_shapes:
+        key = _cluster_key(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(t)
+    return unique
+
+
 def _get_fingerprint_buckets(
     drawing: dict[str, EntityShape],
 ) -> dict[tuple[int, int, int], list[str]]:
@@ -913,7 +968,7 @@ def _match_multi(
     drawing: dict[str, EntityShape],
     skip: set[str],
     tolerance: float,  # noqa: ARG001 — kept for signature parity; unused in rigid path
-) -> MatchOutput:
+) -> MatchOutput:  # noqa: PLR0915  — single linear pipeline reads cleaner than fragmenting
     """Rigid-transform multi-entity matching.
 
     Assumes the drawing's named-object instances are translate / rotate /
@@ -946,6 +1001,26 @@ def _match_multi(
     entire template is isotropic, splitting it differently is the
     workaround.
     """
+    # (a) Collapse stacked template entities so the rigid alignment
+    # doesn't over-constrain itself (frame-select grabs 6 polylines for
+    # a 3-rect SMD; click-select grabs 3; they must behave identically).
+    if len(template_shapes) > 1:
+        template_shapes = _dedupe_template_shapes(template_shapes)
+        if len(template_shapes) == 1:
+            return _match_single(template_shapes[0], drawing, skip, tolerance)
+
+    # (b) Extend `skip` to every drawing handle in the template's
+    # position clusters — a candidate at one of the template's exact
+    # positions is the template (or a stacked layer of it), not a new
+    # match.
+    position_clusters = _get_position_clusters(drawing)
+    extended_skip = set(skip)
+    for h in skip:
+        if h not in drawing:
+            continue
+        for member in position_clusters.get(_cluster_key(drawing[h]), []):
+            extended_skip.add(member)
+
     handles = list(drawing.keys())
     centroids = np.stack([drawing[h].centroid for h in handles])
     tree = cKDTree(centroids)
@@ -995,7 +1070,7 @@ def _match_multi(
                 seed_bucket.append(h)
 
     for cand_handle in seed_bucket:
-        if cand_handle in skip:
+        if cand_handle in extended_skip:
             continue
         cand = drawing[cand_handle]
 
@@ -1016,7 +1091,7 @@ def _match_multi(
                     consistent = False
                     break
                 h = handles[idx]
-                if h in skip or h in matched_handles:
+                if h in extended_skip or h in matched_handles:
                     consistent = False
                     break
                 if not _fingerprint_matches(_fingerprint(drawing[h]), t_fp):
@@ -1035,7 +1110,27 @@ def _match_multi(
                     ))
                 break  # don't try other sign variants — first hit wins
 
-    return MatchOutput(matches=matches, near_misses=near)
+    # Expand each match to its full position-cluster set. Two raw match
+    # groups that differ only in which stacked-duplicate handle KDTree
+    # happened to return collapse to the same physical SMD instance.
+    expanded_seen: set[tuple[str, ...]] = set()
+    expanded: list[MatchResult] = []
+    for m in matches:
+        full: set[str] = set()
+        for h in m.handles:
+            full.update(position_clusters.get(_cluster_key(drawing[h]), [h]))
+        full -= extended_skip
+        if not full:
+            continue
+        group = tuple(sorted(full))
+        if group in expanded_seen:
+            continue
+        expanded_seen.add(group)
+        expanded.append(MatchResult(
+            handles=list(group), score=0.0, scale=1.0,
+        ))
+
+    return MatchOutput(matches=expanded, near_misses=near)
 
 
 # ---- Diagnostic: why does A-as-template find B but B-as-template not find A?
