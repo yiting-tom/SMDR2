@@ -1064,6 +1064,56 @@ def test_match_multi_handle_count_consistent_across_match_groups():
         )
 
 
+def test_find_matches_from_pointsets_finds_original_template_instance():
+    """Library scan (find_matches_from_pointsets) must match the
+    original instance the template was saved from — unlike in-drawing
+    `find_matches`, which excludes the user-selected handles because
+    "find OTHERS" is the user's intent there.
+
+    User-reported symptom: 4-LINE template, drawing has only that one
+    instance. In-drawing scan correctly returns 0 (excluded itself).
+    Saving to library and running scan-all returned 0 too — wrong,
+    because the saved template is a standalone pattern definition;
+    its original DXF context isn't part of "what to exclude".
+    """
+    def _line(x1, y1, x2, y2):
+        return [(x1, y1), (x2, y2)]
+
+    def _box_at(cx, cy, w=1.0, h=0.3):
+        hw, hh = w / 2, h / 2
+        return [
+            _line(cx - hw, cy - hh, cx + hw, cy - hh),
+            _line(cx + hw, cy - hh, cx + hw, cy + hh),
+            _line(cx + hw, cy + hh, cx - hw, cy + hh),
+            _line(cx - hw, cy + hh, cx - hw, cy - hh),
+        ]
+
+    drawing: dict[str, EntityShape] = {}
+    for i, (cx, cy) in enumerate([(0.0, 0.0)]):  # ONE instance only
+        for j, line in enumerate(_box_at(cx, cy)):
+            h = f"s{i}_{j}"
+            drawing[h] = EntityShape.from_points(h, line, kind="line")
+
+    template_points = _box_at(0.0, 0.0)
+
+    # Library scan finds the (only) instance.
+    output = find_matches_from_pointsets(
+        template_points, drawing, entity_kinds=["line"] * 4,
+    )
+    assert len(output.matches) == 1, (
+        f"library scan should find the original instance, "
+        f"got {len(output.matches)} matches"
+    )
+    assert set(output.matches[0].handles) == {"s0_0", "s0_1", "s0_2", "s0_3"}
+
+    # In-drawing scan, by contrast, still excludes the user's selection.
+    in_drawing = find_matches(["s0_0", "s0_1", "s0_2", "s0_3"], drawing)
+    assert len(in_drawing.matches) == 0, (
+        f"in-drawing scan should exclude the user-selected template, "
+        f"got {len(in_drawing.matches)} matches"
+    )
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities

@@ -526,7 +526,10 @@ def find_matches(
             return _match_single_circle(tpl, drawing_shapes, template_handle_set)
         return _match_single(tpl, drawing_shapes, template_handle_set,
                              tolerance, n_jobs=n_jobs)
-    return _match_multi(template_shapes, drawing_shapes, template_handle_set, tolerance)
+    return _match_multi(
+        template_shapes, drawing_shapes, template_handle_set, tolerance,
+        exclude_template_positions=True,
+    )
 
 
 def _match_signature_mode(
@@ -614,7 +617,16 @@ def find_matches_from_pointsets(
         if tpl.kind == "circle" and tpl.radius > 0:
             return _match_single_circle(tpl, drawing_shapes, skip)
         return _match_single(tpl, drawing_shapes, skip, tolerance, n_jobs=n_jobs)
-    return _match_multi(template_shapes, drawing_shapes, skip, tolerance)
+    # Library scan: the saved template doesn't live in this drawing's
+    # handle space, so "don't match against template's own physical
+    # position" makes no sense — the original instance the template was
+    # saved from is a legitimate match. (In-drawing `find_matches`
+    # exclude_template_positions=True because the user explicitly
+    # picked those handles and wants to find OTHERS.)
+    return _match_multi(
+        template_shapes, drawing_shapes, skip, tolerance,
+        exclude_template_positions=False,
+    )
 
 
 # ---- Single-CIRCLE fast path --------------------------------------------
@@ -968,6 +980,8 @@ def _match_multi(
     drawing: dict[str, EntityShape],
     skip: set[str],
     tolerance: float,  # noqa: ARG001 — kept for signature parity; unused in rigid path
+    *,
+    exclude_template_positions: bool = True,
 ) -> MatchOutput:  # noqa: PLR0915  — single linear pipeline reads cleaner than fragmenting
     """Rigid-transform multi-entity matching.
 
@@ -1017,7 +1031,16 @@ def _match_multi(
     # close-packed neighbour SMDs whose pads touch share a cluster with
     # the template's pads, and extending would lock the neighbours out.
     position_clusters = _get_position_clusters(drawing)
-    template_cluster_keys = {_cluster_key(t) for t in template_shapes}
+    # Empty set when `exclude_template_positions` is False — the
+    # cand-loop's membership check below then becomes a no-op,
+    # letting drawing entities at the template's own physical
+    # positions match. Library scan (`find_matches_from_pointsets`)
+    # needs this so the original instance the template was saved
+    # from is still found.
+    template_cluster_keys: set[tuple[int, int, tuple[int, int, int]]] = (
+        {_cluster_key(t) for t in template_shapes}
+        if exclude_template_positions else set()
+    )
 
     # (c) Per-role multiplicity = how many handles the user originally
     # selected at each template cluster. Frame-select = 2 per visual
