@@ -1009,17 +1009,15 @@ def _match_multi(
         if len(template_shapes) == 1:
             return _match_single(template_shapes[0], drawing, skip, tolerance)
 
-    # (b) Extend `skip` to every drawing handle in the template's
-    # position clusters — a candidate at one of the template's exact
-    # positions is the template (or a stacked layer of it), not a new
-    # match.
+    # (b) Cluster index for two purposes downstream: (i) skipping cands
+    # whose physical position coincides with the template's — that's a
+    # stacked twin of the template, not a new match — and (ii) expanding
+    # each match group back to its full set of overlapping handles for
+    # highlighting. We must NOT extend `skip` to all cluster members:
+    # close-packed neighbour SMDs whose pads touch share a cluster with
+    # the template's pads, and extending would lock the neighbours out.
     position_clusters = _get_position_clusters(drawing)
-    extended_skip = set(skip)
-    for h in skip:
-        if h not in drawing:
-            continue
-        for member in position_clusters.get(_cluster_key(drawing[h]), []):
-            extended_skip.add(member)
+    template_cluster_keys = {_cluster_key(t) for t in template_shapes}
 
     handles = list(drawing.keys())
     centroids = np.stack([drawing[h].centroid for h in handles])
@@ -1070,7 +1068,14 @@ def _match_multi(
                 seed_bucket.append(h)
 
     for cand_handle in seed_bucket:
-        if cand_handle in extended_skip:
+        if cand_handle in skip:
+            continue
+        # A candidate whose cluster matches one of the template's
+        # cluster keys sits at the template's exact physical position —
+        # i.e. it's a stacked twin of the template that the user just
+        # happened not to select. Re-matching against the template's
+        # own position is not what the user asked for.
+        if _cluster_key(drawing[cand_handle]) in template_cluster_keys:
             continue
         cand = drawing[cand_handle]
 
@@ -1086,18 +1091,28 @@ def _match_multi(
 
             for t, local_pos, t_fp in others_local:
                 expected = local_pos @ scaled_axes + cand.centroid
-                dist, idx = tree.query(expected, k=1)
-                if dist > CENTROID_NOISE_TOL:
+                # `query_ball_point` (not k=1) is essential when the
+                # drawing has stacked duplicates or neighbour SMDs whose
+                # pads coincide with the predicted spot — KDTree's k=1
+                # tiebreak returns the lowest-index handle, which may
+                # be in `extended_skip` even when an acceptable
+                # cluster-mate is sitting at the same coordinate.
+                nearby = tree.query_ball_point(expected, r=CENTROID_NOISE_TOL)
+                found: str | None = None
+                for idx in nearby:
+                    h = handles[idx]
+                    if h in skip or h in matched_handles:
+                        continue
+                    if not _fingerprint_matches(
+                        _fingerprint(drawing[h]), t_fp,
+                    ):
+                        continue
+                    found = h
+                    break
+                if found is None:
                     consistent = False
                     break
-                h = handles[idx]
-                if h in extended_skip or h in matched_handles:
-                    consistent = False
-                    break
-                if not _fingerprint_matches(_fingerprint(drawing[h]), t_fp):
-                    consistent = False
-                    break
-                matched_handles.append(h)
+                matched_handles.append(found)
 
             if consistent:
                 group = tuple(sorted(matched_handles))
@@ -1119,7 +1134,7 @@ def _match_multi(
         full: set[str] = set()
         for h in m.handles:
             full.update(position_clusters.get(_cluster_key(drawing[h]), [h]))
-        full -= extended_skip
+        full -= skip
         if not full:
             continue
         group = tuple(sorted(full))

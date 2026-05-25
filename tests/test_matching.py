@@ -917,6 +917,78 @@ def test_match_multi_frame_select_with_stacked_duplicates():
         assert set(m.handles).isdisjoint(template_handles)
 
 
+def test_match_multi_close_packed_smds_find_each_other_symmetrically():
+    """Real-DXF symptom: a row of touching SMDs (neighbour's left pad
+    sits at the same coordinate as previous neighbour's right pad).
+    The user reported "A 找 B 找得到，B 找 A 找不到" — some neighbours
+    matched, others didn't, in a direction-dependent pattern.
+
+    Earlier fix extended `skip` to all cluster members of template
+    positions to suppress self-match against stacked twins. But for
+    close-packed neighbours whose pads share a cluster with the
+    template's pads, that extension wrongly locked the neighbour's
+    pads out of matching too. The fix: keep `skip` to the user's own
+    selection; instead, suppress only candidates whose cluster_key
+    matches a template entity's cluster_key (true stacked twin at
+    template's exact physical position).
+    """
+    def _rect_corners(cx, cy, w, h):
+        hw, hh = w / 2, h / 2
+        return [
+            (cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh),
+        ]
+
+    def _xform(corners, theta, dx, dy):
+        c, s = math.cos(theta), math.sin(theta)
+        R = np.array([[c, -s], [s, c]])
+        arr = np.asarray(corners) @ R.T + np.array([dx, dy])
+        return arr.tolist() + [arr[0].tolist()]
+
+    # 3-rect SMD (stacked dups), pitch 0.35 mm → neighbour pads touch
+    # exactly: SMD_i right at (i·0.35 + 0.175) = (i+1)·0.35 − 0.175 =
+    # SMD_{i+1} left.
+    template_corners = [
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0, 0, 0.6, 0.3),
+        _rect_corners(0, 0, 0.6, 0.3),
+    ]
+    drawing: dict[str, EntityShape] = {}
+    smd_handles: list[list[str]] = []
+    for i, (dx, dy, theta) in enumerate(
+        [(0.0, 0.0, 0.0), (0.35, 0.0, 0.0),
+         (0.7, 0.0, 0.0), (1.05, 0.0, 0.0)]
+    ):
+        h_list = []
+        for j, pts in enumerate(template_corners):
+            h = f"smd{i}_{j}"
+            xformed = _xform(pts, theta, dx, dy)
+            drawing[h] = EntityShape.from_points(
+                h, [tuple(p) for p in xformed],
+            )
+            h_list.append(h)
+        smd_handles.append(h_list)
+
+    # Each SMD as template must find every other SMD (handles overlap).
+    for i, tpl_h in enumerate(smd_handles):
+        output = find_matches(tpl_h, drawing)
+        found_other_smds: set[int] = set()
+        for m in output.matches:
+            for k, other_h in enumerate(smd_handles):
+                if k == i:
+                    continue
+                if set(m.handles) & set(other_h):
+                    found_other_smds.add(k)
+        expected = set(range(len(smd_handles))) - {i}
+        assert found_other_smds == expected, (
+            f"SMD{i} as template: found other SMDs {sorted(found_other_smds)}, "
+            f"expected {sorted(expected)} (close-packed symmetry)"
+        )
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities
