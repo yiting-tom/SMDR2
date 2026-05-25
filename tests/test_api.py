@@ -650,3 +650,124 @@ def test_upload_lid_to_empty_product_succeeds():
         g = client.get(f"/api/products/{pid}").json()
         assert len(g["files_by_role_all"]["LID"]) == 1
         assert g["files_by_role_all"]["RING"] == []
+
+
+# ---- Dev-mode rule-check JSON upload -------------------------------------
+
+def _valid_upload_payload() -> dict:
+    """Minimal envelope-valid RuleChecking JSON for upload tests."""
+    return {
+        "Rule1": {
+            "pass": True,
+            "text": "uploaded happy-path",
+            "rules": [{
+                "part": "BD",
+                "file_id": "abc123de",
+                "from": "S1",
+                "to":   "A1",
+                "text": "distance = 8.5 mm (> 5)",
+                "tol":      None,
+                "tol_text": None,
+            }],
+        },
+    }
+
+
+def test_upload_rule_json_writes_persisted_result():
+    """Happy path: a valid envelope is persisted to
+    `data/rule_check/{pid}.json` and immediately retrievable via the
+    same GET the dashboard uses."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "upload-rc-happy")
+        payload = _valid_upload_payload()
+
+        r = client.post(f"/api/products/{pid}/rule-check/upload", json=payload)
+        assert r.status_code == 200, r.text
+        summary = r.json()
+        assert summary["rule_count"] == 1
+        assert summary["pass_count"] == 1
+        assert summary["fail_count"] == 0
+
+        g = client.get(f"/api/products/{pid}/rule-check")
+        assert g.status_code == 200
+        assert g.json()["results"] == payload
+
+
+def test_upload_rule_json_rejects_invalid_envelope():
+    """Envelope violation (`from` set, `file_id` null) returns 400 with
+    the validator's error message so the user can fix the JSON
+    inline."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "upload-rc-bad")
+        bad = {
+            "R": {
+                "pass": False, "text": "x",
+                "rules": [{
+                    "part": "BD", "file_id": None,
+                    "from": "AB12", "to": None,
+                    "text": "missing file_id",
+                    "tol": None, "tol_text": None,
+                }],
+            },
+        }
+        r = client.post(f"/api/products/{pid}/rule-check/upload", json=bad)
+        assert r.status_code == 400, r.text
+        assert "file_id" in r.json()["detail"]
+        # Nothing got persisted — the subsequent GET still 404s.
+        assert client.get(f"/api/products/{pid}/rule-check").status_code == 404
+
+
+def test_upload_rule_json_404_unknown_product():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/products/no-such-pid/rule-check/upload",
+            json=_valid_upload_payload(),
+        )
+        assert r.status_code == 404
+
+
+def test_upload_rule_json_overwrites_previous_result():
+    """A second upload replaces the first — the persisted file holds
+    the latest content, no merging."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "upload-rc-replace")
+
+        first = _valid_upload_payload()
+        r1 = client.post(f"/api/products/{pid}/rule-check/upload", json=first)
+        assert r1.status_code == 200
+
+        second = {
+            "Rule2": {
+                "pass": False,
+                "text": "different rule",
+                "rules": [],
+            },
+        }
+        r2 = client.post(f"/api/products/{pid}/rule-check/upload", json=second)
+        assert r2.status_code == 200
+
+        g = client.get(f"/api/products/{pid}/rule-check").json()
+        assert g["results"] == second
+        assert "Rule1" not in g["results"]
+
+
+def test_upload_rule_json_rejects_malformed_body():
+    """Non-JSON body is rejected with 400 before envelope validation runs."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        pid = _new_product(client, "upload-rc-malformed")
+        r = client.post(
+            f"/api/products/{pid}/rule-check/upload",
+            content=b"not json at all",
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 400
