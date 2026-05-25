@@ -1019,6 +1019,18 @@ def _match_multi(
     position_clusters = _get_position_clusters(drawing)
     template_cluster_keys = {_cluster_key(t) for t in template_shapes}
 
+    # (c) Per-role multiplicity = how many handles the user originally
+    # selected at each template cluster. Frame-select = 2 per visual
+    # rect; click-select = 1. Used to bound cluster expansion so every
+    # match group ends up with the same handle count, even when a
+    # neighbour SMD's shared pad cluster contains extra members.
+    template_multiplicity: dict[tuple[int, int, tuple[int, int, int]], int] = {}
+    for h in skip:
+        if h not in drawing:
+            continue
+        key = _cluster_key(drawing[h])
+        template_multiplicity[key] = template_multiplicity.get(key, 0) + 1
+
     handles = list(drawing.keys())
     centroids = np.stack([drawing[h].centroid for h in handles])
     tree = cKDTree(centroids)
@@ -1042,14 +1054,18 @@ def _match_multi(
     # Encode other template entities' positions in seed's PCA-local frame.
     seed_centered = seed.points - seed.centroid
     seed_axes, _ = _pca_axes(seed_centered)
-    others_local: list[tuple[EntityShape, np.ndarray, tuple[int, int, int]]] = []
+    seed_key = _cluster_key(seed)
+    others_local: list[tuple[EntityShape, np.ndarray, tuple[int, int, int], tuple[int, int, tuple[int, int, int]]]] = []
     for t, fp in zip(others, other_fingerprints):
         local = (t.centroid - seed.centroid) @ seed_axes.T
-        others_local.append((t, local, fp))
+        others_local.append((t, local, fp, _cluster_key(t)))
 
     sign_variants = [(1, 1), (1, -1), (-1, 1), (-1, -1)]
 
-    matches: list[MatchResult] = []
+    # Raw matches before cluster expansion: each match is a list of
+    # (drawing_handle, template_cluster_key) so expansion can bound by
+    # per-role multiplicity later.
+    raw_matches: list[list[tuple[str, tuple[int, int, tuple[int, int, int]]]]] = []
     near: list[NearMiss] = []
     seen_groups: set[tuple[str, ...]] = set()
 
@@ -1086,22 +1102,23 @@ def _match_multi(
             # 4 mirror/flip variants of how candidate's PCA aligns to template's.
             scaled_axes = cand_axes * np.array([[sx], [sy]])
 
-            matched_handles = [cand_handle]
+            matched: list[tuple[str, tuple[int, int, tuple[int, int, int]]]] = [(cand_handle, seed_key)]
+            matched_handle_set: set[str] = {cand_handle}
             consistent = True
 
-            for t, local_pos, t_fp in others_local:
+            for t, local_pos, t_fp, t_key in others_local:
                 expected = local_pos @ scaled_axes + cand.centroid
                 # `query_ball_point` (not k=1) is essential when the
                 # drawing has stacked duplicates or neighbour SMDs whose
                 # pads coincide with the predicted spot — KDTree's k=1
                 # tiebreak returns the lowest-index handle, which may
-                # be in `extended_skip` even when an acceptable
-                # cluster-mate is sitting at the same coordinate.
+                # be in `skip` even when an acceptable cluster-mate is
+                # sitting at the same coordinate.
                 nearby = tree.query_ball_point(expected, r=CENTROID_NOISE_TOL)
                 found: str | None = None
                 for idx in nearby:
                     h = handles[idx]
-                    if h in skip or h in matched_handles:
+                    if h in skip or h in matched_handle_set:
                         continue
                     if not _fingerprint_matches(
                         _fingerprint(drawing[h]), t_fp,
@@ -1112,37 +1129,59 @@ def _match_multi(
                 if found is None:
                     consistent = False
                     break
-                matched_handles.append(found)
+                matched.append((found, t_key))
+                matched_handle_set.add(found)
 
             if consistent:
-                group = tuple(sorted(matched_handles))
+                group = tuple(sorted(matched_handle_set))
                 if group not in seen_groups:
                     seen_groups.add(group)
-                    matches.append(MatchResult(
-                        handles=list(group),
-                        score=0.0,
-                        scale=1.0,
-                    ))
+                    raw_matches.append(matched)
                 break  # don't try other sign variants — first hit wins
 
-    # Expand each match to its full position-cluster set. Two raw match
-    # groups that differ only in which stacked-duplicate handle KDTree
-    # happened to return collapse to the same physical SMD instance.
-    expanded_seen: set[tuple[str, ...]] = set()
+    # Expand each match to its full position-cluster set, bounded by
+    # `template_multiplicity` so every match group ends up with the
+    # same handle count as the template — even when a shared-pad
+    # cluster (close-packed neighbour SMDs) contains extra members
+    # from another SMD's pad at the same coordinate.
+    #
+    # Two raw matches that occupy the same physical positions (i.e.
+    # whose handles share cluster_keys) but picked different stacked
+    # duplicates collapse to one — otherwise click-select on a
+    # frame-stacked drawing would produce N copies of every match.
+    expanded_seen_physical: set[tuple] = set()
     expanded: list[MatchResult] = []
-    for m in matches:
+    for matched in raw_matches:
         full: set[str] = set()
-        for h in m.handles:
-            full.update(position_clusters.get(_cluster_key(drawing[h]), [h]))
+        for h, role_key in matched:
+            n_target = template_multiplicity.get(role_key, 1)
+            cluster_members = position_clusters.get(
+                _cluster_key(drawing[h]), [h],
+            )
+            # Always include the matched handle itself (it's the one
+            # the alignment actually verified), then top up to the
+            # template's multiplicity with the lowest-index non-skip
+            # cluster-mates so the count stays consistent across
+            # match groups.
+            picked: list[str] = [h]
+            for cm in cluster_members:
+                if len(picked) >= n_target:
+                    break
+                if cm == h or cm in picked or cm in skip:
+                    continue
+                picked.append(cm)
+            full.update(picked)
         full -= skip
         if not full:
             continue
-        group = tuple(sorted(full))
-        if group in expanded_seen:
+        physical_fp = tuple(sorted(
+            _cluster_key(drawing[h]) for h in full
+        ))
+        if physical_fp in expanded_seen_physical:
             continue
-        expanded_seen.add(group)
+        expanded_seen_physical.add(physical_fp)
         expanded.append(MatchResult(
-            handles=list(group), score=0.0, scale=1.0,
+            handles=sorted(full), score=0.0, scale=1.0,
         ))
 
     return MatchOutput(matches=expanded, near_misses=near)

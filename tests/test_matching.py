@@ -989,6 +989,81 @@ def test_match_multi_close_packed_smds_find_each_other_symmetrically():
         )
 
 
+def test_match_multi_handle_count_consistent_across_match_groups():
+    """Every match group must contain exactly as many handles as the
+    user-supplied template — no fewer (partial bleed-out), no more
+    (extra handles from a neighbour's shared-pad cluster).
+
+    User report: match JSON contained groups of 3 / 5 / 9 handles in
+    the same scan. Cause: cluster expansion blindly unioned every
+    member of the matched handle's cluster, which for close-packed
+    neighbours includes the adjacent SMD's pads. Fix: bound expansion
+    by per-role template multiplicity; collapse two raw matches that
+    occupy the same physical positions to one (otherwise click-select
+    on a frame-stacked drawing produces N copies of every match).
+    """
+    def _rect_corners(cx, cy, w, h):
+        hw, hh = w / 2, h / 2
+        return [
+            (cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh),
+        ]
+
+    def _xform(corners, theta, dx, dy):
+        c, s = math.cos(theta), math.sin(theta)
+        R = np.array([[c, -s], [s, c]])
+        arr = np.asarray(corners) @ R.T + np.array([dx, dy])
+        return arr.tolist() + [arr[0].tolist()]
+
+    # 4 SMDs in a row, pitch 0.35 → pads share cluster with neighbours.
+    # Each SMD has 6 handles (3 visual rects × 2 stacked dups).
+    template_corners = [
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0, 0, 0.6, 0.3),
+        _rect_corners(0, 0, 0.6, 0.3),
+    ]
+    drawing: dict[str, EntityShape] = {}
+    smd_handles: list[list[str]] = []
+    for i, (dx, dy, theta) in enumerate(
+        [(0.0, 0.0, 0.0), (0.35, 0.0, 0.0),
+         (0.7, 0.0, 0.0), (1.05, 0.0, 0.0)]
+    ):
+        h_list = []
+        for j, pts in enumerate(template_corners):
+            h = f"smd{i}_{j}"
+            xformed = _xform(pts, theta, dx, dy)
+            drawing[h] = EntityShape.from_points(
+                h, [tuple(p) for p in xformed],
+            )
+            h_list.append(h)
+        smd_handles.append(h_list)
+
+    # Frame-select (all 6 handles): every match must have 6 handles.
+    out_frame = find_matches(smd_handles[0], drawing)
+    assert len(out_frame.matches) == 3, (
+        f"frame-select expected 3 matches (one per non-template SMD), "
+        f"got {len(out_frame.matches)}"
+    )
+    for m in out_frame.matches:
+        assert len(m.handles) == 6, (
+            f"frame-select match should have 6 handles: {m.handles}"
+        )
+
+    # Click-select (1 handle per visual rect): every match must have 3.
+    click_template = smd_handles[0][::2]  # 3 handles
+    out_click = find_matches(click_template, drawing)
+    assert len(out_click.matches) == 3, (
+        f"click-select expected 3 matches, got {len(out_click.matches)}"
+    )
+    for m in out_click.matches:
+        assert len(m.handles) == 3, (
+            f"click-select match should have 3 handles: {m.handles}"
+        )
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities
