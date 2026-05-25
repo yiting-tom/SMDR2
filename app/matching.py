@@ -654,23 +654,37 @@ def _get_radius_buckets(
 # ---- Multi-entity fingerprint bucket -----------------------------------
 # Decimal digits kept when bucketing the (path_length, radius, sigma_ratio)
 # triple that fingerprints each EntityShape for the rigid-transform
-# multi-entity matcher. For mm-unit DXFs the meaningful coordinate
-# resolution is ~1e-4 mm (100 nm), well below any packaging tolerance; six
-# digits give 1e-6 mm (1 nm) headroom to absorb numerical noise from block
-# inserts while still distinguishing real design steps. Sits two digits
-# tighter than `CIRCLE_RADIUS_KEY_DIGITS = 4` because three composed
-# signals make incidental collisions more likely if we round too loosely.
-FINGERPRINT_DIGITS = 6
+# multi-entity matcher. 1e-3 mm (= 1 µm) bucket grid, paired with the
+# ±1-neighbour bucket lookup below, lets visually-identical copies with
+# up to ~1 µm of per-coord noise cluster while still distinguishing
+# real packaging-design steps (which are 5+ µm apart).
+#
+# Was 6 originally on the theory that block-insert FP noise sits at
+# ULP-scale (1e-13), but real CAD pipelines emit copies whose coordinates
+# differ at the µm scale (manually-placed instances, mixed-precision
+# transforms, round-tripped through ASCII DXF). At digit 6 a single µm
+# of perimeter drift puts each visually-identical instance in its own
+# singleton bucket — breaking the bucket-lookup contract that powers
+# _match_multi.
+FINGERPRINT_DIGITS = 3
+
+# Fingerprint bucket lookup radius (in fp units = 10^-FINGERPRINT_DIGITS mm).
+# `_match_multi` enumerates buckets at fp ± this many bins in each of the
+# three dims (3^3 = 27 buckets per lookup), and the per-"other" verification
+# accepts any candidate whose fp lies within this same ±1 box. Buys
+# robustness against noise that straddles a bucket boundary at negligible
+# cost.
+FINGERPRINT_NEIGHBOR = 1
 
 # Centroid-distance tolerance for the rigid-transform "is this entity at
-# the predicted spot" check. The transform composes a centroid
-# subtraction + 2x2 matrix multiply + centroid addition; on mm-coords of
-# magnitude ≤ 10³ the accumulated FP error sits around 1e-12–1e-10. 1e-6
-# gives four orders of safety margin while still rejecting entities at
-# the wrong predicted position by even sub-µm. Replaces the old
-# `pos_tol = max(0.1, tolerance * 2)` that was sized for chamfer-tolerant
-# matching.
-CENTROID_NOISE_TOL = 1e-6
+# the predicted spot" check. Sized to absorb PCA-driven prediction drift
+# when the seed entity's vertices have µm-scale noise. Was 1e-6 originally
+# (sized for bit-identical synthetic data), but rejected real-world
+# bit-similar-but-not-identical copies. False-match risk is negligible:
+# the fingerprint neighbour check is the real shape gate, and entity
+# centroids in packaging designs are mm-scale apart — orders of magnitude
+# above this tolerance.
+CENTROID_NOISE_TOL = 1e-3
 
 
 def _fingerprint(shape: EntityShape) -> tuple[int, int, int]:
@@ -688,6 +702,33 @@ def _fingerprint(shape: EntityShape) -> tuple[int, int, int]:
         round(shape.path_length * mult),
         round(shape.radius * mult),
         round(sigma_ratio * mult),
+    )
+
+
+def _fingerprint_neighbours(
+    fp: tuple[int, int, int], radius: int = FINGERPRINT_NEIGHBOR,
+) -> Iterable[tuple[int, int, int]]:
+    """Yield every fingerprint within ±radius of fp in each dim.
+
+    Used to absorb instances whose noise nudges them across a bucket
+    boundary. For radius=1 this is the 27-cell box around fp.
+    """
+    p0, p1, p2 = fp
+    for dp in range(-radius, radius + 1):
+        for dr in range(-radius, radius + 1):
+            for ds in range(-radius, radius + 1):
+                yield (p0 + dp, p1 + dr, p2 + ds)
+
+
+def _fingerprint_matches(
+    a: tuple[int, int, int], b: tuple[int, int, int],
+    *, radius: int = FINGERPRINT_NEIGHBOR,
+) -> bool:
+    """True iff each component of `a` and `b` differ by ≤ radius."""
+    return (
+        abs(a[0] - b[0]) <= radius
+        and abs(a[1] - b[1]) <= radius
+        and abs(a[2] - b[2]) <= radius
     )
 
 
@@ -911,11 +952,17 @@ def _match_multi(
 
     buckets = _get_fingerprint_buckets(drawing)
 
-    # Rarest template entity = smallest fingerprint bucket in the drawing.
-    seed = min(
-        template_shapes,
-        key=lambda t: len(buckets.get(_fingerprint(t), [])),
-    )
+    def _bucket_size_with_neighbours(t: EntityShape) -> int:
+        return sum(
+            len(buckets.get(fp, []))
+            for fp in _fingerprint_neighbours(_fingerprint(t))
+        )
+
+    # Rarest template entity = smallest fingerprint neighbourhood in the
+    # drawing. Neighbour-bucket lookup absorbs noise that straddles
+    # bucket boundaries (real CAD copies often differ by ~1 µm at the
+    # coord level).
+    seed = min(template_shapes, key=_bucket_size_with_neighbours)
     others = [t for t in template_shapes if t is not seed]
     other_fingerprints = [_fingerprint(t) for t in others]
 
@@ -934,7 +981,18 @@ def _match_multi(
     seen_groups: set[tuple[str, ...]] = set()
 
     seed_fp = _fingerprint(seed)
-    seed_bucket = buckets.get(seed_fp, [])
+    # Enumerate every handle in the ±1 fingerprint neighbourhood of the
+    # seed (27 buckets at most). Pulls in copies whose own fingerprint
+    # rounds to an adjacent cell due to per-vertex noise — without this
+    # the seed bucket is a singleton for each visually-identical-but-
+    # numerically-slightly-different instance.
+    seed_bucket: list[str] = []
+    seen_seed: set[str] = set()
+    for fp in _fingerprint_neighbours(seed_fp):
+        for h in buckets.get(fp, []):
+            if h not in seen_seed:
+                seen_seed.add(h)
+                seed_bucket.append(h)
 
     for cand_handle in seed_bucket:
         if cand_handle in skip:
@@ -961,7 +1019,7 @@ def _match_multi(
                 if h in skip or h in matched_handles:
                     consistent = False
                     break
-                if _fingerprint(drawing[h]) != t_fp:
+                if not _fingerprint_matches(_fingerprint(drawing[h]), t_fp):
                     consistent = False
                     break
                 matched_handles.append(h)

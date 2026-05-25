@@ -769,6 +769,81 @@ def test_match_multi_symmetry_property(seed):
     )
 
 
+def test_match_multi_three_rect_smd_with_real_dxf_noise():
+    """Real-DXF symptom: 3-rect SMD copies whose vertex coordinates
+    differ at the µm scale (manually-placed instances, mixed-precision
+    transforms) must still cluster into the same fingerprint bucket and
+    the predicted-position check must absorb the resulting PCA-axis drift.
+
+    Reproduces a user-reported case where 2-entity (left+right) found
+    every copy but 3-entity (left+right+middle) found none. With
+    `FINGERPRINT_DIGITS=6` + `CENTROID_NOISE_TOL=1e-6`, even ~5 µm of
+    per-vertex noise puts every drawing instance into its own singleton
+    bucket and pushes predicted positions out of tolerance — both
+    failures the broadened defaults are sized to absorb.
+    """
+    rng = np.random.RandomState(0)
+
+    def _rect_corners(cx, cy, w, h):
+        """The four corners — closing vertex appended after noise so the
+        post-dedup centroid matches DXF semantics (where the trailing
+        repeat is a bit-identical copy of the first vertex, not an
+        independently-noisy point)."""
+        hw, hh = w / 2, h / 2
+        return [
+            (cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh),
+        ]
+
+    def _xform_with_noise(corners, theta, dx, dy, noise_scale):
+        c, s = math.cos(theta), math.sin(theta)
+        R = np.array([[c, -s], [s, c]])
+        arr = np.asarray(corners) @ R.T + np.array([dx, dy])
+        arr += rng.normal(scale=noise_scale, size=arr.shape)
+        # Bit-identical closing vertex — real DXF closed polylines store
+        # vertex 0 twice, exactly.
+        return arr.tolist() + [arr[0].tolist()]
+
+    # User's exact dimensions: left+right 0.25w×0.35h, middle 0.6w×0.3h
+    template_pts = [
+        _rect_corners(-0.175, 0, 0.25, 0.35),
+        _rect_corners(0.175, 0, 0.25, 0.35),
+        _rect_corners(0, 0, 0.6, 0.3),
+    ]
+    copies = [
+        (0.0, 0.0, 0.0),
+        (10.0, 0.0, math.pi / 3),
+        (0.0, 10.0, math.pi / 2),
+        (-5.0, 5.0, -math.pi / 4),
+        (3.0, -7.0, 0.7),
+    ]
+
+    drawing: dict[str, EntityShape] = {}
+    handles: list[str] = []
+    for i, (dx, dy, theta) in enumerate(copies):
+        for j, pts in enumerate(template_pts):
+            h = f"h{i}_{j}"
+            # 100 nm per-vertex noise — the upper end of real-DXF
+            # coordinate precision (4-decimal stored coords).
+            xformed = _xform_with_noise(pts, theta, dx, dy, noise_scale=1e-4)
+            drawing[h] = EntityShape.from_points(
+                h, [tuple(p) for p in xformed],
+            )
+            handles.append(h)
+
+    # First copy's three handles are the template.
+    template_handles = handles[:3]
+    output = find_matches(template_handles, drawing)
+
+    # 4 non-template copies must all be found, each as a complete 3-handle group.
+    assert len(output.matches) == 4, (
+        f"expected 4 matches (one per non-template copy), got {len(output.matches)}"
+    )
+    for m in output.matches:
+        assert len(m.handles) == 3
+        assert set(m.handles).isdisjoint(template_handles)
+
+
 def test_match_multi_wrong_shape_seed_rejected():
     """A drawing entity with a different shape than the seed template
     must not produce a match — even when "other" template entities
