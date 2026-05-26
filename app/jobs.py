@@ -31,6 +31,7 @@ from app.storage import (
     layer_preview_dir,
     layer_preview_primitives_path,
     layer_preview_svg_path,
+    match_path,
     parsed_path,
     prematch_path,
     rule_check_path,
@@ -613,6 +614,166 @@ def _on_rule_check_done(job_id: str, fut: Future) -> None:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
+
+
+# ---- Save Match worker --------------------------------------------------
+def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
+    # Imports inside so spawned workers re-import cleanly. This worker
+    # is a verbatim port of the loop that previously lived inside
+    # `app/main.py:save_match_json` — same `out` shape, same per-class
+    # skip-when-impossible guard, same `arbitrate()` call, same on-disk
+    # JSON layout. Only the surrounding plumbing (HTTP handler → process
+    # pool) changes.
+    from app.class_arbitration import arbitrate
+    from app.files import FILE_STORE
+    from app.library import (
+        CLASS_ARBITRATION_GROUPS,
+        CLASS_JSON_KEY,
+        CLASS_VIEW_CONSTRAINTS,
+        LIBRARIES,
+        build_handle_index,
+    )
+    from app.matching import build_entity_shapes, find_matches_from_pointsets
+    from app.side_regions import split_matches_by_side
+
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise RuntimeError(f"file {file_id!r} not found in worker")
+    lib = LIBRARIES.get(rec.library_id)
+    if lib is None:
+        raise RuntimeError(
+            f"library {rec.library_id!r} not registered in worker"
+        )
+    pp = parsed_path(file_id)
+    if not pp.exists():
+        raise RuntimeError(f"parsed file missing for {file_id!r}: {pp}")
+    with open(pp) as f:
+        parsed = json.load(f)
+    hi = build_handle_index(parsed["primitives"])
+    shapes = build_entity_shapes(parsed["primitives"], hi)
+
+    out: dict[str, list[list[str]]] = {}
+    total_matches = 0
+    side_counts = {
+        "top_view": 0, "bottom_view": 0, "side_view": 0,
+        "unassigned": 0, "dropped": 0,
+    }
+    rect_for = {
+        "top_view": rec.top_view_rect,
+        "bottom_view": rec.bottom_view_rect,
+        "side_view": rec.side_view_rect,
+    }
+    for cls_name in lib.classes:
+        allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
+        if allowed is not None and not any(
+            rect_for[v] is not None for v in allowed
+        ):
+            continue
+        strategy, bbox_ratio = lib.strategy_of(cls_name)
+        for idx, tmpl in enumerate(lib.templates_of(cls_name)):
+            result = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+                strategy=strategy, bbox_ratio=bbox_ratio,
+            )
+            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
+            base_key = f"{json_cls}.{idx}"
+            grouped, cnts = split_matches_by_side(
+                base_key, result.matches, shapes,
+                rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
+                class_name=cls_name,
+            )
+            for k, v in grouped.items():
+                out.setdefault(k, []).extend(v)
+            for k, n in cnts.items():
+                side_counts[k] += n
+            total_matches += len(result.matches)
+
+    out, arbitration_counts, view_drops = arbitrate(
+        out, shapes, CLASS_ARBITRATION_GROUPS,
+    )
+    for _label, by_prefix in view_drops.items():
+        for prefix, n in by_prefix.items():
+            bucket = prefix if prefix else "unassigned"
+            side_counts[bucket] = max(0, side_counts[bucket] - n)
+            side_counts["dropped"] += n
+
+    dst_path = Path(dst)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(dst_path, "w") as f:
+        json.dump(out, f, indent=2)
+    try:
+        saved_to = str(dst_path.relative_to(DATA_DIR.parent))
+    except ValueError:
+        saved_to = str(dst_path)
+    return {
+        "file_id": file_id,
+        "library_id": rec.library_id,
+        "template_keys": list(out.keys()),
+        "total_matches": total_matches,
+        "side_counts": side_counts,
+        "arbitration_counts": arbitration_counts,
+        "saved_to": saved_to,
+        "match_saved": True,
+    }
+
+
+def submit_save_match(file_id: str) -> str:
+    """Submit a per-file Match JSON build to the worker pool. Returns
+    the job_id immediately; the request handler should return 202 +
+    {job_id} so the front-end can poll `GET /api/jobs/{job_id}`.
+
+    The worker is portable across processes — it re-opens `FILE_STORE`,
+    re-loads `LIBRARIES`, and reads `parsed/{file_id}.json` from disk.
+    `file.match_saved` is flipped only in `_on_save_match_done`."""
+    job_id = str(uuid.uuid4())
+    with _lock:
+        _jobs[job_id] = {
+            "id": job_id,
+            "file_id": file_id,
+            "kind": "save_match",
+            "status": "queued",
+            "submitted_at": time.time(),
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
+    fut = _get_executor().submit(
+        _save_match_worker,
+        file_id,
+        str(match_path(file_id)),
+    )
+    fut.add_done_callback(lambda f: _on_save_match_done(job_id, f))
+    with _lock:
+        _jobs[job_id]["status"] = "running"
+        _jobs[job_id]["started_at"] = time.time()
+    return job_id
+
+
+def _on_save_match_done(job_id: str, fut: Future) -> None:
+    from app.files import FILE_STORE
+    with _lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        return
+    file_id = job["file_id"]
+    try:
+        result = fut.result()
+    except Exception as e:
+        tb = traceback.format_exc()
+        with _lock:
+            job["status"] = "error"
+            job["error"] = f"{e}\n{tb}"
+            job["completed_at"] = time.time()
+        return
+    with _lock:
+        job["status"] = "done"
+        job["completed_at"] = time.time()
+        job["result"] = result
+    # Flag the file ready for product-level rule checking. Only after
+    # the JSON is on disk — on worker error this stays untouched so the
+    # rule-check submit gate keeps rejecting the role.
+    FILE_STORE.set_match_saved(file_id, True)
 
 
 # ---- Re-process-all (dev mode) -------------------------------------------

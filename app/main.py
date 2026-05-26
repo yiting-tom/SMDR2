@@ -1122,90 +1122,29 @@ async def prematch(file_id: str) -> dict:
 # from CLASS_JSON_KEY; the view prefix is omitted when no side region
 # contains the instance. Each inner list is one match occurrence,
 # containing the DXF entity handles that make up that occurrence.
+#
+# The endpoint is async: it submits a `save_match` job to the worker
+# pool and returns 202 + {job_id, file_id} immediately. The result
+# (template_keys / total_matches / side_counts / arbitration_counts /
+# saved_to) lives on `GET /api/jobs/{job_id}` under `result` once the
+# job reaches status=done; `file.match_saved` flips at that point too.
 @app.post("/api/files/{file_id}/match-json")
-async def save_match_json(file_id: str) -> dict:
+async def save_match_json(file_id: str) -> JSONResponse:
     rec = _resolve_file(file_id)
-    lib = LIBRARIES.get(rec.library_id)
-    _, shapes = _shapes_for(file_id)
-    out: dict[str, list[list[str]]] = {}
-    total_matches = 0
-    side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0,
-                   "unassigned": 0, "dropped": 0}
-    # Map view name → the file's rect for that view, for the
-    # skip-when-impossible guard below.
-    rect_for = {
-        "top_view": rec.top_view_rect,
-        "bottom_view": rec.bottom_view_rect,
-        "side_view": rec.side_view_rect,
-    }
-    for cls_name in lib.classes:
-        # Skip-when-impossible: if this class has a view constraint and
-        # none of its allowed view rectangles is set on the file, every
-        # produced match would be dropped by the filter inside
-        # split_matches_by_side. Skipping the matcher call is a pure
-        # perf optimisation — the result is byte-identical either way.
-        allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
-        if allowed is not None and not any(rect_for[v] is not None for v in allowed):
-            continue
-        strategy, bbox_ratio = lib.strategy_of(cls_name)
-        for idx, tmpl in enumerate(lib.templates_of(cls_name)):
-            result = find_matches_from_pointsets(
-                tmpl.entity_point_sets, shapes,
-                entity_kinds=tmpl.entity_kinds,
-                strategy=strategy, bbox_ratio=bbox_ratio,
-            )
-            # Display name (Substrate, BGABall, …) stays canonical in the UI;
-            # match-JSON keys use the snake_case variant so downstream
-            # consumers (rule checker, exports) see e.g. top_view.bga_ball.0.
-            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
-            base_key = f"{json_cls}.{idx}"
-            # Each match instance is classified by which view rect it
-            # falls inside, producing keys like top_view.smd_2t.0; matches
-            # outside every rect collapse to the unprefixed base_key.
-            # Constrained-class matches (C4Ball/BGABall) that land in a
-            # disallowed view or unassigned are dropped by the filter.
-            grouped, cnts = split_matches_by_side(
-                base_key, result.matches, shapes,
-                rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
-                class_name=cls_name,
-            )
-            for k, v in grouped.items():
-                out.setdefault(k, []).extend(v)
-            for k, n in cnts.items():
-                side_counts[k] += n
-            total_matches += len(result.matches)
-    # Post-match arbitration: resolves geometrically-identical class
-    # collisions (e.g., BGABall vs FiducialCircle when diameters match)
-    # by neighbour count. No-op when no arbitration group's members
-    # appear in `out`.
-    out, arbitration_counts, view_drops = arbitrate(
-        out, shapes, CLASS_ARBITRATION_GROUPS
+    if LIBRARIES.get(rec.library_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"library {rec.library_id!r} not registered",
+        )
+    if not parsed_path(file_id).exists():
+        raise HTTPException(
+            status_code=500, detail="parsed file missing on disk",
+        )
+    job_id = jobs.submit_save_match(file_id)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "file_id": file_id},
     )
-    # Fold view-conflict drops from arbitration into side_counts so the
-    # response stays internally consistent. A drop here means an instance
-    # that was originally counted under some prefix (top/bottom/side/
-    # unassigned) is now moving to "dropped".
-    for _label, by_prefix in view_drops.items():
-        for prefix, n in by_prefix.items():
-            bucket = prefix if prefix else "unassigned"
-            side_counts[bucket] = max(0, side_counts[bucket] - n)
-            side_counts["dropped"] += n
-    dst = match_path(file_id)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "w") as f:
-        json.dump(out, f, indent=2)
-    # Marks the file as ready for product-level rule checking.
-    FILE_STORE.set_match_saved(file_id, True)
-    return {
-        "file_id": file_id,
-        "library_id": rec.library_id,
-        "template_keys": list(out.keys()),
-        "total_matches": total_matches,
-        "side_counts": side_counts,
-        "arbitration_counts": arbitration_counts,
-        "saved_to": str(dst.relative_to(DATA_DIR.parent)),
-        "match_saved": True,
-    }
 
 
 @app.get("/api/files/{file_id}/match-json")

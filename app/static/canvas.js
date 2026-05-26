@@ -33,6 +33,10 @@ const $handle = document.getElementById("handle-info");
 const $chainBtn = document.getElementById("chain-btn");
 const $scanAllBtn = document.getElementById("scan-all-btn");
 const $saveMatchBtn = document.getElementById("save-match-btn");
+// Holds the active save_match job_id while we're polling for completion;
+// null when no save is in flight. Acts as the re-entrancy guard for
+// rapid Save Match clicks — see `saveMatchJson` / `pollSaveMatchJob`.
+let saveMatchInFlight = null;
 const $libraryBtn = document.getElementById("library-btn");
 const $libraryModal = document.getElementById("library-modal");
 const $libraryBody = document.getElementById("library-body");
@@ -2567,31 +2571,79 @@ function toggleScanAll() {
 $scanAllBtn.addEventListener("click", toggleScanAll);
 
 // ---- Save Match JSON -----------------------------------------------------
+// The endpoint is async: POST returns 202 + {job_id}; the worker does
+// the per-template matching loop on the process pool, and we poll
+// `/api/jobs/{job_id}` for completion. The button stays disabled and
+// `saveMatchInFlight` holds the active job_id until the poll resolves,
+// so a second click while saving is a no-op.
 async function saveMatchJson() {
-  $saveMatchBtn.disabled = true;
+  if (saveMatchInFlight) return;
   const t0 = performance.now();
+  $saveMatchBtn.disabled = true;
+  setBaseStatus("save-match: submitting…");
+  let jobId;
   try {
     const res = await fetch(API.matchJson(), { method: "POST" });
     if (!res.ok) {
       const err = await res.text();
-      console.error("save-match failed:", err);
+      console.error("save-match submit failed:", err);
       setBaseStatus(`save-match error: ${res.status}`);
+      $saveMatchBtn.disabled = false;
       return;
     }
     const data = await res.json();
-    const dt = (performance.now() - t0).toFixed(0);
-    setBaseStatus(
-      `match saved: ${data.template_keys.length} template variant(s), ` +
-      `${data.total_matches} total matches → ${data.saved_to} (${dt}ms)`
-    );
-    if (currentFileInfo) currentFileInfo.match_saved = true;
-    refreshRoleSwitcher();
+    jobId = data.job_id;
   } catch (e) {
     console.error(e);
     setBaseStatus(`save-match error: ${e.message}`);
-  } finally {
     $saveMatchBtn.disabled = false;
+    return;
   }
+  saveMatchInFlight = jobId;
+  setBaseStatus(`save-match: running (job ${jobId.slice(0, 8)}…)`);
+  pollSaveMatchJob(jobId, t0);
+}
+
+function pollSaveMatchJob(jobId, t0) {
+  const intervalId = setInterval(async () => {
+    let job;
+    try {
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if (!r.ok) {
+        // 404 right after submit can happen in theory if the executor
+        // process is still warming; treat as transient and retry.
+        console.warn("save-match job poll non-ok:", r.status);
+        return;
+      }
+      job = await r.json();
+    } catch (e) {
+      console.warn("save-match poll transient failure:", e);
+      return;
+    }
+    if (job.status === "done") {
+      clearInterval(intervalId);
+      saveMatchInFlight = null;
+      const dt = (performance.now() - t0).toFixed(0);
+      const result = job.result || {};
+      const nKeys = (result.template_keys || []).length;
+      setBaseStatus(
+        `match saved: ${nKeys} template variant(s), ` +
+        `${result.total_matches} total matches → ${result.saved_to} (${dt}ms)`
+      );
+      if (currentFileInfo) currentFileInfo.match_saved = true;
+      refreshRoleSwitcher();
+      $saveMatchBtn.disabled = false;
+      return;
+    }
+    if (job.status === "error") {
+      clearInterval(intervalId);
+      saveMatchInFlight = null;
+      setBaseStatus(`save-match error: ${job.error || "(no detail)"}`);
+      $saveMatchBtn.disabled = false;
+      return;
+    }
+    // queued / running — keep polling.
+  }, 500);
 }
 $saveMatchBtn.addEventListener("click", saveMatchJson);
 

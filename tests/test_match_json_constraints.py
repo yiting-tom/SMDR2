@@ -54,10 +54,23 @@ def _mr(handles):
     return MatchResult(handles=handles, score=0.0, scale=1.0)
 
 
-def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class):
-    """Monkey-patch ``app.main._shapes_for`` to return a fixed shapes
-    dict, and ``app.main.find_matches_from_pointsets`` to return canned
-    matches keyed by the calling class's display ID.
+def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class,
+                   tmp_path=None):
+    """Monkey-patch the surface that both `app.main` (scan-all path) and
+    `app.jobs._save_match_worker` (Save Match path) call into.
+
+    The Save Match endpoint now hands the per-template matching loop to
+    `_save_match_worker`, which does its own `from app.matching import
+    find_matches_from_pointsets` etc. inside the function body — so the
+    worker picks up monkeypatches on those source modules at call time.
+    Scan-all still goes through `app.main`, so we patch both bindings
+    in one place.
+
+    The worker also reads `parsed/{file_id}.json` from disk and builds
+    shapes from it. We stub that out by pointing `app.jobs.parsed_path`
+    at a temp file holding `{"primitives": []}` and patching
+    `build_handle_index` / `build_entity_shapes` to ignore the parsed
+    payload and return the test fixture directly.
 
     Returns a list that's appended to on every call to the matcher;
     callers can inspect to assert what got invoked (skip-when-impossible).
@@ -80,8 +93,28 @@ def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class):
         return _FakeFindResult(matches=list(matches_per_class.get(cls, [])))
 
     import app.main
+    import app.matching
+    import app.library
+    import app.jobs
+    # `app.main`: scan-all surface (unchanged).
     monkeypatch.setattr(app.main, "_shapes_for", fake_shapes_for)
     monkeypatch.setattr(app.main, "find_matches_from_pointsets", fake_find)
+    # `app.matching` / `app.library`: the worker's inside-function imports
+    # resolve against the source module at call time.
+    monkeypatch.setattr(app.matching, "find_matches_from_pointsets",
+                        fake_find)
+    monkeypatch.setattr(app.library, "build_handle_index",
+                        lambda _prims: {})
+    monkeypatch.setattr(app.matching, "build_entity_shapes",
+                        lambda _prims, _hi: dict(shapes_by_handle))
+    if tmp_path is not None:
+        stub = tmp_path / "stub_parsed.json"
+        stub.write_text('{"primitives": []}')
+        monkeypatch.setattr(app.jobs, "parsed_path", lambda _file_id: stub)
+        # `app.main.save_match_json` pre-flight also calls parsed_path —
+        # its binding is the import-time `from app.storage import …`, so
+        # patch the `app.main` namespace too.
+        monkeypatch.setattr(app.main, "parsed_path", lambda _file_id: stub)
     return call_log
 
 
@@ -142,11 +175,10 @@ def _reset_class_name():
     _CURRENT_CLASS_NAME[0] = ""
 
 
-def test_c4ball_outside_top_view_is_dropped(monkeypatch):
+def test_c4ball_outside_top_view_is_dropped(monkeypatch, tmp_path):
     """A C4Ball match landing in bottom_view SHALL be dropped from
     match-JSON, and side_counts['dropped'] SHALL include it."""
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from app.jobs import _save_match_worker
     from app.storage import match_path
 
     fid = "mjc-1-c4-outside-top"
@@ -170,17 +202,14 @@ def test_c4ball_outside_top_view_is_dropped(monkeypatch):
         "BGABall": [_mr(["BB"]), _mr(["TB"])],
         "SMD-2T":  [],
     }
-    _install_fakes(monkeypatch, shapes, matches)
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
-    with TestClient(app) as client:
-        r = client.post(f"/api/files/{fid}/match-json")
-        assert r.status_code == 200, r.text
-        body = r.json()
+    result = _save_match_worker(fid, str(match_path(fid)))
 
     # Two matches survive (1 C4Ball in top, 1 BGABall in bottom), two dropped.
-    assert body["side_counts"]["dropped"] == 2
-    assert body["side_counts"]["top_view"] == 1
-    assert body["side_counts"]["bottom_view"] == 1
+    assert result["side_counts"]["dropped"] == 2
+    assert result["side_counts"]["top_view"] == 1
+    assert result["side_counts"]["bottom_view"] == 1
 
     saved = json.loads(match_path(fid).read_text())
     # Surviving keys only.
@@ -191,11 +220,10 @@ def test_c4ball_outside_top_view_is_dropped(monkeypatch):
     assert not any(k.startswith("top_view.bga_ball") for k in saved)
 
 
-def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch):
+def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch, tmp_path):
     """When top_view_rect is None, save_match_json SHALL not invoke
     the matcher for C4Ball templates at all (skip-when-impossible)."""
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from app.jobs import _save_match_worker
     from app.storage import match_path
 
     fid = "mjc-2-no-top-rect"
@@ -214,11 +242,9 @@ def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch):
         "BGABall": [_mr(["BB"])],
         "SMD-2T":  [],
     }
-    call_log = _install_fakes(monkeypatch, shapes, matches)
+    call_log = _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
-    with TestClient(app) as client:
-        r = client.post(f"/api/files/{fid}/match-json")
-        assert r.status_code == 200, r.text
+    _save_match_worker(fid, str(match_path(fid)))
 
     # The matcher MUST NOT have been called for C4Ball — skip-when-impossible.
     assert "C4Ball" not in call_log, (
@@ -235,12 +261,11 @@ def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch):
     assert "bottom_view.bga_ball.0" in saved
 
 
-def test_save_match_json_emits_arbitration_counts(monkeypatch):
-    """End-to-end: response payload exposes arbitration_counts with the
-    documented per-group breakdown, and identical-handle cross-fire
+def test_save_match_json_emits_arbitration_counts(monkeypatch, tmp_path):
+    """End-to-end: worker return payload exposes arbitration_counts with
+    the documented per-group breakdown, and identical-handle cross-fire
     between BGABall and FiducialCircle resolves to one class per handle."""
-    from fastapi.testclient import TestClient
-    from app.main import app
+    from app.jobs import _save_match_worker
     from app.storage import match_path
 
     fid = "mjc-3-arbitration"
@@ -273,16 +298,13 @@ def test_save_match_json_emits_arbitration_counts(monkeypatch):
         "BGABall":        list(all_matches),
         "FiducialCircle": list(all_matches),
     }
-    _install_fakes(monkeypatch, shapes, matches)
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
-    with TestClient(app) as client:
-        r = client.post(f"/api/files/{fid}/match-json")
-        assert r.status_code == 200, r.text
-        body = r.json()
+    result = _save_match_worker(fid, str(match_path(fid)))
 
-    # Response payload exposes arbitration_counts.
-    assert "arbitration_counts" in body
-    ac = body["arbitration_counts"]
+    # Worker payload exposes arbitration_counts.
+    assert "arbitration_counts" in result
+    ac = result["arbitration_counts"]
     label = "BGABall|FiducialCircle"
     assert label in ac
     gc = ac[label]
@@ -384,12 +406,14 @@ def test_scan_all_applies_arbitration_to_bga_fiducial_crossfire(monkeypatch):
     assert body["total"] == len(grid_handles) + len(fid_handles)
 
 
-def test_scan_all_matches_save_match_json_class_assignment(monkeypatch):
+def test_scan_all_matches_save_match_json_class_assignment(monkeypatch,
+                                                            tmp_path):
     """End-to-end consistency: scan-all's per-handle class assignment
     SHALL be identical to what save_match_json persists. This locks in
     the single-source-of-truth contract that the new arbitration
     pipeline establishes."""
     from fastapi.testclient import TestClient
+    from app.jobs import _save_match_worker
     from app.main import app
     from app.storage import match_path
 
@@ -419,12 +443,11 @@ def test_scan_all_matches_save_match_json_class_assignment(monkeypatch):
         "BGABall":        list(all_matches),
         "FiducialCircle": list(all_matches),
     }
-    _install_fakes(monkeypatch, shapes, matches)
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
     with TestClient(app) as client:
         scan = client.get(f"/api/files/{fid}/scan-all").json()
-        save_resp = client.post(f"/api/files/{fid}/match-json")
-        assert save_resp.status_code == 200, save_resp.text
+    _save_match_worker(fid, str(match_path(fid)))
 
     saved = json.loads(match_path(fid).read_text())
 
@@ -454,3 +477,181 @@ def test_scan_all_matches_save_match_json_class_assignment(monkeypatch):
         f"disagreements: {{h: (scan_assignment.get(h), save_assignment.get(h)) "
         f"for h in scan_assignment if scan_assignment[h] != save_assignment.get(h)}}"
     )
+
+
+# ---- Async endpoint behaviour ---------------------------------------------
+# These exercise the 202-submit / worker / done-callback wiring that
+# `POST /api/files/{file_id}/match-json` now uses. They do not patch the
+# executor (it stays real) — instead they drive the worker + callback
+# directly to keep the test in-process, since the real ProcessPool can't
+# see our monkeypatches.
+
+def test_save_match_post_returns_202_and_registers_job(monkeypatch, tmp_path):
+    """POST returns 202 carrying a `job_id` + `file_id`, and the
+    in-memory job dict carries a `save_match` entry for that id."""
+    from fastapi.testclient import TestClient
+    from app import jobs
+    from app.main import app
+
+    fid = "mjc-post-202"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+    _install_fakes(monkeypatch, {}, {}, tmp_path)
+
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/match-json")
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["file_id"] == fid
+    job_id = body["job_id"]
+    assert isinstance(job_id, str) and len(job_id) > 0
+    assert job_id in jobs._jobs
+    entry = jobs._jobs[job_id]
+    assert entry["kind"] == "save_match"
+    assert entry["file_id"] == fid
+    # Status will be one of {queued, running, done, error} depending on
+    # the worker's progress against the real executor. We only assert
+    # the entry exists and has the right kind — completion semantics
+    # are tested below via direct worker + callback drive.
+
+
+def test_save_match_done_callback_flips_flag_and_stores_result(
+    monkeypatch, tmp_path
+):
+    """Calling `_save_match_worker` + `_on_save_match_done` end-to-end
+    SHALL set `_jobs[job_id]["status"]` to "done", populate `result` with
+    the documented shape, flip `FILE_STORE.set_match_saved(file_id, True)`,
+    and leave `data/match/{file_id}.json` on disk."""
+    import time
+    from concurrent.futures import Future
+    from app import jobs
+    from app.files import FILE_STORE
+    from app.storage import match_path
+
+    fid = "mjc-lifecycle-done"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    shapes = {"TC4": _shape("TC4", [(5.0, 5.0)])}
+    matches = {"C4Ball": [_mr(["TC4"])], "BGABall": [], "SMD-2T": []}
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
+
+    # Pre-condition: file is freshly registered, match_saved is False.
+    assert FILE_STORE.get(fid).match_saved is False
+
+    result = jobs._save_match_worker(fid, str(match_path(fid)))
+
+    # Synthesize the job dict + Future that submit_save_match would have
+    # produced, then drive the done-callback the way the executor's
+    # add_done_callback hook would.
+    job_id = "test-lifecycle-job"
+    jobs._jobs[job_id] = {
+        "id": job_id, "file_id": fid, "kind": "save_match",
+        "status": "running", "submitted_at": time.time(),
+        "started_at": time.time(), "completed_at": None, "error": None,
+    }
+    fut: Future = Future()
+    fut.set_result(result)
+    jobs._on_save_match_done(job_id, fut)
+
+    entry = jobs._jobs[job_id]
+    assert entry["status"] == "done"
+    assert entry["error"] is None
+    assert entry["completed_at"] is not None
+    r = entry["result"]
+    assert r["file_id"] == fid
+    assert r["library_id"] == library_id
+    assert "template_keys" in r
+    assert "total_matches" in r
+    assert "side_counts" in r
+    assert "arbitration_counts" in r
+    assert "saved_to" in r
+    assert r["match_saved"] is True
+
+    assert FILE_STORE.get(fid).match_saved is True
+    assert match_path(fid).exists()
+
+
+def test_save_match_done_callback_does_not_flip_flag_on_worker_error(
+    monkeypatch, tmp_path
+):
+    """If the worker raises, `_on_save_match_done` SHALL set
+    `status=error`, populate `error`, leave `match_saved` False, and
+    keep the rule-check submit gate honest about the missing role."""
+    import time
+    from concurrent.futures import Future
+    from app import jobs
+    from app.files import FILE_STORE
+
+    fid = "mjc-lifecycle-error"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+    # Workers never actually run here; we just stage the job entry +
+    # an already-failed Future and drive the callback.
+
+    assert FILE_STORE.get(fid).match_saved is False
+
+    job_id = "test-lifecycle-error-job"
+    jobs._jobs[job_id] = {
+        "id": job_id, "file_id": fid, "kind": "save_match",
+        "status": "running", "submitted_at": time.time(),
+        "started_at": time.time(), "completed_at": None, "error": None,
+    }
+    fut: Future = Future()
+    fut.set_exception(RuntimeError("simulated worker crash"))
+    jobs._on_save_match_done(job_id, fut)
+
+    entry = jobs._jobs[job_id]
+    assert entry["status"] == "error"
+    assert isinstance(entry["error"], str) and entry["error"]
+    assert "simulated worker crash" in entry["error"]
+    assert entry["completed_at"] is not None
+    assert "result" not in entry
+    # match_saved stays False on worker error → rule-check submit gate
+    # (which checks this flag) keeps rejecting the role. The gate's
+    # behaviour itself is covered by tests/test_products.py.
+    assert FILE_STORE.get(fid).match_saved is False
+
+
+def test_save_match_post_with_missing_parsed_file_returns_synchronous_error(
+    monkeypatch, tmp_path
+):
+    """Pre-flight: if `parsed/{file_id}.json` is missing on disk, the
+    POST handler SHALL return a synchronous 4xx/5xx and NOT register a
+    job."""
+    from fastapi.testclient import TestClient
+    from app import jobs
+    from app.main import app
+
+    fid = "mjc-preflight-missing-parsed"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+    # Deliberately do NOT install fakes — we want `parsed_path(fid)` to
+    # point at a real non-existent file under DATA_DIR.
+
+    jobs_before = set(jobs._jobs)
+    with TestClient(app) as client:
+        r = client.post(f"/api/files/{fid}/match-json")
+    assert r.status_code >= 400 and r.status_code != 202, r.text
+    # No new entry registered in the in-memory job dict.
+    assert set(jobs._jobs) == jobs_before
