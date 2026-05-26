@@ -36,7 +36,9 @@ Invariants (enforced by :func:`_validate_envelope`):
 
 - ``rules`` MAY be empty; when non-empty, every sub-rule MUST carry
   non-empty ``text``.
-- A sub-rule MUST set at least one of ``from``, ``tol``.
+- A sub-rule MAY have all of ``from`` / ``to`` / ``tol`` / ``tol_text``
+  null — such "text-only" sub-rules are accepted as informational
+  entries (sidebar shows the message; canvas has nothing to highlight).
 - ``to`` MAY only be set when ``from`` is also set.
 - Any sub-rule with a non-null ``from`` / ``to`` / ``tol`` MUST also
   carry a non-null ``file_id``.
@@ -162,11 +164,6 @@ def _validate_sub_rule(rule_name: str, idx: int, sub: object) -> None:
     if to is not None and frm is None:
         raise RuleCheckOutputError(
             f"{label}: `to` set but `from` is null"
-        )
-    if frm is None and tol is None:
-        raise RuleCheckOutputError(
-            f"{label}: must set at least one of `from`, `tol` "
-            f"(nothing to highlight otherwise)"
         )
     if tol_text is not None and tol is None:
         raise RuleCheckOutputError(

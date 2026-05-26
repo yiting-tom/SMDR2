@@ -170,21 +170,81 @@ def test_adapter_rejects_handle_without_file_id(monkeypatch):
         _run_with_fake(monkeypatch, bad)
 
 
-def test_adapter_rejects_no_from_or_tol(monkeypatch):
-    """A sub-rule MUST highlight something — `from` or `tol` (or both)."""
-    bad = {
+def test_text_only_sub_rule_is_accepted(monkeypatch):
+    """A sub-rule MAY have all of `from` / `to` / `tol` / `tol_text` null.
+    Such "text-only" sub-rules carry only `part` and `text` and surface
+    in the viewer sidebar as informational entries (no canvas highlight).
+
+    Regression: previously the adapter raised "must set at least one of
+    `from`, `tol`" on this shape, forcing rule authors to invent
+    placeholder handles. See `rule-json-accept-text-only-sub-rules`.
+    """
+    good = {
         "R": {
-            "pass": False, "text": "x",
+            "pass": True, "text": "x",
             "rules": [{
-                "part": "BD", "file_id": "abc",
+                "part": "BD", "file_id": None,
                 "from": None, "to": None,
-                "text": "nothing to highlight",
+                "text": "All SMDs pass the substrate clearance check.",
                 "tol": None, "tol_text": None,
             }],
         },
     }
-    with pytest.raises(RuleCheckOutputError, match="from"):
-        _run_with_fake(monkeypatch, bad)
+    # MUST NOT raise — the all-null handle case is now valid.
+    result = _run_with_fake(monkeypatch, good)
+    assert result is good
+
+
+def test_validator_still_rejects_other_invariants(monkeypatch):
+    """Lock the adjacent invariants alongside the relaxed `from`/`tol`
+    constraint. Relaxing "must set at least one of `from`, `tol`" MUST
+    NOT accidentally widen any of these other invariants — text-only
+    is the only new accepted shape.
+    """
+    # (1) `to` set but `from` null — still invalid.
+    bad_to_without_from = {
+        "R": {
+            "pass": False, "text": "x",
+            "rules": [{
+                "part": "BD", "file_id": "abc",
+                "from": None, "to": "AB",
+                "text": "to without from",
+                "tol": None, "tol_text": None,
+            }],
+        },
+    }
+    with pytest.raises(RuleCheckOutputError, match="`to`"):
+        _run_with_fake(monkeypatch, bad_to_without_from)
+
+    # (2) `tol_text` set but `tol` null — still invalid.
+    bad_tol_text_without_tol = {
+        "R": {
+            "pass": False, "text": "x",
+            "rules": [{
+                "part": "BD", "file_id": None,
+                "from": None, "to": None,
+                "text": "tol_text without tol",
+                "tol": None, "tol_text": "stranded label",
+            }],
+        },
+    }
+    with pytest.raises(RuleCheckOutputError, match="tol_text"):
+        _run_with_fake(monkeypatch, bad_tol_text_without_tol)
+
+    # (3) Handle set but `file_id` null — still invalid.
+    bad_handle_without_file_id = {
+        "R": {
+            "pass": False, "text": "x",
+            "rules": [{
+                "part": "BD", "file_id": None,
+                "from": "AB12", "to": None,
+                "text": "from without file_id",
+                "tol": None, "tol_text": None,
+            }],
+        },
+    }
+    with pytest.raises(RuleCheckOutputError, match="file_id"):
+        _run_with_fake(monkeypatch, bad_handle_without_file_id)
 
 
 def test_adapter_rejects_to_without_from(monkeypatch):
