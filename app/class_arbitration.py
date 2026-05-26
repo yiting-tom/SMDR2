@@ -338,9 +338,25 @@ def arbitrate(
                 del new_out[key]
 
         # Re-emit each instance under its resolved class, re-checking the
-        # view constraint of the new class. Reassign indices densely per
-        # (view_prefix, new_class) so output keys stay 0, 1, 2, ….
-        per_target_seq: dict[tuple[str | None, str], int] = {}
+        # view constraint of the new class. The `.idx` in the output key
+        # represents the *template index* of the resolved class (matching
+        # the non-arbitration path in `save_match_json`, which uses
+        # `f"{json_cls}.{idx}"` with `idx = template position in
+        # lib.templates_of(cls)`). All instances belonging to the same
+        # (view, class, template_idx) are collapsed into a single key
+        # whose value is a list of handle arrays — one per match
+        # instance. This matches how non-arbitration classes like
+        # `c4_ball` emit (e.g. `top_view.c4_ball.0` carries every
+        # matched C4Ball instance under one key when the class has only
+        # one template).
+        #
+        # For instances whose class did NOT change, the original
+        # template index is preserved. For reassigned instances, we
+        # default to 0 — `original_idx` (a template index in the SOURCE
+        # class) is meaningless under the new class, and 0 is a valid
+        # template index for any class that has at least one template
+        # (a precondition for the class to participate in matching at
+        # all).
         bucket: dict[str, list[list[str]]] = {}
         for inst, new_cls in zip(instances, targets):
             if new_cls != inst.original_class:
@@ -352,10 +368,8 @@ def arbitrate(
                     view_drops[label].get(inst.view_prefix, 0) + 1
                 )
                 continue
-            seq_key = (inst.view_prefix, new_cls)
-            seq = per_target_seq.get(seq_key, 0)
-            per_target_seq[seq_key] = seq + 1
-            out_key = _make_key(inst.view_prefix, new_cls, seq)
+            idx = inst.original_idx if new_cls == inst.original_class else 0
+            out_key = _make_key(inst.view_prefix, new_cls, idx)
             bucket.setdefault(out_key, []).append(list(inst.handles))
             gc.assigned[new_cls] = gc.assigned.get(new_cls, 0) + 1
 

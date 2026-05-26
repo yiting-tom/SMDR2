@@ -309,6 +309,92 @@ def test_arbitrate_view_conflict_drops_instance():
     assert new_out == {}
 
 
+def test_arbitrate_collapses_to_template_index_not_instance_index():
+    """`out_key.<idx>` MUST represent the *template index* of the
+    resolved class, NOT a per-instance sequence number. So when a class
+    has N matched instances all originating from the same template
+    (the common case for single-template classes like FiducialCircle
+    and BGABall), they must collapse under one key whose value is a
+    list of N handle arrays — mirroring how `c4_ball.0` carries every
+    matched C4Ball instance under one key.
+
+    Regression: previously `arbitrate` assigned a fresh per-instance
+    sequence (`top_view.fiducial_circle.0`, `.1`, `.2`, …), one key
+    per match. Downstream rule-checker consumers expected the
+    template-index convention used by non-arbitration classes.
+    """
+    # 4 corner fiducials in top_view, all originally
+    # `top_view.fiducial_circle.0` (single template). Population
+    # fallback keeps them all as FiducialCircle.
+    coords = {
+        "f0": (-5.0, -5.0),
+        "f1": (-5.0, 10.0),
+        "f2": (10.0, -5.0),
+        "f3": (10.0, 10.0),
+    }
+    shapes = _shapes_from_coords(coords)
+    out = {
+        "top_view.fiducial_circle.0": [["f0"], ["f1"], ["f2"], ["f3"]],
+    }
+    new_out, _counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
+
+    fid_keys = [k for k in new_out if "fiducial_circle" in k]
+    assert fid_keys == ["top_view.fiducial_circle.0"], (
+        f"expected one collapsed key per (view, class, template_idx), "
+        f"got {fid_keys}"
+    )
+    assert len(new_out["top_view.fiducial_circle.0"]) == 4, (
+        "all 4 instances should live under the single template-0 key "
+        "as 4 separate handle arrays"
+    )
+
+
+def test_arbitrate_reassigned_instance_keyed_under_zero():
+    """When arbitration reassigns an instance to a different class
+    (e.g. matcher cross-fire fired it as both BGABall and FiducialCircle,
+    and the neighbour-count rule resolves it to FiducialCircle), the
+    output key uses `.0` as the template index — `original_idx` was a
+    template position in the SOURCE class and carries no meaning in
+    the NEW class's template list.
+
+    Setup: 4 corner instances cross-fired to BGABall.1 (a hypothetical
+    second BGA template) AND FiducialCircle.0. Population fallback
+    forces them to FiducialCircle. Output MUST be
+    `top_view.fiducial_circle.0`, not `.1`.
+    """
+    coords = {
+        "f0": (-5.0, -5.0),
+        "f1": (-5.0, 10.0),
+        "f2": (10.0, -5.0),
+        "f3": (10.0, 10.0),
+    }
+    shapes = _shapes_from_coords(coords)
+    # Source: every instance appears under TWO keys (cross-fire). The
+    # BGABall side uses template index 1 — which would be meaningless
+    # if re-emitted under FiducialCircle. Note BGABall keys must use
+    # bottom_view (top_view is disallowed) for the input to be valid.
+    out = {
+        "top_view.fiducial_circle.0":   [["f0"], ["f1"], ["f2"], ["f3"]],
+        "bottom_view.bga_ball.1":       [["f0"], ["f1"], ["f2"], ["f3"]],
+    }
+    new_out, _counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
+
+    fid_keys = [k for k in new_out if "fiducial_circle" in k]
+    # `pool_instances` dedupes by handle set and keeps the lex-first
+    # source key's (view, class, idx) as the instance's `original_*`
+    # fields. `bottom_view.bga_ball.1` sorts before
+    # `top_view.fiducial_circle.0`, so each instance enters arbitration
+    # carrying view=bottom_view, original_class=BGABall, original_idx=1.
+    # Population fallback then reassigns BGABall → FiducialCircle. The
+    # invariant we're locking in: the output `.idx` SHALL be 0 (the new
+    # class's template index), NOT the original_idx (1, which was a
+    # BGABall template position and is meaningless under FiducialCircle).
+    assert fid_keys == ["bottom_view.fiducial_circle.0"], (
+        f"reassigned instances must land under .0 of the new class, "
+        f"not the original .1 from the source key. Got {fid_keys}"
+    )
+
+
 def test_arbitrate_is_deterministic_under_shuffle():
     """Same input run twice produces equal output, regardless of dict
     insertion order or list order within keys."""
