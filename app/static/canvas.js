@@ -51,7 +51,21 @@ const hiddenLayers = new Set();
 const VIS_STORAGE_KEY = `smdr2.hiddenLayers.${document.body.dataset.fileId}`;
 
 function layerOf(p) { return p.layer || "0"; }
-function isLayerVisible(p) { return !hiddenLayers.has(layerOf(p)); }
+// Single per-primitive render gate, called at the top of every render pass
+// (main, scan-all, near-miss, selection). Hides primitives in two cases:
+//   1. Their layer is toggled off in the Layers panel.
+//   2. They were tagged `decorative` by the back-end DXF flattener
+//      (TEXT / MTEXT / DIMENSION / HATCH). These carry no information the
+//      matching workflow uses, and ezdxf's font fallback otherwise renders
+//      MTEXT as per-character placeholder rectangles when the DXF's
+//      referenced font isn't installed locally — the "一格格的長方形文字"
+//      artefact. Matching / selection / library scan already skip decoratives
+//      (see `library.py` and `dxf.py:collect_entity_points`); rendering now
+//      agrees with them.
+function isLayerVisible(p) {
+  if (p.decorative) return false;
+  return !hiddenLayers.has(layerOf(p));
+}
 
 function loadHiddenLayersFromSession() {
   try {
