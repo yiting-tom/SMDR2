@@ -7,40 +7,50 @@
 </head>
 <body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}">
   <header>
-    <a class="title" href="/" title="Back to dashboard">SMDR2</a>
     <a id="back-btn" href="/" title="Back to product dashboard">← Products</a>
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
     <span id="product-context"></span>
     <span id="role-switcher"></span>
+    <span id="unit-picker-wrap" title="Unit override — pick to re-run preprocess with the chosen unit">
+      Unit:
+      <select id="unit-picker">
+        <option value="mm">mm</option>
+        <option value="cm">cm</option>
+        <option value="m">m</option>
+        <option value="inch">inch</option>
+        <option value="μm">μm</option>
+      </select>
+      <span id="unit-picker-badge" class="unit-picker-badge" hidden></span>
+      <span id="unit-picker-hint" class="unit-picker-hint" hidden></span>
+    </span>
     <select id="library-switcher" title="Library this file uses (set by its product)"></select>
-    <button id="chain-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
-    <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">Measure</button>
-    <button id="sides-btn" type="button" title="Mark frontside / bottomside regions · left-click to draw both, right-click for options (hotkey: R)">Sides</button>
-    <div id="sides-menu" class="popup-menu" hidden>
-      <button type="button" data-sides-action="both">Redraw both</button>
-      <button type="button" data-sides-action="frontside">Redraw frontside only</button>
-      <button type="button" data-sides-action="bottomside">Redraw bottomside only</button>
-      <button type="button" data-sides-action="clear">Clear both</button>
-    </div>
-    <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">Scan All</button>
-    <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">Save Match</button>
-    <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">Library</button>
-    <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Visibility</button>
-    <button id="layers-btn" type="button" title="Pick which DXF layers feed render / match / rule-check">Layers</button>
-    <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">Rules</button>
-    <span id="status">loading…</span>
-    <span class="spacer"></span>
-    <span id="mode-hint" class="hint"></span>
-    <span id="handle-info">Handle —</span>
-    <span id="cursor-coords">—</span>
+    <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">📚 Library</button>
+    <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">🔍 Scan All</button>
+    <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">💾 Save Match</button>
+    <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">📏 Measure</button>
+    <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Layers</button>
+    <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">📋 Rules</button>
+    <button id="dev-params-toggle" type="button" hidden
+            title="Adjust matching tunables (dev mode only)">⚙</button>
   </header>
-  <nav id="class-toolbar" aria-label="Object classes"></nav>
+  <nav id="class-toolbar" aria-label="Object classes">
+    <button id="chain-btn" class="tool-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
+    <button id="sides-btn" class="tool-btn" type="button" title="Mark top / bottom / side view regions · left-click to draw all, right-click for options (hotkey: R)">Sides</button>
+    <span class="toolbar-sep" aria-hidden="true"></span>
+  </nav>
+  <div id="sides-menu" class="popup-menu" hidden>
+    <button type="button" data-sides-action="all">Redraw all</button>
+    <button type="button" data-sides-action="top_view">Redraw top view only</button>
+    <button type="button" data-sides-action="bottom_view">Redraw bottom view only</button>
+    <button type="button" data-sides-action="side_view">Redraw side view only</button>
+    <button type="button" data-sides-action="clear">Clear all</button>
+  </div>
   <main>
     <canvas id="dxf-canvas"></canvas>
     <div id="measure-readout" class="measure-readout" hidden></div>
     <aside id="visibility-panel" class="floating-panel" hidden>
       <header>
-        <h3>Layer visibility</h3>
+        <h3>Layers</h3>
         <span class="hint">live · session only</span>
         <span class="spacer"></span>
         <button type="button" id="visibility-close" title="Close">×</button>
@@ -59,7 +69,59 @@
       </header>
       <div id="rule-sidebar-body"></div>
     </aside>
+    <footer id="canvas-statusbar">
+      <span id="status">loading…</span>
+      <span class="spacer"></span>
+      <span id="mode-hint" class="hint"></span>
+      <span id="handle-info">Handle —</span>
+      <span id="cursor-coords">—</span>
+    </footer>
   </main>
+
+  <!-- Developer matching-parameters modal (Dev Mode only) -->
+  <div id="dev-params-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Matching parameters">
+      <header class="modal-header">
+        <h2>Matching parameters</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body">
+        <p class="dev-params-banner">
+          In-memory only — restart clears every override. Do not change values
+          while a match is running. DXF params live on the dashboard.
+        </p>
+        <div id="dev-params-body"></div>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" id="dev-params-reset" class="link-btn">Reset to defaults</button>
+        <span class="spacer"></span>
+        <button type="button" id="dev-params-apply" class="primary">Apply</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Unit-override confirm modal — fires before POST /unit-override.
+       Lists the downstream cost (preprocess re-run, connectivity rebuild,
+       Match JSON invalidation per affected product) so the operator
+       commits to it explicitly. -->
+  <div id="unit-override-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel" role="dialog" aria-label="Confirm unit override">
+      <header class="modal-header">
+        <h2>Confirm unit override</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div class="modal-body" id="unit-override-modal-body"></div>
+      <footer class="modal-footer">
+        <button type="button" id="unit-override-cancel" class="link-btn">Cancel</button>
+        <span class="spacer"></span>
+        <button type="button" id="unit-override-confirm" class="primary">Apply</button>
+      </footer>
+    </div>
+  </div>
 
   <div id="library-modal" class="modal" hidden>
     <div class="modal-bg" data-close></div>
@@ -74,24 +136,6 @@
     </div>
   </div>
 
-  <!-- Layer selection modal: same markup as the dashboard, shared module. -->
-  <div id="layer-modal" class="modal" hidden>
-    <div class="modal-bg" data-close></div>
-    <div class="modal-panel modal-wide" role="dialog" aria-label="Pick layers">
-      <header class="modal-header">
-        <h2 data-layer-title>Pick layers to include</h2>
-        <span class="spacer"></span>
-        <button type="button" class="modal-close" data-close>×</button>
-      </header>
-      <div data-layer-body class="layer-modal-body"></div>
-      <footer class="modal-footer">
-        <button type="button" data-layer-all class="link-btn">Select all</button>
-        <button type="button" data-layer-none class="link-btn">Select none</button>
-        <span class="spacer"></span>
-        <button type="button" data-layer-confirm class="primary">Use selected</button>
-      </footer>
-    </div>
-  </div>
   <script type="module" src="/static/canvas.js"></script>
 </body>
 </html>

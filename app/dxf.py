@@ -22,6 +22,7 @@ from typing import Any, Iterable
 
 import ezdxf
 import ezdxf.bbox
+import numpy as np
 from ezdxf.addons.drawing import Frontend, RenderContext
 from ezdxf.addons.drawing.backend import BackendInterface
 from ezdxf.addons.drawing.config import Configuration
@@ -45,16 +46,26 @@ SCALE_FACTOR = 1e-5
 # Legacy alias kept for external imports / downstream readers.
 CURVE_FLATTENING_DISTANCE = BASE_TOLERANCE
 
-# Circle-detection thresholds. Kept in lockstep with the client-side
+# Circle-detection thresholds. `CIRCLE_MIN_VERTS` (curves case) and
+# `CIRCLE_RADIAL_TOL` are kept in lockstep with the client-side
 # `detectCircle` in app/static/measure_core.js so server emit and client
-# OSNAP/QUA snap agree on what counts as a circle.
+# OSNAP/QUA snap agree on what counts as a circle for sub-paths the
+# server did NOT pre-convert. `CIRCLE_MIN_VERTS_NOCURVE` is server-only:
+# it gates promotion of pure-line LWPOLYLINE / POLYLINE entities whose
+# vertices happen to lie on a circle (typical for BGA balls authored as
+# N-gons in some packaging DXFs). The higher floor protects deliberate
+# low-N polygon pads (N ∈ {3, 4, 6, 8, 12}) whose perfectly regular
+# radial layout would otherwise sail through `CIRCLE_RADIAL_TOL`.
 CIRCLE_MIN_VERTS = 8
-CIRCLE_RADIAL_TOL = 0.02
+CIRCLE_MIN_VERTS_NOCURVE = 11
+CIRCLE_RADIAL_TOL = 0.002
 
 # DXF entity types that should be rendered but NOT participate in selection,
 # chain-grouping, or matching. Their primitives get a `"decorative": true`
-# flag at flatten time; everything downstream filters on that.
-DECORATIVE_DXFTYPES = frozenset({"TEXT", "MTEXT", "DIMENSION", "HATCH"})
+# flag at flatten time; everything downstream filters on that. HATCH is
+# stripped before flatten (see `flatten_for_render`), so it never reaches
+# this filter.
+DECORATIVE_DXFTYPES = frozenset({"TEXT", "MTEXT", "DIMENSION"})
 
 
 @dataclass
@@ -72,6 +83,170 @@ class RenderOutput:
     # record and fed into the dashboard's unit-scale-warning heuristic.
     # None when the header is missing or unparseable.
     insunits: int | None = None
+    # Multiplier applied to every coordinate in `primitives` + `bbox` so the
+    # downstream consumers can stay in mm. `rescaled_coord = original_coord
+    # * applied_scale`. `1.0` means "no rescale". See `detect_scale_factor`
+    # for the trigger rules.
+    applied_scale: float = 1.0
+
+
+# Expected packaging-design diagonal range (mm) for the unitless path of
+# `detect_scale_factor`. A factor M is accepted iff
+# `original_diagonal * M ∈ [EXPECTED_LOW, EXPECTED_HIGH]`.
+EXPECTED_DIAGONAL_LOW_MM = 10.0
+EXPECTED_DIAGONAL_HIGH_MM = 5000.0
+
+
+# Maps the operator-facing unit-override strings (persisted in
+# `files.user_unit_override`) to the multiplier that brings coordinates
+# in that unit into mm. When an override is set, `_maybe_rescale` skips
+# `detect_scale_factor` and uses this directly.
+UNIT_TO_SCALE: dict[str, float] = {
+    "mm": 1.0,
+    "cm": 10.0,
+    "m": 1000.0,
+    "inch": 25.4,
+    "μm": 0.001,
+}
+
+# Reverse map used by the viewer to pre-select the picker option for a
+# file whose `applied_scale` is one of the known unit multipliers.
+SCALE_TO_UNIT: dict[float, str] = {v: k for k, v in UNIT_TO_SCALE.items()}
+
+
+def detect_scale_factor(insunits: int | None, bbox_diagonal: float) -> float:
+    """Decide what multiplier to apply so a file's coordinates land in mm.
+
+    `applied_scale` semantics: `rescaled_coord = original_coord * factor`.
+    Returns `1.0` when no rescale is needed (or none is safe).
+
+    Declared-unit cases trust the INSUNITS header:
+      - 1 (inch) → 25.4
+      - 5 (cm)   → 10.0
+      - 6 (m)    → 1000.0
+      - 4 (mm)   → 1.0 (always trust mm — never auto-rescale)
+
+    Unitless / unknown (`0` or `None`) picks the power-of-10 in
+    `[-4, +4]` that brings the diagonal into the expected packaging
+    range, preferring the factor closest to 1. A one-order-of-magnitude
+    safety guard keeps marginal factors (e.g. ×3, ×7) at `1.0`."""
+    # Declared units are authoritative.
+    if insunits == 1:
+        return 25.4
+    if insunits == 5:
+        return 10.0
+    if insunits == 6:
+        return 1000.0
+    if insunits == 4:
+        return 1.0
+    # Unitless / unknown path. Heuristic only — bail on degenerate inputs.
+    if insunits not in (0, None):
+        return 1.0
+    if not math.isfinite(bbox_diagonal) or bbox_diagonal <= 0:
+        return 1.0
+    # Cap the unitless heuristic at ±3 orders of magnitude (M ∈ [0.001,
+    # 1000]). Bigger factors would cover declared-unit cases (e.g. m → mm
+    # is ×1000) but those bypass this path entirely; extreme-magnitude
+    # unitless rescales (e.g. ×10⁴) are almost always pathology, not a
+    # legitimate unit choice, and the safer behaviour is to leave them
+    # at M=1.0 and let the user see the warning badge.
+    candidates = [10 ** k for k in range(-3, 4)]
+    in_range = [
+        m for m in candidates
+        if EXPECTED_DIAGONAL_LOW_MM <= bbox_diagonal * m <= EXPECTED_DIAGONAL_HIGH_MM
+    ]
+    if not in_range:
+        return 1.0
+    # Prefer M=1.0 (no rescale) when it qualifies — the file is already in
+    # the expected packaging range. Otherwise pick the factor that drives
+    # the diagonal as far down inside the range as possible: packaging
+    # designs cluster in the 1–50 mm chip / 5–200 mm package band, so for
+    # an out-of-range file the aggressive choice (smallest post-rescale
+    # diagonal) is almost always right, and ambiguous cases like
+    # diagonal=6000 → {60, 600} mm pick 60 mm. The price is that a
+    # legitimate 600 mm panel mistakenly stored at 6000 units would be
+    # over-corrected to 60 mm; declared-unit files (mm/cm/m/inch) bypass
+    # this path entirely, so the only risk is genuinely unitless files
+    # which are already a guess.
+    if 1.0 in in_range:
+        best = 1.0
+    else:
+        best = min(in_range, key=lambda m: bbox_diagonal * m)
+    # Safety guard: refuse marginal factors (≤ ±1 order of magnitude) so a
+    # borderline file like a real 5×5 mm dice (diagonal ≈ 7 mm, would
+    # otherwise grab M=10 → 70 mm) stays at 1.0 and falls back to the
+    # existing "suspect" badge for a human. Strictly greater than 1 means
+    # 100×+ rescales pass; 10× rescales don't.
+    if abs(math.log10(best)) <= 1.0:
+        return 1.0
+    return float(best)
+
+
+def _scale_primitive_coords(prim: dict[str, Any], factor: float) -> None:
+    """Multiply every coordinate inside a primitive dict by `factor` in
+    place. Handles every primitive shape emitted by `JSONBackend`."""
+    t = prim.get("type")
+    if t == "point":
+        x, y = prim["pos"]
+        prim["pos"] = [x * factor, y * factor]
+    elif t == "line":
+        sx, sy = prim["start"]
+        ex, ey = prim["end"]
+        prim["start"] = [sx * factor, sy * factor]
+        prim["end"] = [ex * factor, ey * factor]
+    elif t == "polyline":
+        prim["points"] = [[x * factor, y * factor] for x, y in prim["points"]]
+    elif t == "circle":
+        cx, cy = prim["center"]
+        prim["center"] = [cx * factor, cy * factor]
+        prim["r"] = prim["r"] * factor
+    elif t == "filled_polygon":
+        prim["rings"] = [
+            [[x * factor, y * factor] for x, y in ring]
+            for ring in prim["rings"]
+        ]
+
+
+def _maybe_rescale(
+    render: RenderOutput,
+    user_unit_override: str | None = None,
+) -> tuple[RenderOutput, float]:
+    """Apply a scale multiplier and, when non-trivial, scale every
+    primitive coordinate and the bbox in place. Returns the (possibly
+    mutated) render and the applied factor.
+
+    When `user_unit_override` is a recognised unit string, the
+    detector is skipped entirely and the override's multiplier is
+    used. An unrecognised override string falls through to the
+    detector path (treated as no override) — the API layer rejects
+    bad inputs before they reach here, so this is a defensive
+    fallback only."""
+    if render.bbox is None:
+        return render, 1.0
+    xmin, ymin, xmax, ymax = render.bbox
+    dx = float(xmax) - float(xmin)
+    dy = float(ymax) - float(ymin)
+    diagonal = math.hypot(max(dx, 0.0), max(dy, 0.0))
+    if user_unit_override in UNIT_TO_SCALE:
+        factor = UNIT_TO_SCALE[user_unit_override]
+        logger.info(
+            "user-unit-override: unit=%s, pre-diagonal=%.3g, factor=%.6g (detector skipped)",
+            user_unit_override, diagonal, factor,
+        )
+    else:
+        factor = detect_scale_factor(render.insunits, diagonal)
+    if factor == 1.0:
+        return render, 1.0
+    for prim in render.primitives:
+        _scale_primitive_coords(prim, factor)
+    render.bbox = (xmin * factor, ymin * factor, xmax * factor, ymax * factor)
+    render.applied_scale = factor
+    if user_unit_override not in UNIT_TO_SCALE:
+        logger.info(
+            "auto-rescale: insunits=%s, pre-diagonal=%.3g, factor=%.6g → post-diagonal=%.3g",
+            render.insunits, diagonal, factor, diagonal * factor,
+        )
+    return render, factor
 
 
 def choose_flatten_tolerance(diagonal: float) -> float:
@@ -196,15 +371,23 @@ class JSONBackend(BackendInterface):
             points = _flatten_path(sub, self.flatten_tolerance)
             if len(points) < 2:
                 continue
-            # Closed curve sub-paths (CIRCLE, 360° ARC, etc.) that the radial
-            # test recognises are emitted as a `circle` primitive instead of
-            # a many-vertex closed polyline — saves ~30× on memory / bandwidth
-            # for BGA-ball-heavy packaging DXFs and lets the canvas draw via
-            # ctx.arc + sub-pixel LOD batching. `has_curves` gates against
-            # collapsing pure-LINE polylines that happen to approximate a
-            # circle (an N-gon SMD pad with N ≥ 8 must keep its corners).
-            if bool(sub.is_closed) and bool(getattr(sub, "has_curves", False)):
-                circle = _detect_circle_subpath(points)
+            # Closed sub-paths whose flattened vertices describe a circle
+            # within tolerance are emitted as a `circle` primitive instead
+            # of a many-vertex closed polyline — saves ~30× on memory /
+            # bandwidth for BGA-ball-heavy packaging DXFs and lets the
+            # canvas draw via ctx.arc + sub-pixel LOD batching. The
+            # vertex-count floor is dual: `CIRCLE_MIN_VERTS` (8) when
+            # ezdxf flattened a real curve (`has_curves`), and the
+            # higher `CIRCLE_MIN_VERTS_NOCURVE` (11) when the sub-path
+            # is pure line segments (typical for BGA balls authored as
+            # LWPOLYLINE N-gons). The higher floor for the no-curves
+            # case protects deliberate low-N polygon pads (N ∈
+            # {3, 4, 6, 8}) whose perfectly regular radial layout
+            # would otherwise sail through the radial test.
+            if bool(sub.is_closed):
+                has_curves = bool(getattr(sub, "has_curves", False))
+                min_verts = CIRCLE_MIN_VERTS if has_curves else CIRCLE_MIN_VERTS_NOCURVE
+                circle = _detect_circle_subpath(points, min_verts)
                 if circle is not None:
                     cx, cy = circle["center"]
                     r = circle["r"]
@@ -228,8 +411,39 @@ class JSONBackend(BackendInterface):
         properties: BackendProperties,
     ) -> None:
         common = _props(properties)
+        paths_list = list(paths)
+        # Fast path: a single closed sub-path that detects as a circle
+        # (e.g., HATCH bounded by a CIRCLE, or a HATCH bounded by an
+        # LWPOLYLINE N-gon approximating a circle) collapses to a
+        # `circle` primitive so the canvas renderer can use ctx.arc +
+        # sub-pixel dot batching instead of filling an N-vertex
+        # polygon. Same dual-threshold rule as draw_path:
+        # `CIRCLE_MIN_VERTS` (8) for `has_curves` sub-paths,
+        # `CIRCLE_MIN_VERTS_NOCURVE` (11) for pure-line sub-paths, so
+        # a filled N-gon SMD pad keeps its corners.
+        if len(paths_list) == 1:
+            subs = list(paths_list[0].sub_paths())
+            if len(subs) == 1:
+                sub = subs[0]
+                if bool(sub.is_closed):
+                    pts = _flatten_path(sub, self.flatten_tolerance)
+                    if len(pts) >= 3:
+                        has_curves = bool(getattr(sub, "has_curves", False))
+                        min_verts = (
+                            CIRCLE_MIN_VERTS if has_curves else CIRCLE_MIN_VERTS_NOCURVE
+                        )
+                        circle = _detect_circle_subpath(pts, min_verts)
+                        if circle is not None:
+                            cx, cy = circle["center"]
+                            r = circle["r"]
+                            self._track_point(cx - r, cy - r)
+                            self._track_point(cx + r, cy + r)
+                            self._append(
+                                {"type": "circle", "filled": True, **circle, **common}
+                            )
+                            return
         rings: list[list[list[float]]] = []
-        for path in paths:
+        for path in paths_list:
             for sub in path.sub_paths():
                 pts = _flatten_path(sub, self.flatten_tolerance)
                 if len(pts) >= 3:
@@ -279,10 +493,25 @@ class JSONBackend(BackendInterface):
         return (self._xmin, self._ymin, self._xmax, self._ymax)
 
 
-def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
-    """Parse a DXF file and return drawing primitives + bbox."""
+def flatten_for_render(
+    dxf_path: str | Path,
+    user_unit_override: str | None = None,
+) -> RenderOutput:
+    """Parse a DXF file and return drawing primitives + bbox.
+
+    When `user_unit_override` is set, the rescale step uses that
+    unit's multiplier and skips `detect_scale_factor`. Callers reach
+    this path when the operator has used the viewer's unit picker;
+    standard uploads pass `None` and fall through to the detector."""
     doc = ezdxf.readfile(str(dxf_path))
     msp = doc.modelspace()
+    # HATCH is pure decorative noise in packaging DXFs (solder-mask fills,
+    # copper pours) and its boundary edges otherwise reach the backend as
+    # polylines that don't promote to circle primitives — costing render
+    # budget and producing jagged N-gon outlines at zoom-in. Strip before
+    # `Frontend.draw_layout` so no HATCH-sourced primitive is ever emitted.
+    for hatch in list(msp.query("HATCH")):
+        msp.delete_entity(hatch)
     diagonal = _modelspace_diagonal(doc)
     tol = choose_flatten_tolerance(diagonal) if diagonal is not None else BASE_TOLERANCE
     if tol != BASE_TOLERANCE:
@@ -293,13 +522,15 @@ def flatten_for_render(dxf_path: str | Path) -> RenderOutput:
     ctx = RenderContext(doc)
     backend = JSONBackend(flatten_tolerance=tol)
     Frontend(ctx, backend).draw_layout(msp, finalize=True)
-    return RenderOutput(
+    render = RenderOutput(
         primitives=backend.primitives,
         bbox=backend.bbox,
         background=backend.background,
         flatten_tolerance=tol,
         insunits=_read_insunits(doc),
     )
+    render, _ = _maybe_rescale(render, user_unit_override=user_unit_override)
+    return render
 
 
 def _read_insunits(doc) -> int | None:
@@ -322,42 +553,104 @@ def _flatten_path(sub: NumpyPath2d, tolerance: float = BASE_TOLERANCE) -> list[l
     return [[float(v.x), float(v.y)] for v in sub.flattening(tolerance)]
 
 
-def _detect_circle_subpath(points: list[list[float]]) -> dict[str, Any] | None:
+def _detect_circle_subpath(
+    points: list[list[float]], min_verts: int = CIRCLE_MIN_VERTS
+) -> dict[str, Any] | None:
     """Return `{"center": [cx, cy], "r": float}` when `points` describe a
-    circle within tolerance, else None. Predicate matches the client-side
-    `detectCircle` so server emit and client OSNAP agree. Caller is expected
-    to gate this on `sub.is_closed and sub.has_curves` to avoid collapsing
-    real polylines whose vertex layout happens to be near-circular."""
-    if len(points) < CIRCLE_MIN_VERTS:
+    circle within tolerance, else None. The radial predicate matches the
+    client-side `detectCircle`. Caller is expected to gate on
+    `sub.is_closed` and to pick `min_verts` per the curves vs no-curves
+    rule: `CIRCLE_MIN_VERTS` (8) when ezdxf flattened a real curve
+    sub-path, `CIRCLE_MIN_VERTS_NOCURVE` (11) when the sub-path is pure
+    line segments — the higher floor keeps deliberate low-N polygon
+    pads from being eaten by the radial test.
+
+    Centre is estimated by Kåsa algebraic least-squares fit
+    (`min Σ (xᵢ² + yᵢ² + D·xᵢ + E·yᵢ + F)²`, closed form): this is
+    spacing-invariant where the vertex centroid is not. The centroid
+    drifts toward dense regions of the perimeter when vertices are
+    unevenly spaced; LS does not. On singular / collinear inputs the
+    function falls back to the centroid so degenerate sub-paths produce
+    the same result as before this change (the radial-variance test
+    rejects them downstream anyway)."""
+    if len(points) < min_verts:
         return None
     first, last = points[0], points[-1]
     n = len(points) - 1 if first[0] == last[0] and first[1] == last[1] else len(points)
-    if n < CIRCLE_MIN_VERTS:
+    if n < min_verts:
         return None
-    sx = sy = 0.0
-    for i in range(n):
-        sx += points[i][0]
-        sy += points[i][1]
-    cx = sx / n
-    cy = sy / n
-    rmin = float("inf")
-    rmax = 0.0
-    rsum = 0.0
-    for i in range(n):
-        dx = points[i][0] - cx
-        dy = points[i][1] - cy
-        r = math.hypot(dx, dy)
-        if r < rmin:
-            rmin = r
-        if r > rmax:
-            rmax = r
-        rsum += r
-    rmean = rsum / n
+    arr = np.asarray(points[:n], dtype=np.float64)
+    # Translate to the vertex centroid before the LS solve. This is
+    # numerically essential for packaging DXFs where balls / pads sit at
+    # world coordinates ~10⁵ mm: without it, the Kåsa normal-equation
+    # matrix is dominated by Σx² ≈ n·cx0² and the condition number
+    # explodes (~10²¹ on a 100 km × 0.3 mm test case), producing a
+    # garbage centre and a radius ~10× too big. After translation the
+    # matrix's spread is the cloud's own diameter, so conditioning stays
+    # benign. Translation is a similarity invariant for circle fitting:
+    # solving in local coordinates and adding the offset back gives the
+    # same centre.
+    cx0 = float(arr[:, 0].mean())
+    cy0 = float(arr[:, 1].mean())
+    xs = arr[:, 0] - cx0
+    ys = arr[:, 1] - cy0
+    # Kåsa LS in centroid-local frame:
+    #   minimise Σ (D·x + E·y + F + (x² + y²))²
+    # Normal equations: [Σx² Σxy Σx; Σxy Σy² Σy; Σx Σy n] · [D, E, F]ᵀ
+    #                 = -[Σx(x²+y²); Σy(x²+y²); Σ(x²+y²)]
+    # In the local frame Σx = Σy = 0, so the matrix block-diagonalises;
+    # `linalg.solve` still handles it generically.
+    x2y2 = xs * xs + ys * ys
+    M = np.array([
+        [(xs * xs).sum(), (xs * ys).sum(), xs.sum()],
+        [(xs * ys).sum(), (ys * ys).sum(), ys.sum()],
+        [xs.sum(),         ys.sum(),         float(n)],
+    ])
+    b = -np.array([(xs * x2y2).sum(), (ys * x2y2).sum(), x2y2.sum()])
+    try:
+        D, E, _F = np.linalg.solve(M, b)
+        cx = cx0 - D / 2.0
+        cy = cy0 - E / 2.0
+    except np.linalg.LinAlgError:
+        # Singular system (collinear vertices, degenerate input). Fall
+        # back to the centroid — the radial-variance test downstream
+        # will reject these anyway, behaviour is identical to pre-LS.
+        cx = cx0
+        cy = cy0
+    dx = arr[:, 0] - cx
+    dy = arr[:, 1] - cy
+    r = np.hypot(dx, dy)
+    rmin = float(r.min())
+    rmax = float(r.max())
+    rmean = float(r.mean())
     if rmean < 1e-9:
+        return None
+    extent_x = float(arr[:, 0].max() - arr[:, 0].min())
+    extent_y = float(arr[:, 1].max() - arr[:, 1].min())
+    max_extent = max(extent_x, extent_y)
+    min_extent = min(extent_x, extent_y)
+    # Safety bound on the LS-fit radius. A genuine closed circular sub-
+    # path's mean radius is ≈ half its bbox extent, so `rmean` should
+    # never exceed the larger bbox dimension. When it does, the LS solve
+    # has fit a near-line/arc as a giant circle (the bigger-than-data
+    # output the user reported). Bail out so the sub-path stays a
+    # polyline / filled_polygon and isn't promoted to a wildly oversized
+    # `circle` primitive.
+    if rmean > max_extent:
+        return None
+    # Bbox-aspect gate: a true closed circle's bbox is square. A
+    # rectangular outline (lid, package frame) with N ≥ 11 vertices
+    # whose verts happen to be roughly equidistant from the centroid
+    # passes the radial-variance test (all corners + symmetric edge
+    # midpoints share a common distance) but its bbox is far from
+    # square. Catching the aspect mismatch here prevents lid-shaped
+    # rectangles from being promoted to inscribed circles. 10 % slack
+    # absorbs the discretisation of a finite-N inscribed polygon.
+    if max_extent > 0 and min_extent / max_extent < 0.9:
         return None
     if (rmax - rmin) / rmean > CIRCLE_RADIAL_TOL:
         return None
-    return {"center": [cx, cy], "r": rmean}
+    return {"center": [float(cx), float(cy)], "r": rmean}
 
 
 def _props(p: BackendProperties) -> dict[str, Any]:
@@ -426,7 +719,7 @@ def render_layer_svg(
     bbox: tuple[float, float, float, float] | None,
     *,
     skip_decorative: bool = True,
-    max_prims: int = MAX_PRIMS_PER_THUMB,
+    max_prims: int | None = None,
     background: str = "#212830",
 ) -> str:
     """Render a compact SVG preview of one layer's primitives.
@@ -437,6 +730,8 @@ def render_layer_svg(
     primitive in its own color — matching what the user sees in the
     canvas viewer. Dense layers are evenly subsampled.
     """
+    if max_prims is None:
+        max_prims = MAX_PRIMS_PER_THUMB
     if bbox is None:
         # Degenerate file: emit an empty 1×1 viewport so consumers always
         # get a parseable SVG.

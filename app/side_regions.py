@@ -1,10 +1,11 @@
-"""Per-file frontside / bottomside side-region helpers.
+"""Per-file top_view / bottom_view / side_view side-region helpers.
 
 A side region is an axis-aligned, world-space rectangle the engineer paints
-on the viewer to tag the frontside / bottomside half of a DXF sheet. The
-match-JSON serializer uses these to rewrite each instance's key from
-``smd.0`` to ``frontside.smd.0`` etc., based on the instance's bbox-center
-containment.
+on the viewer to tag one of the three views (top / bottom / side) on a
+DXF sheet. The match-JSON serializer uses these to rewrite each instance's
+key from ``smd_2t.0`` to ``top_view.smd_2t.0`` etc., based on the
+instance's bbox-center containment. Any subset of the three rectangles
+may be set; an unset rectangle never contains anything.
 
 This module is intentionally pure: it has no DB or filesystem dependencies
 so it stays trivially unit-testable.
@@ -13,6 +14,8 @@ so it stays trivially unit-testable.
 from __future__ import annotations
 
 from typing import Iterable, Mapping, Optional, TypedDict
+
+from app.library import is_allowed_view
 
 
 class Rect(TypedDict):
@@ -78,23 +81,39 @@ def split_matches_by_side(
     base_key: str,
     matches: Iterable,
     shapes: Mapping[str, object],
-    frontside: Optional[Mapping[str, float]],
-    bottomside: Optional[Mapping[str, float]],
+    top_view: Optional[Mapping[str, float]],
+    bottom_view: Optional[Mapping[str, float]],
+    side_view: Optional[Mapping[str, float]],
+    class_name: str,
 ) -> tuple[dict[str, list[list[str]]], dict[str, int]]:
     """Group a single template's match instances by side prefix.
 
     Returns ``(out, counts)`` where:
     - ``out`` maps ``"<prefix>.<base_key>"`` (or ``base_key`` for unassigned)
       to a list of handle-lists, preserving instance order within each side.
-    - ``counts`` is ``{"frontside": N, "bottomside": M, "unassigned": K}``.
+    - ``counts`` is ``{"top_view": N, "bottom_view": M, "side_view": K,
+      "unassigned": U, "dropped": D}``; the ``dropped`` bucket counts
+      instances filtered out by the class-view constraint registry, the
+      other four buckets count surviving instances only.
+
+    ``class_name`` is the **display ID** of the class this template
+    belongs to (e.g., ``"BGABall"``, ``"Substrate"``). Instances of
+    constrained classes (those listed in
+    :data:`library.CLASS_VIEW_CONSTRAINTS`) whose computed prefix is
+    not in the allowed set — including the "unassigned" position —
+    are dropped, not emitted under any key.
 
     Each match instance is expected to expose a ``.handles`` attribute (a
     ``MatchResult`` from :mod:`app.matching`).
     """
     out: dict[str, list[list[str]]] = {}
-    counts = {"frontside": 0, "bottomside": 0, "unassigned": 0}
+    counts = {"top_view": 0, "bottom_view": 0, "side_view": 0,
+              "unassigned": 0, "dropped": 0}
     for m in matches:
-        prefix = side_prefix_for(m.handles, shapes, frontside, bottomside)
+        prefix = side_prefix_for(m.handles, shapes, top_view, bottom_view, side_view)
+        if not is_allowed_view(class_name, prefix):
+            counts["dropped"] += 1
+            continue
         key = f"{prefix}.{base_key}" if prefix else base_key
         out.setdefault(key, []).append(list(m.handles))
         counts[prefix if prefix else "unassigned"] += 1
@@ -104,26 +123,31 @@ def split_matches_by_side(
 def side_prefix_for(
     handles: Iterable[str],
     shapes: Mapping[str, object],
-    frontside: Optional[Mapping[str, float]],
-    bottomside: Optional[Mapping[str, float]],
+    top_view: Optional[Mapping[str, float]],
+    bottom_view: Optional[Mapping[str, float]],
+    side_view: Optional[Mapping[str, float]],
 ) -> Optional[str]:
-    """Return ``"frontside"``, ``"bottomside"``, or ``None`` for a match instance.
+    """Return ``"top_view"``, ``"bottom_view"``, ``"side_view"``, or ``None``.
 
     The instance is represented by its DXF entity handles; ``shapes`` is the
     handle→EntityShape map already cached by the matcher. The decision is
-    based on the combined bbox center of every entity:
+    based on the combined bbox center of every entity, with overlap
+    priority ``top_view > bottom_view > side_view``:
 
-    - in frontside (or in both, frontside wins) → ``"frontside"``
-    - in bottomside only → ``"bottomside"``
-    - in neither, or both rectangles are None → ``None``
+    - in top_view (or in multiple, top_view wins) → ``"top_view"``
+    - in bottom_view but not top_view → ``"bottom_view"``
+    - in side_view but not top_view or bottom_view → ``"side_view"``
+    - in none, or all three rectangles are None → ``None``
     """
-    if frontside is None and bottomside is None:
+    if top_view is None and bottom_view is None and side_view is None:
         return None
     center = _bbox_center(handles, shapes)
     if center is None:
         return None
-    if point_in_rect(center, frontside):
-        return "frontside"
-    if point_in_rect(center, bottomside):
-        return "bottomside"
+    if point_in_rect(center, top_view):
+        return "top_view"
+    if point_in_rect(center, bottom_view):
+        return "bottom_view"
+    if point_in_rect(center, side_view):
+        return "side_view"
     return None

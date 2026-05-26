@@ -25,6 +25,7 @@ def test_circle_entity_emits_circle_primitive(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     circle = msp.add_circle(center=(3.0, 4.0), radius=0.15)
     dxf_path = tmp_path / "circle.dxf"
@@ -53,6 +54,7 @@ def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     circle = msp.add_circle(center=(1.0, -2.0), radius=0.5)
     dxf_path = tmp_path / "one_circle.dxf"
@@ -73,6 +75,292 @@ def test_collect_entity_points_synthesizes_circle_cloud(tmp_path):
         assert abs(r - 0.5) / 0.5 < 0.01
 
 
+def test_hatch_emits_no_primitives(tmp_path):
+    """HATCH entities are stripped from modelspace before flatten, so every
+    HATCH variant — circle-bounded, polyline-bounded, multi-sub-path with
+    holes — emits zero primitives. Non-HATCH siblings flatten normally."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
+    msp = doc.modelspace()
+
+    # (a) HATCH bounded by a circular edge
+    h_circle = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    h_circle.paths.add_edge_path().add_arc(
+        center=(2.0, -1.0), radius=0.3, start_angle=0, end_angle=360, ccw=True
+    )
+
+    # (b) HATCH bounded by a 24-vertex closed LWPOLYLINE on a circle
+    h_poly = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    poly_pts = _circular_polyline_pts(n=24, cx=5.0, cy=0.0, r=0.30)
+    h_poly.paths.add_polyline_path(poly_pts, is_closed=True)
+
+    # (c) HATCH with two sub-paths (annulus: outer circle + inner hole)
+    h_annulus = msp.add_hatch(color=2, dxfattribs={"layer": "FILL"})
+    h_annulus.paths.add_edge_path().add_arc(
+        center=(10.0, 0.0), radius=0.50, start_angle=0, end_angle=360, ccw=True
+    )
+    h_annulus.paths.add_edge_path().add_arc(
+        center=(10.0, 0.0), radius=0.25, start_angle=0, end_angle=360, ccw=False
+    )
+
+    # A non-HATCH sibling that must still flatten
+    line = msp.add_line((0, 0), (10, 0))
+
+    dxf_path = tmp_path / "hatches.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    handles_emitted = {p.get("handle") for p in out.primitives}
+
+    for h in (h_circle, h_poly, h_annulus):
+        assert h.dxf.handle not in handles_emitted, (
+            f"HATCH handle {h.dxf.handle} ({h.dxftype()}) leaked into primitives"
+        )
+    assert line.dxf.handle in handles_emitted, (
+        "non-HATCH sibling must still flatten"
+    )
+
+
+def _circular_polyline_pts(n: int, cx: float, cy: float, r: float) -> list[tuple[float, float]]:
+    import math as _math
+
+    return [
+        (cx + r * _math.cos(2 * _math.pi * i / n), cy + r * _math.sin(2 * _math.pi * i / n))
+        for i in range(n)
+    ]
+
+
+def test_pure_line_polyline_circle_emits_circle(tmp_path):
+    """A closed LWPOLYLINE with N=24 vertices uniformly on a circle (pure
+    line segments — typical BGA-ball-as-polygon authoring) SHALL collapse
+    to a `circle` primitive carrying `center` + `r`, not a polyline."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=24, cx=3.0, cy=4.0, r=0.15)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "ball_polyline.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle, "expected at least one primitive for the LWPOLYLINE"
+    circle_prims = [p for p in prims_for_handle if p["type"] == "circle"]
+    polyline_prims = [p for p in prims_for_handle if p["type"] == "polyline"]
+    assert len(circle_prims) == 1, f"expected 1 circle primitive, got {len(circle_prims)}"
+    assert not polyline_prims, "circular LWPOLYLINE must not also emit a polyline"
+    cp = circle_prims[0]
+    cx, cy = cp["center"]
+    assert abs(cx - 3.0) < 1e-3 and abs(cy - 4.0) < 1e-3
+    assert abs(cp["r"] - 0.15) / 0.15 < 0.01
+    # Stroke-only (came through draw_path) — `filled` is absent or falsey.
+    assert not cp.get("filled")
+
+
+def test_pure_line_polyline_circle_at_threshold_emits_circle(tmp_path):
+    """N=11 is the boundary; the LWPOLYLINE must still promote to circle."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=11, cx=0.0, cy=0.0, r=0.25)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "ball_11.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle
+    types = {p["type"] for p in prims_for_handle}
+    assert "circle" in types, "N=11 circular LWPOLYLINE must promote to circle"
+    assert "polyline" not in types
+
+
+def test_pure_line_polyline_circle_below_threshold_stays_polyline(tmp_path):
+    """N=10 is below `CIRCLE_MIN_VERTS_NOCURVE`; the polyline must stay a
+    polyline even though its vertices lie on a circle within tolerance.
+    Guards against eating deliberate decagonal / octagonal / hexagonal
+    pads."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
+    msp = doc.modelspace()
+    pts = _circular_polyline_pts(n=10, cx=0.0, cy=0.0, r=0.25)
+    poly = msp.add_lwpolyline(pts, close=True)
+
+    dxf_path = tmp_path / "decagon.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims_for_handle = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    assert prims_for_handle
+    types = {p["type"] for p in prims_for_handle}
+    assert "circle" not in types, "N=10 < threshold; must NOT promote to circle"
+    assert "polyline" in types
+
+
+def test_unevenly_sampled_circle_uses_ls_center(tmp_path):
+    """A closed LWPOLYLINE whose vertices sit on a circle but are
+    unevenly distributed (24 dense on a 90° arc + 6 sparse on the other
+    270°) must still promote to a `circle` primitive whose centre matches
+    the true geometric centre to LS precision — NOT the vertex centroid,
+    which would drift toward the dense arc."""
+    import math as _math
+
+    import ezdxf
+
+    true_cx, true_cy, true_r = 5.0, -3.0, 0.5
+
+    pts: list[tuple[float, float]] = []
+    # Dense arc: 24 vertices on θ ∈ [0°, 90°)
+    for i in range(24):
+        theta = (_math.pi / 2.0) * (i / 24.0)
+        pts.append((true_cx + true_r * _math.cos(theta),
+                    true_cy + true_r * _math.sin(theta)))
+    # Sparse arc: 6 vertices on θ ∈ [90°, 360°)
+    for i in range(6):
+        theta = (_math.pi / 2.0) + (3.0 * _math.pi / 2.0) * (i / 6.0)
+        pts.append((true_cx + true_r * _math.cos(theta),
+                    true_cy + true_r * _math.sin(theta)))
+
+    # Sanity-check the setup: the *centroid* (what the old code computed)
+    # should land visibly off-centre toward the dense arc.
+    centroid_cx = sum(p[0] for p in pts) / len(pts)
+    centroid_cy = sum(p[1] for p in pts) / len(pts)
+    centroid_drift = _math.hypot(centroid_cx - true_cx, centroid_cy - true_cy)
+    assert centroid_drift > 0.05 * true_r, (
+        f"test fixture broken: centroid drift {centroid_drift:.4g} ≤ 5% of r, "
+        "no point demonstrating the LS upgrade"
+    )
+
+    doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
+    msp = doc.modelspace()
+    poly = msp.add_lwpolyline(pts, close=True)
+    dxf_path = tmp_path / "uneven_circle.dxf"
+    doc.saveas(str(dxf_path))
+
+    out = flatten_for_render(str(dxf_path))
+    prims = [p for p in out.primitives if p.get("handle") == poly.dxf.handle]
+    circle_prims = [p for p in prims if p["type"] == "circle"]
+    assert len(circle_prims) == 1, (
+        f"expected 1 circle primitive, got {len(circle_prims)} (prim types: "
+        f"{[p['type'] for p in prims]})"
+    )
+    cp = circle_prims[0]
+    cx, cy = cp["center"]
+    err = _math.hypot(cx - true_cx, cy - true_cy)
+    # LS centre is unbiased: within numerical noise of the true centre,
+    # well below `1e-3 * r`. (Centroid would be off by ~0.07 * r.)
+    assert err < 1e-3 * true_r, (
+        f"LS centre off by {err:.4g} (>{1e-3 * true_r:.4g}); centroid drift "
+        f"was {centroid_drift:.4g}"
+    )
+    assert abs(cp["r"] - true_r) / true_r < 0.01
+
+
+def test_far_from_origin_circle_centre_is_stable(tmp_path):
+    """Regression: Kåsa LS on raw world coordinates blows up when balls
+    sit at large absolute positions (BGA layouts routinely live at
+    10⁴–10⁵ mm). The detector must centre the points before solving so
+    the matrix conditioning stays benign — otherwise the LS solve
+    returned a radius ~14× too big on a 100 km × 0.3 mm ball."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    true_cx, true_cy, true_r = 100_000.0, 0.0, 0.3
+    pts = _circular_polyline_pts(n=12, cx=true_cx, cy=true_cy, r=true_r)
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is not None
+    cx, cy = result["center"]
+    assert abs(cx - true_cx) < 1e-6 * true_r + 1e-3
+    assert abs(cy - true_cy) < 1e-6 * true_r + 1e-3
+    # Crucially: radius is right, not 10× inflated.
+    assert abs(result["r"] - true_r) / true_r < 0.01
+
+
+def test_oversized_radius_is_rejected():
+    """Defense in depth: if any future numerical pathology produces an
+    LS centre far enough from the cloud that the implied radius dwarfs
+    the cloud's bbox, the detector SHALL reject rather than emit a
+    wildly oversized circle primitive. Construct a near-collinear
+    sub-path that would otherwise fit a giant circle within tolerance."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # 12 points lying on a very flat arc. Any LS-style fit produces a
+    # circle whose centre is far from the points and whose radius dwarfs
+    # the bbox of the points (here the bbox is ~10 × ~0.0006).
+    import math as _math
+    R = 1_000_000.0  # huge circle
+    half_angle = 1e-5  # tiny arc segment
+    pts = []
+    n = 12
+    for i in range(n):
+        theta = _math.pi / 2.0 + half_angle * (2.0 * i / (n - 1) - 1.0)
+        pts.append([R * _math.cos(theta), R * _math.sin(theta) - R + 0.001])
+    # First duplicated as last so the dedup branch matches.
+    pts.append(pts[0])
+    assert _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE) is None
+
+
+def test_rectangular_lid_not_promoted_to_circle():
+    """Regression: a lid-style rectangle drawn with enough vertices that
+    they're all roughly equidistant from the centroid (4 corners + 8
+    symmetric edge midpoints = 12 verts, each at a distance derived
+    from the rectangle's geometry) passes the vertex-count gate AND
+    the radial-variance test (all 4 corners share one distance, all 8
+    midpoints share another, and if the rectangle's aspect ratio lines
+    those distances up they pool to a tight variance) — but the shape
+    is obviously not a circle. The bbox-aspect gate catches it: a
+    rectangle's bbox is not square."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # 30 mm × 20 mm rectangle, 4 corners + 8 edge midpoints + repeat
+    # first as last (closed-polyline sentinel).
+    pts = [
+        [0.0, 0.0], [7.5, 0.0], [15.0, 0.0], [22.5, 0.0],
+        [30.0, 0.0],
+        [30.0, 5.0], [30.0, 10.0], [30.0, 15.0],
+        [30.0, 20.0],
+        [22.5, 20.0], [15.0, 20.0], [7.5, 20.0],
+        [0.0, 20.0],
+        [0.0, 15.0], [0.0, 10.0], [0.0, 5.0],
+        [0.0, 0.0],
+    ]
+    assert len(pts) - 1 >= CIRCLE_MIN_VERTS_NOCURVE
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is None, (
+        f"30×20 rectangle must not promote to circle (got {result})"
+    )
+
+
+def test_collinear_vertices_fall_back_to_centroid(tmp_path):
+    """The LS solve raises `LinAlgError` on collinear vertices. The
+    function must not bubble the exception — it falls back to the
+    centroid, then the radial-variance test (huge for collinear
+    vertices) rejects the sub-path. No `circle` primitive emitted."""
+    from app.dxf import CIRCLE_MIN_VERTS_NOCURVE, _detect_circle_subpath
+
+    # Twelve collinear points: y is constant, x walks along the x-axis.
+    # The Kåsa normal-equation matrix is singular (rank 2).
+    n = CIRCLE_MIN_VERTS_NOCURVE + 1
+    pts = [[float(i), 0.0] for i in range(n)]
+    # First duplicate-of-last sentinel to mimic a closed-polyline shape.
+    pts.append([pts[0][0], pts[0][1]])
+
+    # Should not raise; should return None because the radial-variance
+    # test rejects collinear input.
+    result = _detect_circle_subpath(pts, min_verts=CIRCLE_MIN_VERTS_NOCURVE)
+    assert result is None
+
+
 def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     """An 8-vertex closed POLYLINE that is NOT a circular approximation must
     remain a polyline — guards against the circle detector eating real
@@ -80,6 +368,7 @@ def test_non_circular_closed_polyline_stays_polyline(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     # A clearly non-circular octagon (alternating long/short radial distances).
     pts = [
@@ -141,13 +430,16 @@ def test_collect_entity_points_matches_shape_points(test_dxf_path):
 
 
 def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
-    """TEXT / MTEXT / DIMENSION / HATCH must render but not participate in
-    selection or matching. JSONBackend tags them with `decorative: True` and
-    build_handle_index drops them."""
+    """TEXT / MTEXT / DIMENSION must render but not participate in selection
+    or matching. JSONBackend tags them with `decorative: True` and
+    build_handle_index drops them. (HATCH is stripped pre-flatten — see
+    test_hatch_emits_no_primitives — so it never gets a decorative-tagged
+    primitive in the first place.)"""
     import ezdxf
     from ezdxf.math import Vec3
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
 
     # One regular selectable entity:
@@ -155,9 +447,6 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     # Decorative entities:
     txt = msp.add_text("hello", dxfattribs={"insert": (5, 5), "height": 1})
     mtxt = msp.add_mtext("hello mtext", dxfattribs={"insert": (5, 10), "char_height": 1})
-    # Hatch needs at least one boundary path:
-    hatch = msp.add_hatch(dxfattribs={"layer": "FILL"})
-    hatch.paths.add_polyline_path([(0, 0), (1, 0), (1, 1), (0, 1)], is_closed=True)
     # Dimension:
     dim = msp.add_linear_dim(base=(0, 8), p1=(0, 5), p2=(10, 5))
     dim.render()  # produces the dimension's geometry block
@@ -177,7 +466,7 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     assert all(not p.get("decorative") for p in line_prims)
 
     # Each decorative entity's primitives MUST carry the flag.
-    for ent in (txt, mtxt, hatch):
+    for ent in (txt, mtxt):
         prims = by_handle.get(ent.dxf.handle, [])
         # Some entities (e.g. very thin text in some fonts) might collapse to
         # nothing renderable — only assert flagging when there is geometry.
@@ -188,7 +477,7 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     # Build the matching handle index — decoratives must drop out.
     idx = build_handle_index(out.primitives)
     assert line.dxf.handle in idx
-    for ent in (txt, mtxt, hatch):
+    for ent in (txt, mtxt):
         assert ent.dxf.handle not in idx
 
 
@@ -200,6 +489,7 @@ def _make_scaled_dxf(tmp_path, scale: float, name: str):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     msp = doc.modelspace()
     # LINE drives the bbox: 30 × 30 units (so diagonal ≈ 30·√2 ≈ 42.4).
     msp.add_line((0, 0), (30 * scale, 30 * scale))
@@ -299,6 +589,7 @@ def test_flatten_tolerance_falls_back_when_extents_unavailable(tmp_path):
     import ezdxf
 
     doc = ezdxf.new("R2010", setup=True)
+    doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters
     # Nothing added to msp.
     path = tmp_path / "empty.dxf"
     doc.saveas(str(path))

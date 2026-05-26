@@ -19,13 +19,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import math
 import shutil
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -40,21 +42,27 @@ from app.files import (
     PREPROCESSING,
     READY,
 )
+from app.class_arbitration import arbitrate
 from app.library import (
+    CLASS_ARBITRATION_GROUPS,
+    CLASS_JSON_KEY,
+    CLASS_VIEW_CONSTRAINTS,
     DEFAULT_LIBRARY_ID,
     LIBRARIES,
     Template,
     build_handle_index,
+    collect_entity_kinds,
     collect_entity_points,
 )
 from app.matching import (
     EntityShape,
     build_entity_shapes,
+    diagnose_swap,
     find_matches,
     find_matches_from_pointsets,
 )
 from app.products import PRODUCT_STORE, VALID_ROLES, Product
-from app.rule_check import check_rules
+from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, split_matches_by_side
 from app.storage import (
     DATA_DIR,
@@ -156,10 +164,51 @@ def _ensure_test_dxf_registered() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _ensure_test_dxf_registered()
+    _submit_unit_rescale_migration()
     yield
     jobs.shutdown()
     from app.matching import shutdown_pool
     shutdown_pool()
+
+
+logger = logging.getLogger(__name__)
+
+
+def _submit_unit_rescale_migration() -> None:
+    """One-shot: re-preprocess any legacy file whose persisted INSUNITS +
+    bbox would now resolve to a non-`1.0` factor under the
+    `auto-normalize-unit-suspect-dxf` detector. Idempotent because a
+    file that was already rescaled has its bbox stored in mm, so the
+    detector returns `1.0` for it the next time around.
+
+    Match JSON invalidation rides along the standard per-file
+    re-preprocess flow in `app.jobs._on_reprocess_step_done` (which
+    delegates to `_invalidate_match_after_rescale` when the factor
+    changes), so no separate cleanup pass is needed here."""
+    import math
+    from app.dxf import detect_scale_factor
+
+    targets: set[str] = set()
+    chosen: dict[str, float] = {}
+    for rec in FILE_STORE.list_all():
+        if rec.applied_scale != 1.0:
+            continue
+        if rec.bbox is None:
+            continue
+        xmin, ymin, xmax, ymax = rec.bbox
+        diag = math.hypot(max(xmax - xmin, 0.0), max(ymax - ymin, 0.0))
+        factor = detect_scale_factor(rec.insunits, diag)
+        if factor == 1.0:
+            continue
+        targets.add(rec.id)
+        chosen[rec.id] = factor
+    if not targets:
+        return
+    for fid, factor in chosen.items():
+        logger.info(
+            "unit-rescale migration: queueing file_id=%s (factor=%.6g)", fid, factor,
+        )
+    jobs.submit_reprocess_all(file_id_filter=targets, kind="unit-rescale-migration")
 
 
 app = FastAPI(title="SMDR2", lifespan=lifespan)
@@ -189,27 +238,71 @@ class CreateProductRequest(BaseModel):
     library_id: str = DEFAULT_LIBRARY_ID
 
 
+def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
+    """Build (`files_by_role`, `files_by_role_all`) from a product's file list.
+
+    `files_by_role[role]` is the primary file dict (the `multi` row if any,
+    else the first split row, else None) — preserved for the existing
+    rule-results modal and other callers that expect at-most-one file per
+    role.
+
+    `files_by_role_all[role]` is the complete list of file dicts (possibly
+    empty), ordered with the `multi` row first and split rows after in a
+    stable view order.
+    """
+    view_order = {"multi": 0, "top": 1, "bottom": 2, "side": 3, None: 4}
+    by_role_all: dict[str, list[dict]] = {role: [] for role in VALID_ROLES}
+    by_role_recs: dict[str, list[FileRecord]] = {role: [] for role in VALID_ROLES}
+    for f in files:
+        if f.dxf_role in by_role_all:
+            by_role_recs[f.dxf_role].append(f)
+    for role, recs in by_role_recs.items():
+        recs.sort(key=lambda r: view_order.get(r.dxf_view, 9))
+        by_role_all[role] = [r.to_dict() for r in recs]
+    by_role = {
+        role: (lst[0] if lst else None)
+        for role, lst in by_role_all.items()
+    }
+    return by_role, by_role_all
+
+
+def _project_rule_check_job(job: dict | None) -> dict | None:
+    """Trim a `_jobs` entry to the fields the dashboard needs. Returns
+    `None` when no job is recorded so the frontend can branch cleanly."""
+    if job is None:
+        return None
+    return {
+        "job_id": job.get("id"),
+        "status": job.get("status"),
+        "submitted_at": job.get("submitted_at"),
+        "completed_at": job.get("completed_at"),
+        "error": job.get("error"),
+        "result": job.get("result"),
+    }
+
+
 @app.get("/api/products")
 async def list_products() -> dict:
     """Every product with its files (per role) and rule-check readiness."""
     items = []
     for p in PRODUCT_STORE.list_all():
         files = FILE_STORE.list_by_product(p.id)
-        by_role = {role: None for role in VALID_ROLES}
-        for f in files:
-            if f.dxf_role in by_role:
-                by_role[f.dxf_role] = f.to_dict()
+        by_role, by_role_all = _group_files_by_role(files)
         uploaded = [f for f in files if f.dxf_role is not None]
         ready_for_rc = bool(uploaded) and all(f.match_saved for f in uploaded)
         items.append({
             **p.to_dict(),
             "files_by_role": by_role,
+            "files_by_role_all": by_role_all,
             "match_progress": {
                 "saved": sum(1 for f in uploaded if f.match_saved),
                 "total": len(uploaded),
             },
             "ready_for_rule_check": ready_for_rc,
             "rule_check_available": rule_check_path(p.id).exists(),
+            "latest_rule_check_job": _project_rule_check_job(
+                jobs.latest_rule_check_job(p.id)
+            ),
         })
     return {"products": items}
 
@@ -220,20 +313,21 @@ async def get_product(product_id: str) -> dict:
     if p is None:
         raise HTTPException(status_code=404, detail="product not found")
     files = FILE_STORE.list_by_product(product_id)
-    by_role = {role: None for role in VALID_ROLES}
-    for f in files:
-        if f.dxf_role in by_role:
-            by_role[f.dxf_role] = f.to_dict()
+    by_role, by_role_all = _group_files_by_role(files)
     uploaded = [f for f in files if f.dxf_role is not None]
     return {
         **p.to_dict(),
         "files_by_role": by_role,
+        "files_by_role_all": by_role_all,
         "match_progress": {
             "saved": sum(1 for f in uploaded if f.match_saved),
             "total": len(uploaded),
         },
         "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
         "rule_check_available": rule_check_path(product_id).exists(),
+        "latest_rule_check_job": _project_rule_check_job(
+            jobs.latest_rule_check_job(product_id)
+        ),
     }
 
 
@@ -256,13 +350,49 @@ async def delete_product(product_id: str) -> dict:
     return {"deleted": product_id}
 
 
+@app.delete("/api/products/{product_id}/files/{file_id}", status_code=204)
+async def delete_product_file(product_id: str, file_id: str) -> Response:
+    """Detach a file from a product slot. Useful for removing a single
+    split-view file from a (role, view) without uploading a replacement.
+    The file row itself stays (so other libraries / products that may
+    reference it keep working); only the product/role/view binding clears.
+    """
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    rec = FILE_STORE.get(file_id)
+    if rec is None or rec.product_id != product_id:
+        raise HTTPException(status_code=404, detail="file not found in this product")
+    with FILE_STORE.lock, FILE_STORE.conn:
+        FILE_STORE.conn.execute(
+            "UPDATE files SET product_id = NULL, dxf_role = NULL, "
+            "dxf_view = NULL, match_saved = 0 WHERE id = ?",
+            (file_id,),
+        )
+    # Drop any cached match JSON so it doesn't haunt a future product binding.
+    try:
+        match_path(file_id).unlink()
+    except FileNotFoundError:
+        pass
+    return Response(status_code=204)
+
+
 @app.post("/api/products/{product_id}/files")
 async def upload_product_file(
     product_id: str,
     file: UploadFile = File(...),
     dxf_role: str = Form(...),
+    replace_file_id: str | None = Form(None),
 ) -> dict:
-    """Upload one DXF into a product slot. Replaces an existing slot if any."""
+    """Upload a DXF into a product role.
+
+    A `(product, role)` can hold any number of DXFs; this endpoint is
+    purely additive by default. To replace an existing file (the
+    common "swap this DXF" flow), pass `replace_file_id` — that file
+    is detached from the product before the new one is registered.
+    View coverage (top/bottom/side) is determined by the per-file
+    region rects set later via the side-regions endpoint; the upload
+    itself does not assign a view.
+    """
     product = PRODUCT_STORE.get(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -270,22 +400,33 @@ async def upload_product_file(
         raise HTTPException(status_code=400, detail=f"role must be one of {VALID_ROLES}")
     if not file.filename or not file.filename.lower().endswith(".dxf"):
         raise HTTPException(status_code=400, detail="expected a .dxf file")
+
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty upload")
 
-    # If a file already occupies this slot, free it so the unique index allows the new one.
-    existing_in_slot = next(
-        (f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role == dxf_role),
-        None,
-    )
-    if existing_in_slot is not None:
-        # Clear product/role on the old file so it doesn't collide with the new one.
+    # Optional targeted eviction of a specific file in this product+role.
+    if replace_file_id:
+        evictee = FILE_STORE.get(replace_file_id)
+        if (
+            evictee is None
+            or evictee.product_id != product_id
+            or evictee.dxf_role != dxf_role
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="replace_file_id does not match a file in this product+role",
+            )
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = NULL, dxf_role = NULL WHERE id = ?",
-                (existing_in_slot.id,),
+                "UPDATE files SET product_id = NULL, dxf_role = NULL, "
+                "dxf_view = NULL, match_saved = 0 WHERE id = ?",
+                (replace_file_id,),
             )
+        try:
+            match_path(replace_file_id).unlink()
+        except FileNotFoundError:
+            pass
 
     fid = _file_id_from_bytes(content)
     dst = upload_path(fid)
@@ -296,19 +437,19 @@ async def upload_product_file(
         FILE_STORE.register(
             fid, file.filename, len(content),
             library_id=product.library_id,
-            product_id=product_id, dxf_role=dxf_role,
+            product_id=product_id, dxf_role=dxf_role, dxf_view="multi",
             initial_status=DISCOVERING_LAYERS,
         )
     else:
-        # Re-uploading into an existing slot: bytes may be identical, but
-        # treat this as a fresh discovery pass either way — the user may be
-        # swapping in a new file and the prior layer selection no longer
-        # applies. Wiping selected_layers forces Phase 1 to re-run.
+        # Same content hash → reuse the row, rebinding it to this product
+        # slot. Wiping selected_layers forces Phase 1 to re-run.
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = ?, dxf_role = ?, library_id = ?, "
-                "status = ?, match_saved = 0, selected_layers = NULL WHERE id = ?",
-                (product_id, dxf_role, product.library_id, DISCOVERING_LAYERS, fid),
+                "UPDATE files SET product_id = ?, dxf_role = ?, dxf_view = 'multi', "
+                "library_id = ?, status = ?, match_saved = 0, "
+                "selected_layers = NULL WHERE id = ?",
+                (product_id, dxf_role, product.library_id,
+                 DISCOVERING_LAYERS, fid),
             )
     job_id = jobs.submit_discover_layers(fid)
     return {
@@ -325,6 +466,12 @@ class FilePatchRequest(BaseModel):
     library_id: str
 
 
+class UnitOverrideRequest(BaseModel):
+    # One of 'mm' | 'cm' | 'm' | 'inch' | 'μm'. Validated against the
+    # canonical map in `app.dxf.UNIT_TO_SCALE` inside the handler.
+    unit: str
+
+
 class RectModel(BaseModel):
     x0: float
     y0: float
@@ -333,11 +480,12 @@ class RectModel(BaseModel):
 
 
 class SideRegionsRequest(BaseModel):
-    # Both fields are always sent; null means "clear that side". The frontend
-    # mirrors local state so a partial update sends the current rect for the
-    # untouched side.
-    frontside_rect: RectModel | None = None
-    bottomside_rect: RectModel | None = None
+    # All three fields are always sent; null means "clear that view". The
+    # frontend mirrors local state so a partial update sends the current
+    # rect for any untouched view.
+    top_view_rect: RectModel | None = None
+    bottom_view_rect: RectModel | None = None
+    side_view_rect: RectModel | None = None
 
 
 @app.patch("/api/files/{file_id}")
@@ -362,21 +510,78 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
     return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
 
 
+@app.post("/api/files/{file_id}/unit-override")
+async def post_unit_override(file_id: str, req: UnitOverrideRequest) -> JSONResponse:
+    """Apply an operator-chosen unit interpretation to a file. Enqueues
+    a background preprocess that re-runs with the new multiplier; the
+    response carries the job id and the list of products whose Match
+    JSON the recompute will invalidate (so the viewer can show the
+    confirm modal's "N products affected" line).
+
+    Returns 202 on success, 400 on bad `unit`, 404 on missing file,
+    409 when a preprocess for this file is already in flight."""
+    from app.dxf import UNIT_TO_SCALE
+
+    if req.unit not in UNIT_TO_SCALE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown unit {req.unit!r}; expected one of {sorted(UNIT_TO_SCALE)}",
+        )
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    inflight = jobs.find_inflight_preprocess_job(file_id)
+    if inflight is not None:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "preprocess in flight", "job_id": inflight},
+        )
+    job_id = jobs.submit_unit_override_preprocess(file_id, req.unit)
+    affected = _affected_products_for_file(rec)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "file_id": file_id,
+            "unit": req.unit,
+            "job_id": job_id,
+            "affected_products": affected,
+        },
+    )
+
+
+def _affected_products_for_file(rec: FileRecord) -> list[dict]:
+    """Return the products whose Match JSON will be cleared when this
+    file's `applied_scale` changes. A file row carries at most one
+    `product_id`, so the list has 0 or 1 entry today; shaping it as a
+    list keeps the API forward-compatible if file→product becomes
+    many-to-many."""
+    if not rec.product_id:
+        return []
+    product = PRODUCT_STORE.get(rec.product_id)
+    if product is None:
+        return []
+    return [{"id": product.id, "name": product.name}]
+
+
 @app.patch("/api/files/{file_id}/side-regions")
 async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
-    """Persist this file's frontside / bottomside rectangles.
+    """Persist this file's top_view / bottom_view / side_view rectangles.
 
     Invalidates `data/match/{file_id}.json` (rule-checker input)
     because the saved match keys are no longer in sync with the new
-    side labels. Resets `match_saved` so the engineer re-runs Save Match
+    view labels. Resets `match_saved` so the engineer re-runs Save Match
     after redrawing regions.
     """
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found")
-    front = normalise_rect(req.frontside_rect.model_dump()) if req.frontside_rect else None
-    bottom = normalise_rect(req.bottomside_rect.model_dump()) if req.bottomside_rect else None
-    FILE_STORE.update_side_regions(file_id, front, bottom)
+    top = normalise_rect(req.top_view_rect.model_dump()) if req.top_view_rect else None
+    bottom = normalise_rect(req.bottom_view_rect.model_dump()) if req.bottom_view_rect else None
+    side = normalise_rect(req.side_view_rect.model_dump()) if req.side_view_rect else None
+    # Each file's region rects are independent — when a (product, role)
+    # has multiple DXFs, every file may legitimately mark its own top /
+    # bottom / side rectangles. No cross-file uniqueness check here.
+    FILE_STORE.update_side_regions(file_id, top, bottom, side)
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
     # rectangles. The user has to re-run Save Match to regenerate.
@@ -389,8 +594,9 @@ async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
 
     return {
         "file_id": file_id,
-        "frontside_rect": front,
-        "bottomside_rect": bottom,
+        "top_view_rect": top,
+        "bottom_view_rect": bottom,
+        "side_view_rect": side,
         "match_saved": False,
     }
 
@@ -566,6 +772,53 @@ async def classes_by_library(library_id: str) -> dict:
     return {"library_id": library_id, "classes": LIBRARIES.get(library_id).summary()}
 
 
+# Default `bbox_ratio` applied when the client sets a class to signature
+# mode without naming a value. Mirrors `matching.SIGNATURE_DEFAULT_BBOX_RATIO`
+# so the chosen number stays consistent between matcher and API surface.
+SIGNATURE_DEFAULT_BBOX_RATIO = 0.05
+
+
+class ClassStrategyRequest(BaseModel):
+    strategy: str
+    bbox_ratio: float | None = None
+
+
+@app.put("/api/libraries/{library_id}/classes/{class_name}/strategy")
+async def set_class_strategy(
+    library_id: str, class_name: str, req: ClassStrategyRequest,
+) -> dict:
+    if not LIBRARIES.exists(library_id):
+        raise HTTPException(status_code=404, detail="library not found")
+    if req.strategy not in ("chamfer", "signature"):
+        raise HTTPException(
+            status_code=400,
+            detail="strategy must be 'chamfer' or 'signature'",
+        )
+    if req.strategy == "chamfer":
+        # bbox_ratio is meaningless under chamfer; always clear it.
+        bbox_ratio: float | None = None
+    else:
+        if req.bbox_ratio is None:
+            bbox_ratio = SIGNATURE_DEFAULT_BBOX_RATIO
+        else:
+            v = req.bbox_ratio
+            if not math.isfinite(v) or v <= 0 or v > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="bbox_ratio must be in (0, 1] or null",
+                )
+            bbox_ratio = v
+    lib = LIBRARIES.get(library_id)
+    if not lib.set_strategy(class_name, req.strategy, bbox_ratio):
+        raise HTTPException(status_code=404, detail="class not found")
+    return {
+        "library_id": library_id,
+        "class_name": class_name,
+        "match_strategy": req.strategy,
+        "bbox_ratio": bbox_ratio,
+    }
+
+
 @app.get("/api/classes")
 async def classes_default(file_id: str | None = None,
                           library_id: str | None = None) -> dict:
@@ -646,20 +899,42 @@ async def primitives(file_id: str) -> dict:
     }
 
 
+# Sync (not async) so FastAPI dispatches to the worker thread pool — the
+# ~1–2 s `build_entity_shapes` on a 25k-entity drawing must NOT block the
+# async event loop. Viewer fires this fire-and-forget after `/primitives`
+# returns so the user's first /match scan finds the LRU cache populated.
+@app.post("/api/files/{file_id}/warm-shapes")
+def warm_shapes(file_id: str) -> dict:
+    _resolve_file(file_id)
+    _, shapes = _shapes_for(file_id)
+    return {"entity_count": len(shapes)}
+
+
 class MatchRequest(BaseModel):
     handles: list[str]
+    # Optional class hint for add-mode preview: the viewer sends the active
+    # add-mode class so the live scan uses the same (strategy, bbox_ratio)
+    # that scan-all will use after commit.
+    class_name: str | None = None
 
 
 @app.post("/api/files/{file_id}/match")
 async def match(file_id: str, req: MatchRequest) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
-    _resolve_file(file_id)
+    rec = _resolve_file(file_id)
     _, shapes = _shapes_for(file_id)
     missing = [h for h in req.handles if h not in shapes]
     if missing:
         raise HTTPException(status_code=400, detail=f"unknown handles: {missing[:5]}")
-    out = find_matches(req.handles, shapes)
+    strategy = "chamfer"
+    bbox_ratio: float | None = None
+    if req.class_name:
+        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(req.class_name)
+    out = find_matches(
+        req.handles, shapes,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
     return {
         "matches": [{"handles": r.handles, "score": r.score, "scale": r.scale} for r in out.matches],
         "near_misses": [
@@ -669,6 +944,43 @@ async def match(file_id: str, req: MatchRequest) -> dict:
         "count": len(out.matches),
         "near_count": len(out.near_misses),
     }
+
+
+class MatchSwapRequest(BaseModel):
+    pattern_a: list[str]
+    pattern_b: list[str]
+    class_name: str | None = None
+
+
+@app.post("/api/files/{file_id}/match-swap")
+async def match_swap(file_id: str, req: MatchSwapRequest) -> dict:
+    """Diagnostic: run find_matches with pattern_a as template AND with
+    pattern_b as template, and dump per-pair gate + alignment breakdown so an
+    asymmetric "A finds B but B doesn't find A" outcome can be pinpointed.
+
+    Curl from the viewer when the bug shows up — body is two handle lists.
+    """
+    if not req.pattern_a or not req.pattern_b:
+        raise HTTPException(
+            status_code=400, detail="both pattern_a and pattern_b required",
+        )
+    rec = _resolve_file(file_id)
+    _, shapes = _shapes_for(file_id)
+    missing = [h for h in req.pattern_a + req.pattern_b if h not in shapes]
+    if missing:
+        raise HTTPException(
+            status_code=400, detail=f"unknown handles: {missing[:5]}",
+        )
+    strategy = "chamfer"
+    bbox_ratio: float | None = None
+    if req.class_name:
+        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(
+            req.class_name,
+        )
+    return diagnose_swap(
+        req.pattern_a, req.pattern_b, shapes,
+        strategy=strategy, bbox_ratio=bbox_ratio,
+    )
 
 
 class CommitRequest(BaseModel):
@@ -692,7 +1004,10 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
     entity_point_sets = [
         collect_entity_points(data["primitives"], handle_index, h) for h in req.handles
     ]
-    tmpl = Template.from_entities(req.class_name, entity_point_sets)
+    entity_kinds = [
+        collect_entity_kinds(data["primitives"], handle_index, h) for h in req.handles
+    ]
+    tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
     lib.add_template(tmpl)
     return {
         "template_id": tmpl.id,
@@ -709,9 +1024,14 @@ async def scan_all(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     by_class: dict[str, list[str]] = {}
     for cls_name in lib.classes:
+        strategy, bbox_ratio = lib.strategy_of(cls_name)
         seen: set[str] = set()
         for tmpl in lib.templates_of(cls_name):
-            out = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
+            out = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+                strategy=strategy, bbox_ratio=bbox_ratio,
+            )
             for m in out.matches:
                 for h in m.handles:
                     seen.add(h)
@@ -734,9 +1054,11 @@ async def prematch(file_id: str) -> dict:
 
 # ---- Match JSON ----------------------------------------------------------
 # Format the downstream rule-checker expects:
-#   { "<className>.<template_index>": [[handle, ...], ...], ... }
-# Each inner list is one match (one occurrence of the template), containing
-# the DXF entity handles that make up that occurrence.
+#   { "<view>.<class_snake>.<template_index>": [[handle, ...], ...], ... }
+# Class portion is the snake_case form (substrate, smd_2t, bga_ball, ...)
+# from CLASS_JSON_KEY; the view prefix is omitted when no side region
+# contains the instance. Each inner list is one match occurrence,
+# containing the DXF entity handles that make up that occurrence.
 @app.post("/api/files/{file_id}/match-json")
 async def save_match_json(file_id: str) -> dict:
     rec = _resolve_file(file_id)
@@ -744,23 +1066,67 @@ async def save_match_json(file_id: str) -> dict:
     _, shapes = _shapes_for(file_id)
     out: dict[str, list[list[str]]] = {}
     total_matches = 0
-    side_counts = {"frontside": 0, "bottomside": 0, "unassigned": 0}
+    side_counts = {"top_view": 0, "bottom_view": 0, "side_view": 0,
+                   "unassigned": 0, "dropped": 0}
+    # Map view name → the file's rect for that view, for the
+    # skip-when-impossible guard below.
+    rect_for = {
+        "top_view": rec.top_view_rect,
+        "bottom_view": rec.bottom_view_rect,
+        "side_view": rec.side_view_rect,
+    }
     for cls_name in lib.classes:
+        # Skip-when-impossible: if this class has a view constraint and
+        # none of its allowed view rectangles is set on the file, every
+        # produced match would be dropped by the filter inside
+        # split_matches_by_side. Skipping the matcher call is a pure
+        # perf optimisation — the result is byte-identical either way.
+        allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
+        if allowed is not None and not any(rect_for[v] is not None for v in allowed):
+            continue
+        strategy, bbox_ratio = lib.strategy_of(cls_name)
         for idx, tmpl in enumerate(lib.templates_of(cls_name)):
-            result = find_matches_from_pointsets(tmpl.entity_point_sets, shapes)
-            base_key = f"{cls_name}.{idx}"
-            # Split this template's instances by their side label so a single
-            # smd.0 template can contribute to both frontside.smd.0 and
-            # bottomside.smd.0 in the same file.
+            result = find_matches_from_pointsets(
+                tmpl.entity_point_sets, shapes,
+                entity_kinds=tmpl.entity_kinds,
+                strategy=strategy, bbox_ratio=bbox_ratio,
+            )
+            # Display name (Substrate, BGABall, …) stays canonical in the UI;
+            # match-JSON keys use the snake_case variant so downstream
+            # consumers (rule checker, exports) see e.g. top_view.bga_ball.0.
+            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
+            base_key = f"{json_cls}.{idx}"
+            # Each match instance is classified by which view rect it
+            # falls inside, producing keys like top_view.smd_2t.0; matches
+            # outside every rect collapse to the unprefixed base_key.
+            # Constrained-class matches (C4Ball/BGABall) that land in a
+            # disallowed view or unassigned are dropped by the filter.
             grouped, cnts = split_matches_by_side(
                 base_key, result.matches, shapes,
-                rec.frontside_rect, rec.bottomside_rect,
+                rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
+                class_name=cls_name,
             )
             for k, v in grouped.items():
                 out.setdefault(k, []).extend(v)
             for k, n in cnts.items():
                 side_counts[k] += n
             total_matches += len(result.matches)
+    # Post-match arbitration: resolves geometrically-identical class
+    # collisions (e.g., BGABall vs FiducialCircle when diameters match)
+    # by neighbour count. No-op when no arbitration group's members
+    # appear in `out`.
+    out, arbitration_counts, view_drops = arbitrate(
+        out, shapes, CLASS_ARBITRATION_GROUPS
+    )
+    # Fold view-conflict drops from arbitration into side_counts so the
+    # response stays internally consistent. A drop here means an instance
+    # that was originally counted under some prefix (top/bottom/side/
+    # unassigned) is now moving to "dropped".
+    for _label, by_prefix in view_drops.items():
+        for prefix, n in by_prefix.items():
+            bucket = prefix if prefix else "unassigned"
+            side_counts[bucket] = max(0, side_counts[bucket] - n)
+            side_counts["dropped"] += n
     dst = match_path(file_id)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(dst, "w") as f:
@@ -773,6 +1139,7 @@ async def save_match_json(file_id: str) -> dict:
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "side_counts": side_counts,
+        "arbitration_counts": arbitration_counts,
         "saved_to": str(dst.relative_to(DATA_DIR.parent)),
         "match_saved": True,
     }
@@ -790,10 +1157,13 @@ async def get_match_json(file_id: str) -> dict:
 
 # ---- Rule checking (product-scoped, cross-DXF) --------------------------
 @app.post("/api/products/{product_id}/rule-check")
-async def run_product_rule_check(product_id: str) -> dict:
-    """Run DRC across every uploaded DXF in the product. Every file's
-    `match_saved` must be true; otherwise we 400 with a list of missing
-    roles."""
+async def run_product_rule_check(product_id: str) -> JSONResponse:
+    """Submit a product-scoped DRC job. Returns 202 + `{job_id}`; the
+    front-end polls `GET /api/jobs/{job_id}` for completion. Every
+    file's `match_saved` must be true; otherwise we 400 with a list of
+    missing roles. The worker materialises the DRC handoff bundle on
+    disk and hands the directory to the external rule function — see
+    `app.jobs._rule_check_worker`."""
     product = PRODUCT_STORE.get(product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -807,8 +1177,11 @@ async def run_product_rule_check(product_id: str) -> dict:
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
 
-    # Build the per-role payload the rule checker consumes.
-    dxfs_by_role: dict[str, dict] = {}
+    # Validate that every role-attached file's Match JSON and DXF
+    # exist on disk before submitting — the worker materialises a
+    # handoff bundle from these and would fail late otherwise. No
+    # parsed-JSON read happens here; the bundle ships DXF + Match
+    # JSON only, no `parsed/{file_id}.json` involvement.
     for f in files:
         mp = match_path(f.id)
         if not mp.exists():
@@ -816,31 +1189,17 @@ async def run_product_rule_check(product_id: str) -> dict:
                 status_code=400,
                 detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
             )
-        with open(mp) as fp:
-            mj = json.load(fp)
-        _, shapes = _shapes_for(f.id)
-        dxfs_by_role[f.dxf_role] = {
-            "file_id": f.id,
-            "dxf_path": str(upload_path(f.id)),
-            "match_json": mj,
-            "entity_shapes": shapes,
-        }
+        if not upload_path(f.id).exists():
+            raise HTTPException(
+                status_code=500,
+                detail=f"{f.dxf_role}: source DXF missing at {f.id}.dxf",
+            )
 
-    result = check_rules(product_id, dxfs_by_role)
-    dst = rule_check_path(product_id)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "w") as fp:
-        json.dump(result, fp, indent=2)
-    n_pass = sum(1 for v in result.values() if v.get("pass"))
-    return {
-        "product_id": product_id,
-        "results": result,
-        "rule_count": len(result),
-        "pass_count": n_pass,
-        "fail_count": len(result) - n_pass,
-        "saved_to": str(dst.relative_to(DATA_DIR.parent)),
-        "roles_covered": sorted(dxfs_by_role.keys()),
-    }
+    job_id = jobs.submit_rule_check(product_id, [f.id for f in files])
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "product_id": product_id},
+    )
 
 
 @app.get("/api/products/{product_id}/rule-check")
@@ -860,3 +1219,71 @@ async def get_product_rule_check(product_id: str) -> dict:
         "pass_count": n_pass,
         "fail_count": len(result) - n_pass,
     }
+
+
+# ---- DRC handoff bundle (external rule-check team consumes this) --------
+@app.get("/api/products/{product_id}/drc-bundle")
+async def get_drc_bundle(product_id: str) -> Response:
+    """Return a zip bundle of every role-attached DXF + per-file Match
+    JSON + a manifest the external rule-checking team consumes. Each
+    DXF stays in its own coordinate space; every Match JSON ships with
+    raw DXF handles.
+
+    Preconditions match `POST .../rule-check`: 404 on unknown product,
+    400 when no role-attached DXFs exist or any file still needs Save
+    Match. The bundle format itself is pinned by
+    `openspec/specs/design-rule-checking/drc-manifest.schema.json`.
+    """
+    product = PRODUCT_STORE.get(product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    files = [f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role]
+    if not files:
+        raise HTTPException(
+            status_code=400,
+            detail="no DXFs uploaded to this product yet",
+        )
+    missing = [f.dxf_role for f in files if not f.match_saved]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
+        )
+    zip_bytes, filename = build_bundle(product, files)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# ---- Developer-mode parameter overrides ---------------------------------
+# Process-wide, in-memory only. See `app/dev_overrides.py` and the
+# `expose-dev-parameter-overrides` OpenSpec change for the contract.
+@app.get("/api/dev/settings")
+async def dev_settings_get() -> dict:
+    from app import dev_overrides
+    return {"settings": dev_overrides.read_state()}
+
+
+@app.post("/api/dev/settings")
+async def dev_settings_post(payload: dict) -> dict:
+    from app import dev_overrides
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="expected JSON object")
+    # Reset path takes precedence and ignores any other keys in the body —
+    # `{"reset": true}` is the canonical wipe.
+    if payload.get("reset") is True:
+        return {"settings": dev_overrides.reset()}
+    overrides = {k: v for k, v in payload.items() if k != "reset"}
+    try:
+        state = dev_overrides.apply(overrides)
+    except dev_overrides.ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"errors": exc.errors})
+    return {"settings": state}
+
+
+@app.post("/api/dev/reprocess-all")
+async def dev_reprocess_all() -> dict:
+    job_id = jobs.submit_reprocess_all()
+    return {"job_id": job_id}

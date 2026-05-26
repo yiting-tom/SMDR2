@@ -1,9 +1,10 @@
 """Products — top-level grouping for cross-DXF design rule checking.
 
-A *product* (e.g., one IC package design) bundles up to four DXFs by
-role (SBT, BD, POD, RING) under a single customer's library. Rule
-checking is product-scoped: it runs once across all four DXFs after
-each one has had its Match JSON saved.
+A *product* (e.g., one IC package design) bundles DXFs by role under
+a single customer's library. Valid roles are SBT, BD, POD, RING and
+LID — all five are independent and may coexist on the same product.
+Rule checking is product-scoped: it runs once across all the
+role-bound DXFs after each one has had its Match JSON saved.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from pathlib import Path
 from app.storage import DB_PATH
 
 
-VALID_ROLES: tuple[str, ...] = ("SBT", "BD", "POD", "RING")
+VALID_ROLES: tuple[str, ...] = ("SBT", "BD", "POD", "RING", "LID")
 
 
 PRODUCTS_SCHEMA = """

@@ -28,17 +28,216 @@ from typing import Iterable
 
 
 # Canonical class list. Auto-seeded into every newly-created library.
+# Order is also the display / toolbar / fold order — keep deliberate.
 DEFAULT_CLASSES: list[str] = [
-    "smd",
-    "substrate",
-    "die_area",
-    "lid_outer",
-    "lid_inner",
-    "bga_ball",
-    "pin_mark",
-    "fiducial_mark",
-    "2d_barcode",
+    "Substrate",
+    "Pin-1",
+    "Lid",
+    "LidOuter",
+    "LidInner",
+    "DieArea",
+    "FiducialCircle",
+    "FiducialCross",
+    "SMD-2T",
+    "C4Ball",
+    "BGABall",
+    "Protrusion",
+    "2DBarcode",
+    "SMD-3T",
+    "SMD-8T",
+    "SMD-14T",
 ]
+
+
+# Class IDs that are no longer seeded. The migration drops both their class
+# row and any templates filed under them, so legacy DBs converge to the new
+# default list without manual cleanup.
+DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
+
+
+# Display ID → match-JSON snake_case key. Display labels stay in their
+# canonical form (BGABall, Pin-1, …); only the persisted JSON key uses the
+# snake_case identifier downstream consumers (rule checker, exports) expect.
+CLASS_JSON_KEY: dict[str, str] = {
+    "Substrate":      "substrate",
+    "Pin-1":          "pin_1",
+    "Lid":            "lid",
+    "LidOuter":       "lid_outer",
+    "LidInner":       "lid_inner",
+    "DieArea":        "die_area",
+    "FiducialCircle": "fiducial_circle",
+    "FiducialCross":  "fiducial_cross",
+    "SMD-2T":         "smd_2t",
+    "C4Ball":         "c4_ball",
+    "BGABall":        "bga_ball",
+    "Protrusion":     "protrusion",
+    "2DBarcode":      "2d_barcode",
+    "SMD-3T":         "smd_3t",
+    "SMD-8T":         "smd_8t",
+    "SMD-14T":        "smd_14t",
+}
+
+
+# Legacy snake_case class names → new canonical IDs. Applied as a one-shot
+# rename pass on every Store boot. Idempotent: after the first run all the
+# WHERE clauses match zero rows, so subsequent boots are no-ops.
+LEGACY_CLASS_RENAME: dict[str, str] = {
+    "smd":           "SMD-2T",
+    "substrate":     "Substrate",
+    "die_area":      "DieArea",
+    "lid_outer":     "LidOuter",
+    "lid_inner":     "LidInner",
+    "bga_ball":      "BGABall",
+    "pin_mark":      "Pin-1",
+    "2d_barcode":    "2DBarcode",
+}
+
+
+# Per-class view constraints. Some IC-packaging classes are physically
+# restricted to a subset of views (C4 bumps face the chip's top side;
+# BGA balls face the package bottom or appear in cross-section). The
+# match-JSON serialiser and the viewer's Scan All overlay both consult
+# is_allowed_view() below to drop instances that violate this rule.
+#
+# Absent key = class is unconstrained (all views including "unassigned"
+# permitted). Present key = strict mode: only the listed views are
+# allowed, and the "unassigned" position (no view rect covers the
+# instance) is never allowed.
+#
+# JS canvas.js MUST keep an in-sync mirror of this constant between its
+# CLASS_VIEW_CONSTRAINTS_BEGIN / _END sentinel comments. The drift-guard
+# test in tests/test_canvas_constants.py enforces consistency.
+# CLASS_VIEW_CONSTRAINTS_BEGIN
+CLASS_VIEW_CONSTRAINTS: dict[str, frozenset[str]] = {
+    "C4Ball":  frozenset({"top_view"}),
+    "BGABall": frozenset({"bottom_view", "side_view"}),
+}
+# CLASS_VIEW_CONSTRAINTS_END
+
+
+def is_allowed_view(class_name: str, view: str | None) -> bool:
+    """True when a (class_name, view) pair is permitted under
+    CLASS_VIEW_CONSTRAINTS. Unconstrained classes (key absent) admit
+    every view including None. Constrained classes admit only views in
+    their allow-set and never None (strict mode: an unassigned match
+    of a constrained class is physically impossible)."""
+    allowed = CLASS_VIEW_CONSTRAINTS.get(class_name)
+    if allowed is None:
+        return True
+    return view is not None and view in allowed
+
+
+# ---- Neighbour-count arbitration registry -------------------------------
+# When two classes have geometrically identical templates (e.g., a BGA ball
+# and a circle fiducial of the same diameter), pure pattern matching pulls
+# the same handles into both classes. The arbitration step in
+# app/class_arbitration.py uses spatial neighbour density to split them.
+# This registry declares which class pairs participate and the
+# neighbour-count rule that disambiguates them.
+
+@dataclass(frozen=True)
+class MinNeighbors:
+    n: int
+
+    def matches(self, count: int) -> bool:
+        return count >= self.n
+
+
+@dataclass(frozen=True)
+class MaxNeighbors:
+    n: int
+
+    def matches(self, count: int) -> bool:
+        return count <= self.n
+
+
+NeighborRule = MinNeighbors | MaxNeighbors
+
+
+@dataclass(frozen=True)
+class ArbitrationGroup:
+    """Two-or-more classes whose templates can be indistinguishable;
+    instances are routed to one class via neighbour count."""
+
+    members: frozenset[str]
+    rules: dict[str, NeighborRule]
+    default_class: str
+    min_population: int = 8
+    pitch_multiplier: float = 1.5
+
+    def __post_init__(self) -> None:
+        if len(self.members) < 2:
+            raise ValueError(
+                f"ArbitrationGroup needs ≥2 members, got {self.members!r}"
+            )
+        missing = self.members - self.rules.keys()
+        if missing:
+            raise ValueError(
+                f"ArbitrationGroup missing rules for members: {sorted(missing)!r}"
+            )
+        extra = set(self.rules.keys()) - self.members
+        if extra:
+            raise ValueError(
+                f"ArbitrationGroup has rules for non-members: {sorted(extra)!r}"
+            )
+        if self.default_class not in self.members:
+            raise ValueError(
+                f"default_class {self.default_class!r} is not in members "
+                f"{sorted(self.members)!r}"
+            )
+        if self.pitch_multiplier <= 0:
+            raise ValueError(
+                f"pitch_multiplier must be > 0, got {self.pitch_multiplier!r}"
+            )
+        if self.min_population < 0:
+            raise ValueError(
+                f"min_population must be ≥ 0, got {self.min_population!r}"
+            )
+
+
+# Default registry. Add new groups here when a fresh same-size collision
+# appears (e.g., an SMD pad that coincidentally equals a different class's
+# diameter). Class-display-ID uniqueness is enforced below at import time.
+CLASS_ARBITRATION_GROUPS: tuple[ArbitrationGroup, ...] = (
+    ArbitrationGroup(
+        members=frozenset({"BGABall", "FiducialCircle"}),
+        rules={
+            "BGABall":        MinNeighbors(2),
+            "FiducialCircle": MaxNeighbors(1),
+        },
+        default_class="FiducialCircle",
+        min_population=8,
+        pitch_multiplier=1.5,
+    ),
+)
+
+
+def _build_arbitration_index(
+    groups: tuple[ArbitrationGroup, ...],
+) -> dict[str, ArbitrationGroup]:
+    """Precompute class → group lookup; raise on a class shared by two groups."""
+    idx: dict[str, ArbitrationGroup] = {}
+    for g in groups:
+        for cls in g.members:
+            prior = idx.get(cls)
+            if prior is not None:
+                raise ValueError(
+                    f"class {cls!r} appears in two arbitration groups: "
+                    f"{sorted(prior.members)!r} and {sorted(g.members)!r}"
+                )
+            idx[cls] = g
+    return idx
+
+
+_ARBITRATION_INDEX: dict[str, ArbitrationGroup] = _build_arbitration_index(
+    CLASS_ARBITRATION_GROUPS
+)
+
+
+def arbitration_group_for(class_name: str) -> ArbitrationGroup | None:
+    """Return the unique ArbitrationGroup that contains class_name, or None.
+    A class belongs to at most one group (enforced at import time)."""
+    return _ARBITRATION_INDEX.get(class_name)
 
 
 DEFAULT_LIBRARY_ID = "default"
@@ -57,9 +256,26 @@ class Template:
     entity_point_sets: list[list[Point]]
     centroid: tuple[float, float]
     bbox: tuple[float, float, float, float]
+    # Per-entity primitive kind at commit time (e.g., "circle", "polyline").
+    # Same length as entity_point_sets. None entries mean mixed-kind handle
+    # or legacy row (template committed before the column was added).
+    entity_kinds: list[str | None] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.entity_kinds is None:
+            self.entity_kinds = [None] * len(self.entity_point_sets)
+        elif len(self.entity_kinds) != len(self.entity_point_sets):
+            raise ValueError(
+                "entity_kinds length must equal entity_point_sets length"
+            )
 
     @classmethod
-    def from_entities(cls, class_name: str, entity_point_sets: list[list[Point]]) -> "Template":
+    def from_entities(
+        cls,
+        class_name: str,
+        entity_point_sets: list[list[Point]],
+        entity_kinds: list[str | None] | None = None,
+    ) -> "Template":
         if not entity_point_sets or all(len(e) == 0 for e in entity_point_sets):
             raise ValueError("template must have at least one point")
         all_pts = [p for ent in entity_point_sets for p in ent]
@@ -72,6 +288,10 @@ class Template:
             entity_point_sets=entity_point_sets,
             centroid=(cx, cy),
             bbox=bbox,
+            entity_kinds=(
+                list(entity_kinds) if entity_kinds is not None
+                else [None] * len(entity_point_sets)
+            ),
         )
 
 
@@ -84,10 +304,12 @@ CREATE TABLE IF NOT EXISTS libraries (
 );
 
 CREATE TABLE IF NOT EXISTS classes (
-    library_id  TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    rank        INTEGER NOT NULL,
-    created_at  REAL NOT NULL,
+    library_id     TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    rank           INTEGER NOT NULL,
+    created_at     REAL NOT NULL,
+    match_strategy TEXT NOT NULL DEFAULT 'chamfer',
+    bbox_ratio     REAL,
     PRIMARY KEY (library_id, name),
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
@@ -104,6 +326,7 @@ CREATE TABLE IF NOT EXISTS templates (
     bbox_xmax          REAL NOT NULL,
     bbox_ymax          REAL NOT NULL,
     created_at         REAL NOT NULL,
+    entity_kinds       TEXT,
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 """
@@ -149,6 +372,15 @@ class Store:
             self.conn.execute(
                 f"ALTER TABLE templates ADD COLUMN library_id TEXT NOT NULL "
                 f"DEFAULT '{DEFAULT_LIBRARY_ID}'"
+            )
+
+        # templates.entity_kinds — JSON-encoded parallel list of primitive
+        # types (or None) captured at commit time. NULL on legacy rows; the
+        # loader parses NULL as [None] * len(entity_point_sets) so existing
+        # libraries keep working without the circle fast path.
+        if not has_col("templates", "entity_kinds"):
+            self.conn.execute(
+                "ALTER TABLE templates ADD COLUMN entity_kinds TEXT"
             )
 
         # Pre-multi-library schema had templates.FOREIGN KEY(class_name)
@@ -198,6 +430,79 @@ class Store:
                 ALTER TABLE classes__new RENAME TO classes;
             """)
 
+        # Per-class match strategy + bbox_ratio. Both columns are additive;
+        # NULL bbox_ratio is the explicit "use default" signal, only honored
+        # when match_strategy == 'signature'.
+        if not has_col("classes", "match_strategy"):
+            self.conn.execute(
+                "ALTER TABLE classes ADD COLUMN match_strategy TEXT NOT NULL DEFAULT 'chamfer'"
+            )
+        if not has_col("classes", "bbox_ratio"):
+            self.conn.execute(
+                "ALTER TABLE classes ADD COLUMN bbox_ratio REAL"
+            )
+
+        # Legacy snake_case class names → new canonical IDs. Rewrite both the
+        # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
+        # rows that would collide with an already-existing (library_id, NEW)
+        # row, and the trailing DELETE cleans up any such leftovers. Naturally
+        # idempotent — once renamed, no rows match the old name.
+        for old, new in LEGACY_CLASS_RENAME.items():
+            self.conn.execute(
+                "UPDATE templates SET class_name = ? WHERE class_name = ?",
+                (new, old),
+            )
+            self.conn.execute(
+                "UPDATE OR IGNORE classes SET name = ? WHERE name = ?",
+                (new, old),
+            )
+            self.conn.execute(
+                "DELETE FROM classes WHERE name = ?",
+                (old,),
+            )
+
+        # Drop deprecated classes (and any templates filed under them) so
+        # legacy DBs converge to the new DEFAULT_CLASSES set on boot.
+        for dead in DEPRECATED_CLASSES:
+            self.conn.execute("DELETE FROM templates WHERE class_name = ?", (dead,))
+            self.conn.execute("DELETE FROM classes WHERE name = ?", (dead,))
+
+        # Make sure every existing library carries the full DEFAULT_CLASSES set
+        # before re-ranking, so newly-added defaults (e.g. FiducialCircle /
+        # FiducialCross) slot into their canonical position rather than the
+        # tail. INSERT OR IGNORE is a no-op for classes that already exist.
+        lib_ids = [r["id"] for r in self.conn.execute("SELECT id FROM libraries")]
+        now = time.time()
+        for lib_id in lib_ids:
+            for c in DEFAULT_CLASSES:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO classes (library_id, name, rank, created_at) "
+                    "VALUES (?, ?, 0, ?)",
+                    (lib_id, c, now),
+                )
+
+        # Re-rank classes per library so the toolbar order tracks the current
+        # DEFAULT_CLASSES list. Anything not in DEFAULT_CLASSES (custom classes
+        # added by the user) is pushed to the end, preserving relative order.
+        rank_priority = {n: i for i, n in enumerate(DEFAULT_CLASSES)}
+        rows = self.conn.execute(
+            "SELECT library_id, name, rank, created_at FROM classes"
+        ).fetchall()
+        per_lib: dict[str, list[sqlite3.Row]] = {}
+        for r in rows:
+            per_lib.setdefault(r["library_id"], []).append(r)
+        for lib_id, lib_rows in per_lib.items():
+            lib_rows.sort(key=lambda r: (
+                rank_priority.get(r["name"], len(DEFAULT_CLASSES)),
+                r["rank"],
+                r["created_at"],
+            ))
+            for new_rank, r in enumerate(lib_rows):
+                self.conn.execute(
+                    "UPDATE classes SET rank = ? WHERE library_id = ? AND name = ?",
+                    (new_rank, lib_id, r["name"]),
+                )
+
     # ---- library CRUD ----------------------------------------------------
     def create_library(self, library_id: str, name: str) -> None:
         with self.lock, self.conn:
@@ -232,19 +537,37 @@ class Store:
                 (library_id, name, library_id, time.time()),
             )
 
+    def update_class_strategy(
+        self,
+        library_id: str,
+        name: str,
+        strategy: str,
+        bbox_ratio: float | None,
+    ) -> bool:
+        """Atomically set (match_strategy, bbox_ratio) for a class.
+        Returns True when the (library_id, name) row exists."""
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE classes SET match_strategy = ?, bbox_ratio = ? "
+                "WHERE library_id = ? AND name = ?",
+                (strategy, bbox_ratio, library_id, name),
+            )
+            return cur.rowcount > 0
+
     def insert_template(self, library_id: str, t: Template) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT INTO templates "
                 "(id, library_id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     t.id, library_id, t.class_name,
                     json.dumps(t.entity_point_sets, separators=(",", ":")),
                     t.centroid[0], t.centroid[1],
                     t.bbox[0], t.bbox[1], t.bbox[2], t.bbox[3],
                     time.time(),
+                    json.dumps(t.entity_kinds, separators=(",", ":")),
                 ),
             )
 
@@ -261,19 +584,28 @@ class Store:
             )
             return cur.rowcount > 0
 
-    def load_library(self, library_id: str) -> tuple[list[str], dict[str, list[Template]]]:
+    def load_library(
+        self, library_id: str
+    ) -> tuple[list[str], dict[str, dict], dict[str, list[Template]]]:
         with self.lock:
             class_rows = self.conn.execute(
-                "SELECT name FROM classes WHERE library_id = ? "
+                "SELECT name, match_strategy, bbox_ratio FROM classes WHERE library_id = ? "
                 "ORDER BY rank ASC, created_at ASC",
                 (library_id,),
             ).fetchall()
             classes = [r["name"] for r in class_rows]
+            configs: dict[str, dict] = {
+                r["name"]: {
+                    "match_strategy": r["match_strategy"] or "chamfer",
+                    "bbox_ratio": r["bbox_ratio"],
+                }
+                for r in class_rows
+            }
             templates: dict[str, list[Template]] = {c: [] for c in classes}
 
             tmpl_rows = self.conn.execute(
                 "SELECT id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax "
+                "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, entity_kinds "
                 "FROM templates WHERE library_id = ? ORDER BY created_at ASC",
                 (library_id,),
             ).fetchall()
@@ -282,15 +614,23 @@ class Store:
                 point_sets: list[list[Point]] = [
                     [(float(p[0]), float(p[1])) for p in ent] for ent in raw_sets
                 ]
+                # Legacy rows store NULL → reconstruct a parallel [None, ...]
+                # list so downstream code can index it uniformly.
+                raw_kinds = r["entity_kinds"]
+                if raw_kinds is None:
+                    entity_kinds: list[str | None] = [None] * len(point_sets)
+                else:
+                    entity_kinds = list(json.loads(raw_kinds))
                 t = Template(
                     id=r["id"],
                     class_name=r["class_name"],
                     entity_point_sets=point_sets,
                     centroid=(r["centroid_x"], r["centroid_y"]),
                     bbox=(r["bbox_xmin"], r["bbox_ymin"], r["bbox_xmax"], r["bbox_ymax"]),
+                    entity_kinds=entity_kinds,
                 )
                 templates.setdefault(r["class_name"], []).append(t)
-            return classes, templates
+            return classes, configs, templates
 
 
 class Library:
@@ -304,8 +644,9 @@ class Library:
     ) -> None:
         self.library_id = library_id
         self.store = store
-        classes, templates = store.load_library(library_id)
+        classes, configs, templates = store.load_library(library_id)
         self._classes: list[str] = classes
+        self._configs: dict[str, dict] = configs
         self._templates: dict[str, list[Template]] = templates
         for c in defaults:
             if c not in self._templates:
@@ -320,7 +661,36 @@ class Library:
             return
         self._classes.append(name)
         self._templates[name] = []
+        self._configs[name] = {"match_strategy": "chamfer", "bbox_ratio": None}
         self.store.upsert_class(self.library_id, name)
+
+    def strategy_of(self, name: str) -> tuple[str, float | None]:
+        """Per-class (match_strategy, bbox_ratio). Falls back to
+        ('chamfer', None) when the class is unknown (so callers can
+        always assume a safe default and don't need a None-guard)."""
+        cfg = self._configs.get(name)
+        if cfg is None:
+            return ("chamfer", None)
+        return (cfg.get("match_strategy") or "chamfer", cfg.get("bbox_ratio"))
+
+    def set_strategy(
+        self,
+        name: str,
+        strategy: str,
+        bbox_ratio: float | None,
+    ) -> bool:
+        """Persist a class's matching strategy. Returns False when the
+        class doesn't exist."""
+        if name not in self._templates:
+            return False
+        self._configs[name] = {
+            "match_strategy": strategy,
+            "bbox_ratio": bbox_ratio,
+        }
+        self.store.update_class_strategy(
+            self.library_id, name, strategy, bbox_ratio
+        )
+        return True
 
     def add_template(self, template: Template) -> None:
         if template.class_name not in self._templates:
@@ -335,7 +705,16 @@ class Library:
         return len(self._templates.get(class_name, []))
 
     def summary(self) -> list[dict]:
-        return [{"name": c, "count": self.count(c)} for c in self._classes]
+        out = []
+        for c in self._classes:
+            cfg = self._configs.get(c, {})
+            out.append({
+                "name": c,
+                "count": self.count(c),
+                "match_strategy": cfg.get("match_strategy") or "chamfer",
+                "bbox_ratio": cfg.get("bbox_ratio"),
+            })
+        return out
 
     def find_template(self, template_id: str) -> Template | None:
         for templates in self._templates.values():
@@ -455,6 +834,25 @@ def build_handle_index(primitives: list[dict]) -> dict[str, list[int]]:
             continue
         idx.setdefault(h, []).append(i)
     return idx
+
+
+def collect_entity_kinds(
+    primitives: list[dict],
+    handle_index: dict[str, list[int]],
+    handle: str,
+) -> str | None:
+    """Return the shared primitive `type` for a handle, or None if its
+    primitives have more than one type (mixed-kind handle) or the handle has
+    no primitives. Used to tag EntityShape.kind / Template.entity_kinds so
+    the matcher can dispatch primitive-specific fast paths."""
+    types: set[str] = set()
+    for pi in handle_index.get(handle, []):
+        types.add(primitives[pi]["type"])
+        if len(types) > 1:
+            return None
+    if not types:
+        return None
+    return next(iter(types))
 
 
 def collect_entity_points(primitives: list[dict], handle_index: dict[str, list[int]], handle: str) -> list[Point]:

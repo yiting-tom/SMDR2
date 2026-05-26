@@ -23,7 +23,8 @@ import {
   resolveSnap as _resolveSnapCore,
   applyOrtho as _applyOrthoCore,
 } from "./measure_core.js";
-import { openLayerModal } from "./layer_modal.js";
+import { mountDevParamsModal } from "./dev_params.js";
+import { initUnitPicker } from "./unit_picker.js";
 
 const $canvas = document.getElementById("dxf-canvas");
 const $status = document.getElementById("status");
@@ -36,7 +37,6 @@ const $libraryBtn = document.getElementById("library-btn");
 const $libraryModal = document.getElementById("library-modal");
 const $libraryBody = document.getElementById("library-body");
 const $librarySummary = document.getElementById("library-summary");
-const $layersBtn = document.getElementById("layers-btn");
 const $visibilityBtn = document.getElementById("visibility-btn");
 const $visibilityPanel = document.getElementById("visibility-panel");
 const $visibilityList = document.getElementById("visibility-list");
@@ -80,6 +80,7 @@ const ctx = $canvas.getContext("2d");
 const FILE_ID = document.body.dataset.fileId;
 const API = {
   primitives:    () => `/api/files/${FILE_ID}/primitives`,
+  warmShapes:    () => `/api/files/${FILE_ID}/warm-shapes`,
   fileInfo:      () => `/api/files/${FILE_ID}`,
   match:         () => `/api/files/${FILE_ID}/match`,
   commit:        () => `/api/files/${FILE_ID}/commit`,
@@ -108,9 +109,10 @@ async function loadFileInfo() {
   if (!fileRes.ok || !libsRes.ok) return;
   const file = await fileRes.json();
   currentFileInfo = file;
-  // Restore persisted side rectangles so the overlay is visible on load.
-  sideRects.frontside = file.frontside_rect ?? null;
-  sideRects.bottomside = file.bottomside_rect ?? null;
+  // Restore persisted view rectangles so the overlay is visible on load.
+  sideRects.top_view = file.top_view_rect ?? null;
+  sideRects.bottom_view = file.bottom_view_rect ?? null;
+  sideRects.side_view = file.side_view_rect ?? null;
   const libs = (await libsRes.json()).libraries;
   $librarySwitcher.innerHTML = "";
   for (const lib of libs) {
@@ -127,29 +129,195 @@ async function loadFileInfo() {
     if (pRes.ok) {
       const p = await pRes.json();
       $productContext.textContent = `${p.name} / ${file.dxf_role}`;
-      $roleSwitcher.innerHTML = "";
-      for (const role of ["SBT", "BD", "POD", "RING"]) {
-        const sibling = p.files_by_role[role];
-        const btn = document.createElement("a");
-        btn.className = "role-btn";
-        btn.dataset.role = role;
-        btn.textContent = role;
-        if (role === file.dxf_role) {
-          btn.classList.add("current");
-        } else if (sibling) {
-          btn.href = `/viewer/${sibling.id}`;
-        } else {
-          btn.classList.add("empty");
-          btn.title = `${role} not uploaded yet`;
-        }
-        $roleSwitcher.appendChild(btn);
-      }
+      renderRoleSwitcher(p, file);
+      // Stash the product name on the file object so the unit-picker's
+      // confirm modal can show "Clear saved Match JSON for <name>"
+      // without re-fetching products.
+      file.product_name = p.name;
     }
   } else {
     $productContext.textContent = "";
+    closeRoleMenu();
     $roleSwitcher.innerHTML = "";
   }
+
+  // Bootstrap the unit-override picker now that the file payload (and
+  // optional product context) is loaded. Recompute completions reload
+  // the page so the canvas re-reads the new geometry from /primitives.
+  initUnitPicker(file, {
+    onComplete: () => window.location.reload(),
+  });
 }
+
+// ---- Role switcher with per-role sibling-DXF dropdown -------------------
+// Surfaces every DXF a product has under each role (`files_by_role_all`)
+// so the engineer can flip between siblings (e.g., a BD's top + bottom
+// DXFs) without dropping back to the dashboard. Roles with 0 or 1 file
+// render as before; ≥ 2 → dropdown.
+let openRoleMenu = null;  // currently-open <ul.role-menu>, or null
+
+function closeRoleMenu() {
+  if (!openRoleMenu) return;
+  openRoleMenu.hidden = true;
+  const trigger = openRoleMenu.previousElementSibling;
+  if (trigger) trigger.setAttribute("aria-expanded", "false");
+  openRoleMenu = null;
+}
+
+function renderRoleSwitcher(product, file) {
+  closeRoleMenu();
+  $roleSwitcher.innerHTML = "";
+  for (const role of ["SBT", "BD", "POD"]) {
+    $roleSwitcher.appendChild(renderRoleSlot(product, file, role));
+  }
+  // 4th position: split RING | LID pair — both halves render
+  // independently and may both be populated.
+  $roleSwitcher.appendChild(renderRingLidPair(product, file));
+}
+
+// A role is "matched" once every sibling DXF under it has had its match
+// saved — mirrors the rule-check-readiness predicate used on the dashboard
+// (`ready_for_rc = all(f.match_saved for f in uploaded)`). Empty roles
+// don't qualify so the dashed-empty styling stays untouched.
+function isRoleMatched(siblings) {
+  return siblings.length > 0 && siblings.every(s => s.match_saved);
+}
+
+// Re-pull the product payload so the role switcher reflects fresh
+// `match_saved` flags. Callers: after Save Match JSON succeeds, and after
+// a region edit clears match_saved server-side. No-op outside a product
+// context (the switcher is hidden in that case).
+async function refreshRoleSwitcher() {
+  if (!currentFileInfo?.product_id) return;
+  try {
+    const r = await fetch(`/api/products/${currentFileInfo.product_id}`);
+    if (!r.ok) return;
+    const p = await r.json();
+    renderRoleSwitcher(p, currentFileInfo);
+  } catch (e) {
+    console.warn("refreshRoleSwitcher failed:", e);
+  }
+}
+
+function renderRoleSlot(product, file, role, opts = {}) {
+  const { disabledReason = null } = opts;
+  const siblings = product.files_by_role_all?.[role] ?? [];
+  const isCurrentRole = role === file.dxf_role;
+
+  if (siblings.length === 0) {
+    const btn = document.createElement("a");
+    btn.className = "role-btn empty";
+    btn.dataset.role = role;
+    btn.textContent = role;
+    if (disabledReason) {
+      btn.classList.add("disabled");
+      btn.title = disabledReason;
+    } else {
+      btn.title = `${role} not uploaded yet`;
+    }
+    return btn;
+  }
+  if (siblings.length === 1) {
+    const sibling = siblings[0];
+    const btn = document.createElement("a");
+    btn.className = "role-btn";
+    btn.dataset.role = role;
+    btn.textContent = role;
+    if (sibling.id === file.id) {
+      btn.classList.add("current");
+    } else {
+      btn.href = `/viewer/${sibling.id}`;
+    }
+    if (isRoleMatched(siblings)) btn.classList.add("matched");
+    return btn;
+  }
+  return buildRoleDropdown(role, siblings, isCurrentRole, file.id);
+}
+
+// 4th position: render RING and LID side-by-side. Each half is an
+// independent role slot — both may be populated concurrently.
+function renderRingLidPair(product, file) {
+  const wrap = document.createElement("span");
+  wrap.className = "role-btn-pair";
+  wrap.appendChild(renderRoleSlot(product, file, "RING"));
+  wrap.appendChild(renderRoleSlot(product, file, "LID"));
+  return wrap;
+}
+
+function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
+  const wrap = document.createElement("span");
+  wrap.className = "role-btn-wrap";
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "role-btn role-btn--multi";
+  if (isCurrentRole) trigger.classList.add("current");
+  if (isRoleMatched(siblings)) trigger.classList.add("matched");
+  trigger.dataset.role = role;
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.textContent = `${role} ×${siblings.length} ▾`;
+
+  const menu = document.createElement("ul");
+  menu.className = "role-menu";
+  menu.setAttribute("role", "menu");
+  menu.hidden = true;
+
+  for (const sib of siblings) {
+    const li = document.createElement("li");
+    li.setAttribute("role", "none");
+    const label = sib.name ?? sib.dxf_view ?? sib.id;
+    let item;
+    if (sib.id === currentFileId) {
+      item = document.createElement("span");
+      item.className = "role-menu__item role-menu__item--current";
+    } else {
+      item = document.createElement("a");
+      item.className = "role-menu__item";
+      item.href = `/viewer/${sib.id}`;
+    }
+    if (sib.match_saved) item.classList.add("role-menu__item--matched");
+    item.setAttribute("role", "menuitem");
+    item.textContent = label;
+    li.appendChild(item);
+    menu.appendChild(li);
+  }
+
+  trigger.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasOpen = openRoleMenu === menu;
+    closeRoleMenu();
+    if (!wasOpen) {
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      openRoleMenu = menu;
+    }
+  });
+
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+  return wrap;
+}
+
+// Outside-click closes the open role-menu (skipped when the click is on
+// the trigger itself — the trigger's own handler will toggle correctly).
+document.addEventListener("mousedown", (e) => {
+  if (!openRoleMenu) return;
+  const wrap = openRoleMenu.parentElement;
+  if (wrap && wrap.contains(e.target)) return;
+  closeRoleMenu();
+});
+
+// Esc closes the open role-menu. Early-return when no menu is open so we
+// never intercept the viewer's other Esc handlers (mark-mode cancel,
+// measure-tool cancel, library modal, etc.).
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !openRoleMenu) return;
+  const trigger = openRoleMenu.previousElementSibling;
+  closeRoleMenu();
+  if (trigger) trigger.focus();
+  e.stopPropagation();
+}, true);
 
 $librarySwitcher.addEventListener("change", async () => {
   const newLibId = $librarySwitcher.value;
@@ -208,50 +376,83 @@ let connectivityGraph = null;   // lazy: Array<Set<number>>  parallel to primiti
 // Measure-distance tool (AutoCAD `DIST`-style, with continuous chaining).
 // Mutually exclusive with addMode.
 //
-// measureState.picks      = list of world [x,y] anchor points; each click
-//                           appends one. picks.length >= 1 means a rubber-band
-//                           is live from picks[last] to the cursor. Frozen
-//                           segments are the pairs picks[i], picks[i+1].
-// measureState.snapHint   = last resolveSnap() result for marker rendering
-// measureState.lastCursor = world [x,y] from the most recent mousemove — kept
-//                           so a Shift key press can re-resolve ortho without
-//                           requiring mouse motion
+// measureState.picks           = the active chain's world [x,y] anchors;
+//                                 each left-click appends one; picks.length
+//                                 >= 1 means a rubber-band is live from
+//                                 picks[last] to the cursor. Frozen segments
+//                                 within the active chain are the pairs
+//                                 picks[i], picks[i+1].
+// measureState.chains          = committed chains (each one a picks-shaped
+//                                 array with >= 2 picks). Enter pushes the
+//                                 active chain here and resets picks=[].
+// measureState.snapHint        = last resolveSnap() result for marker rendering
+// measureState.lastCursor      = world [x,y] from the most recent mousemove —
+//                                 kept so a Shift key press or right-click
+//                                 pop can re-resolve without requiring
+//                                 mouse motion
+// measureState.cancelHitboxes  = screen-space CSS-pixel rects of the per-chain
+//                                 ✕ buttons; rebuilt every render
 let measureMode = false;
-let measureState = { picks: [], snapHint: null, lastCursor: null };
+let measureState = {
+  chains: [],
+  picks: [],
+  snapHint: null,
+  lastCursor: null,
+  cancelHitboxes: [],
+};
 
 function measureAnchor() {
   return measureState.picks.length ? measureState.picks[measureState.picks.length - 1] : null;
 }
 
-// Mark-side-regions mode. The user paints two axis-aligned, world-space
-// rectangles — frontside first, then bottomside — that tag each match
-// instance with a "frontside." / "bottomside." key prefix at save-match
-// time. Persisted per-file on the server.
+// Mark-side-regions mode. The user paints up to three axis-aligned,
+// world-space rectangles — top_view, bottom_view, side_view — that tag
+// each match instance with a "top_view." / "bottom_view." / "side_view."
+// key prefix at save-match time. Persisted per-file on the server.
 //
-//   sideRects.frontside / .bottomside : {x0,y0,x1,y1} | null  (world)
-//   markMode                          : null | "frontside" | "bottomside"
-//   markQueue                         : remaining sides to capture this session
-//   markDrag                          : { startWorld, currentWorld } | null
-const sideRects = { frontside: null, bottomside: null };
+// The mode cycles through the three slots in order. For each slot:
+//   - left-drag → provisional rect (sideRects[slot] updated, NOT yet PATCHed)
+//   - Enter     → commit current sideRects[slot] (provisional or unchanged) and advance
+//   - bare-click (release-at-press-point) → skip slot (sideRects[slot] unchanged) and advance
+//   - Esc       → cancel entire session: sideRects revert to the pre-session snapshot
+//
+// The PATCH fires once on the final commit/skip; cancelling never PATCHes.
+//
+//   sideRects.top_view / .bottom_view / .side_view : {x0,y0,x1,y1} | null
+//   sideRectsSnapshot                              : null | {...}  (pre-session copy for Esc)
+//   markMode                                       : null | "top_view" | "bottom_view" | "side_view"
+//   markQueue                                      : remaining slots to capture this session
+//   markDrag                                       : { startWorld, currentWorld } | null
+const sideRects = { top_view: null, bottom_view: null, side_view: null };
+let sideRectsSnapshot = null;
 let markMode = null;
 let markQueue = [];
 let markDrag = null;
+// CSS-pixel hitboxes for the per-view × delete glyph drawn on each label.
+// Populated each frame by drawSideRegionLabels; consumed by mousedown.
+const sideLabelHitboxes = [];
 
 const SIDE_STYLES = {
-  frontside: {
+  top_view: {
     fill:   "rgba(124, 231, 194, 0.035)",
     stroke: "rgba(124, 231, 194, 0.85)",
     label:  "top view",
     labelColor: "rgba(124, 231, 194, 0.95)",
   },
-  bottomside: {
+  bottom_view: {
     fill:   "rgba(231, 160, 124, 0.035)",
     stroke: "rgba(231, 160, 124, 0.85)",
     label:  "bottom view",
     labelColor: "rgba(231, 160, 124, 0.95)",
   },
+  side_view: {
+    fill:   "rgba(180, 168, 255, 0.035)",
+    stroke: "rgba(180, 168, 255, 0.85)",
+    label:  "side view",
+    labelColor: "rgba(180, 168, 255, 0.95)",
+  },
 };
-const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags are treated as a slip
+const MARK_MIN_AREA = 1e-6; // world-units²; smaller drags count as a bare click (skip)
 
 // Add-mode state machine. addModeClass: null = idle; else holds the class name
 // currently being staged. matchesStaged: true once S has populated matchSet for
@@ -271,23 +472,116 @@ const HIGHLIGHT_WIDTH_MULT = 2.5;
 // as a "filled dot" rather than its outline, but in dense packaging arrays
 // that's already what the eye sees, and the pan FPS gain at mid-zoom is
 // massive. Bump back down to ~1 px if visual fidelity becomes a concern.
-const DOT_THRESHOLD_CSS_PX = 3.0;
+const DOT_THRESHOLD_CSS_PX = 12.0;
 
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
-// dark background and for mutual distinguishability.
+// dark background and for mutual distinguishability. SMD-2T/3T/8T/14T share
+// a red family so the eye groups SMD variants together; LidOuter/LidInner/Lid
+// share a purple family for the same reason; C4Ball and BGABall share the
+// exact same orange (both are ball-type interconnect — user chose visual
+// unification over per-class distinction).
 const CLASS_COLORS = {
-  smd:           "#ff5252",  // red
-  substrate:     "#69f0ae",  // mint
-  die_area:      "#ffeb3b",  // yellow
-  lid_outer:     "#ba68c8",  // purple
-  lid_inner:     "#f06292",  // pink
-  bga_ball:      "#ffab40",  // orange
-  pin_mark:      "#f48fb1",  // soft pink
-  fiducial_mark: "#4dd0e1",  // teal
-  "2d_barcode":  "#c6ff00",  // lime
+  "SMD-2T":       "#ff5252",  // red
+  "SMD-3T":       "#ff8a80",  // light red
+  "SMD-8T":       "#d50000",  // deep red
+  "SMD-14T":      "#b71c1c",  // maroon
+  "Substrate":    "#69f0ae",  // mint
+  "DieArea":      "#ffeb3b",  // yellow
+  "LidOuter":     "#ba68c8",  // purple
+  "LidInner":     "#f06292",  // pink
+  "Lid":          "#9575cd",  // muted purple
+  "C4Ball":       "#ffab40",  // orange — shares BGABall color (both are ball-type interconnect)
+  "BGABall":      "#ffab40",  // orange
+  "Protrusion":   "#80d8ff",  // light blue — distinct from SMD reds / BGA orange
+  "Pin-1":        "#f48fb1",  // soft pink
+  "FiducialCircle": "#4dd0e1",  // teal
+  "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
+  "2DBarcode":      "#c6ff00",  // lime
 };
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
+
+// Per-class view constraints — JS mirror of library.CLASS_VIEW_CONSTRAINTS.
+// Some IC-packaging classes only physically appear in specific views:
+// C4 bumps in top_view, BGA balls in bottom_view / side_view. The Scan
+// All overlay and the match-JSON serialiser both filter constrained
+// classes whose containment falls outside the allowed set, including
+// the "unassigned" position (no view rect covers the instance).
+//
+// MUST stay in sync with app/library.py — tests/test_canvas_constants.py
+// parses the literal between the BEGIN/END sentinel comments to verify.
+// CLASS_VIEW_CONSTRAINTS_BEGIN
+const CLASS_VIEW_CONSTRAINTS = {
+  "C4Ball":  ["top_view"],
+  "BGABall": ["bottom_view", "side_view"],
+};
+// CLASS_VIEW_CONSTRAINTS_END
+
+function isAllowedView(className, view) {
+  const allowed = CLASS_VIEW_CONSTRAINTS[className];
+  if (!allowed) return true;
+  return view !== null && allowed.includes(view);
+}
+
+// Classify a world-space point against the file's view rectangles
+// using the same top_view > bottom_view > side_view priority as
+// app.side_regions.side_prefix_for. Returns the matched view name
+// or null (unassigned).
+function viewForPoint(x, y) {
+  const r = (rect) =>
+    rect !== null && pointInRect(x, y, rect.x0, rect.y0, rect.x1, rect.y1);
+  if (r(sideRects.top_view))    return "top_view";
+  if (r(sideRects.bottom_view)) return "bottom_view";
+  if (r(sideRects.side_view))   return "side_view";
+  return null;
+}
+
+// Apply CLASS_VIEW_CONSTRAINTS to a freshly-built scan-all map pair,
+// mutating both in place. Drops handles whose class is constrained and
+// whose bbox-center isn't in the allowed view set; decrements byClass
+// counts accordingly so the status line shows post-filter totals.
+//
+// Multi-primitive handles get their combined bbox computed by union'ing
+// the per-primitive primBBoxes; single-primitive handles (the common
+// case for C4Ball / BGABall circles) trivially get their own bbox.
+function applyViewConstraintsToScanAll(byHandle, byClass) {
+  if (!Object.keys(CLASS_VIEW_CONSTRAINTS).length) return;
+  // Group bbox by handle (only handles that need filtering).
+  const constrainedHandles = new Set();
+  for (const [h, cls] of byHandle) {
+    if (CLASS_VIEW_CONSTRAINTS[cls]) constrainedHandles.add(h);
+  }
+  if (!constrainedHandles.size) return;
+  // Union primBBoxes per handle for constrained handles only.
+  const handleBBox = new Map(); // handle → [xmin, ymin, xmax, ymax]
+  for (let i = 0; i < primitives.length; i++) {
+    const h = primitives[i].handle;
+    if (!constrainedHandles.has(h)) continue;
+    const b = primBBoxes[i];
+    const ex = handleBBox.get(h);
+    if (!ex) {
+      handleBBox.set(h, [b[0], b[1], b[2], b[3]]);
+    } else {
+      if (b[0] < ex[0]) ex[0] = b[0];
+      if (b[1] < ex[1]) ex[1] = b[1];
+      if (b[2] > ex[2]) ex[2] = b[2];
+      if (b[3] > ex[3]) ex[3] = b[3];
+    }
+  }
+  for (const h of constrainedHandles) {
+    const cls = byHandle.get(h);
+    const bbox = handleBBox.get(h);
+    if (!bbox) continue;  // handle has no primitive (shouldn't happen)
+    const cx = (bbox[0] + bbox[2]) * 0.5;
+    const cy = (bbox[1] + bbox[3]) * 0.5;
+    const view = viewForPoint(cx, cy);
+    if (!isAllowedView(cls, view)) {
+      byHandle.delete(h);
+      byClass[cls] = (byClass[cls] ?? 1) - 1;
+      if (byClass[cls] <= 0) delete byClass[cls];
+    }
+  }
+}
 
 // scan-all overlay state: handle → class_name (for fast render lookup)
 let scanAllByHandle = null;   // null = inactive; Map<handle, className> when active
@@ -489,7 +783,12 @@ function drawPrimitive(p, opts) {
     case "circle":
       ctx.beginPath();
       ctx.arc(p.center[0], p.center[1], p.r, 0, Math.PI * 2);
-      ctx.strokeStyle = stroke ?? p.color; ctx.lineWidth = lineWidth; ctx.stroke();
+      if (p.filled) {
+        ctx.fillStyle = fill ?? p.color; ctx.fill();
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke(); }
+      } else {
+        ctx.strokeStyle = stroke ?? p.color; ctx.lineWidth = lineWidth; ctx.stroke();
+      }
       break;
   }
 }
@@ -499,6 +798,28 @@ function worldToScreen(x, y) {
     (x - view.cx) * view.zoom + $canvas.width / 2,
     -(y - view.cy) * view.zoom + $canvas.height / 2,
   ];
+}
+
+// Emit one device-pixel `Path2D` rect per (x, y) world position, keyed by
+// color. Steps out of the world transform so dots are crisp 1×1 fills
+// regardless of zoom / DPR. Reused by the main pass + every highlight
+// pass that needs sub-pixel-circle LOD batching.
+function flushDotBuckets(dotBuckets) {
+  if (!dotBuckets.size) return;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
+  for (const [color, xs] of dotBuckets) {
+    const path = new Path2D();
+    for (let k = 0; k < xs.length; k += 2) {
+      const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
+      const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
+      path.rect(sx | 0, sy | 0, 1, 1);
+    }
+    ctx.fillStyle = color;
+    ctx.fill(path);
+  }
+  ctx.restore();
 }
 
 function render() {
@@ -547,22 +868,7 @@ function render() {
   // step out of the world transform into device-pixel space so each dot is
   // a crisp 1×1 fill regardless of zoom / DPR — and one fill per color is
   // far cheaper than N separate fillRects for the same N.
-  if (dotBuckets.size) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
-    for (const [color, xs] of dotBuckets) {
-      const path = new Path2D();
-      for (let k = 0; k < xs.length; k += 2) {
-        const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
-        const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
-        path.rect(sx | 0, sy | 0, 1, 1);
-      }
-      ctx.fillStyle = color;
-      ctx.fill(path);
-    }
-    ctx.restore();
-  }
+  flushDotBuckets(dotBuckets);
 
   // Persistent side-region overlay — drawn beneath highlights so it never
   // hides selection / match / scan-all feedback.
@@ -570,6 +876,7 @@ function render() {
 
   if (scanAllByHandle) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
@@ -578,41 +885,72 @@ function render() {
       if (!cls) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle) || nearMissSet.has(p.handle)) continue;
       const col = classColor(cls);
+      if (p.type === "circle" && p.r < dotR) {
+        let bucket = buckets.get(col);
+        if (!bucket) { bucket = []; buckets.set(col, bucket); }
+        bucket.push(p.center[0], p.center[1]);
+        continue;
+      }
       drawPrimitive(p, { stroke: col, fill: col, lineWidth: hw });
     }
+    flushDotBuckets(buckets);
   }
   if (nearMissSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (nearMissSet.has(p.handle) && !matchSet.has(p.handle) && !selection.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(NEARMISS_COLOR);
+          if (!bucket) { bucket = []; buckets.set(NEARMISS_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: NEARMISS_COLOR, fill: NEARMISS_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   if (selection.size || matchSet.size) {
     const hw = hairline * HIGHLIGHT_WIDTH_MULT;
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (selection.has(p.handle) || matchSet.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(HIGHLIGHT_COLOR);
+          if (!bucket) { bucket = []; buckets.set(HIGHLIGHT_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: HIGHLIGHT_COLOR, fill: HIGHLIGHT_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   if (hoverSet.size || pinnedSet.size) {
     const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1);
+    const buckets = new Map();
     for (let i = 0; i < primitives.length; i++) {
       const p = primitives[i];
       if (!isLayerVisible(p)) continue;
       if (!bboxInView(primBBoxes[i])) continue;
       if (hoverSet.has(p.handle) || pinnedSet.has(p.handle)) {
+        if (p.type === "circle" && p.r < dotR) {
+          let bucket = buckets.get(HOVER_COLOR);
+          if (!bucket) { bucket = []; buckets.set(HOVER_COLOR, bucket); }
+          bucket.push(p.center[0], p.center[1]);
+          continue;
+        }
         drawPrimitive(p, { stroke: HOVER_COLOR, fill: HOVER_COLOR, lineWidth: hw });
       }
     }
+    flushDotBuckets(buckets);
   }
   // Rule-check focused sub-rule: highlight from + to and draw an annotation
   // line between their centroids.
@@ -651,14 +989,24 @@ function render() {
 }
 
 // ---- focused sub-rule from rule check ------------------------------------
-// Collects edges (segments) for the given handle group. A point is emitted
-// as a degenerate segment whose endpoints coincide.
-function collectHandlesSegments(handles) {
+// The external rule function pre-resolves each sub-rule's `from`/`to`/`tol`
+// into single primitive handles. The viewer's job is presentational:
+// highlight whichever of those entities are set, and when `from` + `to`
+// are both set, draw a dashed segment between the closest pair of points
+// across the two primitives' geometries (vertex-vs-edge search, see
+// `shortestSegmentBetween` below) — bbox-centre would put the line
+// through the entity interior on long thin shapes; perpendicular-foot
+// search keeps it pinned to the actual nearest edges.
+
+// Segments (edge pairs) for a single primitive handle. A point is emitted
+// as a degenerate segment whose endpoints coincide. Mirrors the old
+// list-based collector but takes a single handle since `from`/`to`/`tol`
+// are now single-handle fields.
+function collectHandleSegments(handle) {
   const segs = [];
-  if (!handles || !handles.length) return segs;
-  const wanted = new Set(handles);
+  if (!handle) return segs;
   for (const p of primitives) {
-    if (!wanted.has(p.handle)) continue;
+    if (p.handle !== handle) continue;
     switch (p.type) {
       case "line":
         segs.push([p.start, p.end]);
@@ -666,8 +1014,6 @@ function collectHandlesSegments(handles) {
       case "polyline": {
         const pts = p.points;
         for (let i = 1; i < pts.length; i++) segs.push([pts[i - 1], pts[i]]);
-        // Add the closing edge if the polyline is closed and the points list
-        // doesn't already include the closing duplicate vertex.
         if (p.closed && pts.length > 2) {
           const a = pts[pts.length - 1], b = pts[0];
           if (a[0] !== b[0] || a[1] !== b[1]) segs.push([a, b]);
@@ -687,9 +1033,7 @@ function collectHandlesSegments(handles) {
         break;
       case "circle": {
         // Sample the ring into 32 tangent segments so the shortest-segment
-        // search treats the circle as its discretised polygon (faithful to
-        // the pre-change closed-polyline emit, accurate enough for the
-        // rule-check annotation line).
+        // search treats the circle as its discretised polygon.
         const cx = p.center[0], cy = p.center[1], r = p.r;
         const N = 32;
         let px = cx + r, py = cy;
@@ -702,27 +1046,25 @@ function collectHandlesSegments(handles) {
         break;
       }
     }
+    // A handle maps to at most one primitive; stop after finding it.
+    break;
   }
   return segs;
 }
 
-// Note: closestPointOnSegment (used here and by resolveSnap below) is
-// imported from measure_core.js so it stays pure / unit-testable.
-
-// True shortest segment between two handle groups: for every vertex of
-// one shape, find its closest point on every edge of the other (and vice
-// versa); the global minimum is the answer. Captures the perpendicular-
-// foot case that pure vertex-to-vertex misses (e.g., two parallel SMD
-// edges where the nearest pair sits in the middle of both edges, not at
-// either's corner).
-function shortestSegmentBetween(handlesA, handlesB) {
-  const segsA = collectHandlesSegments(handlesA);
-  const segsB = collectHandlesSegments(handlesB);
+// True shortest segment between two single primitives: for every vertex
+// of one shape, find its closest point on every edge of the other (and
+// vice versa); the global minimum is the answer. Captures the
+// perpendicular-foot case that pure vertex-to-vertex misses (e.g., two
+// parallel SMD edges where the nearest pair sits in the middle of both
+// edges, not at either's corner).
+function shortestSegmentBetween(handleA, handleB) {
+  const segsA = collectHandleSegments(handleA);
+  const segsB = collectHandleSegments(handleB);
   if (!segsA.length || !segsB.length) return null;
 
   let best = Infinity, bestA = null, bestB = null;
 
-  // Vertices of A vs edges of B.
   const seenA = new Set();
   for (const [u, v] of segsA) {
     for (const p of [u, v]) {
@@ -737,7 +1079,6 @@ function shortestSegmentBetween(handlesA, handlesB) {
       }
     }
   }
-  // Vertices of B vs edges of A.
   const seenB = new Set();
   for (const [u, v] of segsB) {
     for (const p of [u, v]) {
@@ -755,72 +1096,120 @@ function shortestSegmentBetween(handlesA, handlesB) {
   return bestA && bestB ? [bestA, bestB] : null;
 }
 
+// Fallback for the from-only / tol-only label position when there's no
+// from↔to segment to anchor against — bbox centre is still a reasonable
+// single deterministic point inside the entity.
+function primitiveCenter(handle) {
+  if (!handle) return null;
+  for (const p of primitives) {
+    if (p.handle !== handle) continue;
+    const [xmin, ymin, xmax, ymax] = bboxOf(p);
+    if (!Number.isFinite(xmin)) return null;
+    return [(xmin + xmax) / 2, (ymin + ymax) / 2];
+  }
+  return null;
+}
+
 function drawFocusedSubRule(hairline) {
   const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
   const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1.5);
-  const handles = new Set([...(focusedSubRule.from ?? []), ...(focusedSubRule.to ?? [])]);
+  const handles = new Set();
+  if (focusedSubRule.from) handles.add(focusedSubRule.from);
+  if (focusedSubRule.to)   handles.add(focusedSubRule.to);
+  if (focusedSubRule.tol)  handles.add(focusedSubRule.tol);
   for (const p of primitives) {
     if (handles.has(p.handle)) {
       drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
     }
   }
-  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
-  if (segment) {
-    const [fc, tc] = segment;
-    ctx.strokeStyle = FOCUS_COLOR;
-    ctx.lineWidth = hairline * 2.2;
-    ctx.setLineDash([8 * hairline, 5 * hairline]);
-    ctx.beginPath();
-    ctx.moveTo(fc[0], fc[1]);
-    ctx.lineTo(tc[0], tc[1]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    drawEndpointMarker(fc, hairline);
-    drawEndpointMarker(tc, hairline);
+  if (focusedSubRule.from && focusedSubRule.to) {
+    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+    if (segment) {
+      const [fc, tc] = segment;
+      ctx.strokeStyle = FOCUS_COLOR;
+      ctx.lineWidth = hairline * 2.2;
+      ctx.setLineDash([8 * hairline, 5 * hairline]);
+      ctx.beginPath();
+      ctx.moveTo(fc[0], fc[1]);
+      ctx.lineTo(tc[0], tc[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      drawEndpointMarker(fc, hairline);
+      drawEndpointMarker(tc, hairline);
+    }
   }
 }
 
 function drawEndpointMarker(pt, hairline) {
-  ctx.fillStyle = ctx.strokeStyle;
+  // Cross-hair (×) — pins the measurement point precisely to its xy.
+  // Two diagonal strokes; sized to read clearly at typical viewer
+  // zooms (the marker should be obvious without crowding the dashed
+  // connector or the highlighted entity).
+  const half = hairline * 7;
+  ctx.save();
+  ctx.lineWidth = hairline * 2.4;
   ctx.beginPath();
-  ctx.arc(pt[0], pt[1], hairline * 2.5, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.moveTo(pt[0] - half, pt[1] - half);
+  ctx.lineTo(pt[0] + half, pt[1] + half);
+  ctx.moveTo(pt[0] + half, pt[1] - half);
+  ctx.lineTo(pt[0] - half, pt[1] + half);
+  ctx.stroke();
+  ctx.restore();
 }
 
-function drawFocusedLabel() {
-  const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
-  const fc = segment ? segment[0] : null;
-  const tc = segment ? segment[1] : null;
-  let midX, midY;
-  if (fc && tc) {
-    [midX, midY] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
-  } else if (fc) {
-    [midX, midY] = worldToScreen(fc[0], fc[1]);
-  } else if (tc) {
-    [midX, midY] = worldToScreen(tc[0], tc[1]);
-  } else {
-    return;
-  }
-  const text = focusedSubRule.text || focusedSubRule.ruleText || "";
+function drawLabelBox(text, screenX, screenY, color) {
   if (!text) return;
-  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
   ctx.save();
   ctx.font = `${13 * dpr}px ui-monospace, monospace`;
   const m = ctx.measureText(text);
   const padX = 9 * dpr, padY = 5 * dpr;
   const tw = m.width + padX * 2;
   const th = 16 * dpr + padY * 2;
-  const x = midX - tw / 2, y = midY - th - 10 * dpr;
+  const x = screenX - tw / 2, y = screenY - th - 10 * dpr;
   ctx.fillStyle = "rgba(0,0,0,0.85)";
   ctx.fillRect(x, y, tw, th);
-  ctx.strokeStyle = FOCUS_COLOR;
+  ctx.strokeStyle = color;
   ctx.lineWidth = 1 * dpr;
   ctx.strokeRect(x, y, tw, th);
-  ctx.fillStyle = FOCUS_COLOR;
+  ctx.fillStyle = color;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, midX, y + th / 2);
+  ctx.fillText(text, screenX, y + th / 2);
   ctx.restore();
+}
+
+function drawFocusedLabel() {
+  const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
+
+  // from + to: text at the midpoint of the shortest segment between the
+  // two entities (so the label lands on the same line the user sees).
+  // from only: text adjacent to `from`'s bbox centre.
+  // tol + tol_text: rendered independently next to `tol` (may coexist
+  // with the from/to label when both groups are populated).
+  if (focusedSubRule.from && focusedSubRule.to) {
+    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+    if (segment) {
+      const [fc, tc] = segment;
+      const [mx, my] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);
+      drawLabelBox(focusedSubRule.text || focusedSubRule.ruleText || "",
+                   mx, my, FOCUS_COLOR);
+    }
+  } else if (focusedSubRule.from) {
+    const fc = primitiveCenter(focusedSubRule.from);
+    if (fc) {
+      const [mx, my] = worldToScreen(fc[0], fc[1]);
+      drawLabelBox(focusedSubRule.text || focusedSubRule.ruleText || "",
+                   mx, my, FOCUS_COLOR);
+    }
+  }
+
+  if (focusedSubRule.tol && focusedSubRule.tol_text) {
+    const tc = primitiveCenter(focusedSubRule.tol);
+    if (tc) {
+      const [mx, my] = worldToScreen(tc[0], tc[1]);
+      drawLabelBox(focusedSubRule.tol_text, mx, my, FOCUS_COLOR);
+    }
+  }
 }
 
 // ---- Measure tool overlay -----------------------------------------------
@@ -921,12 +1310,31 @@ function drawPickDot(pt) {
 }
 
 function drawMeasureOverlay() {
-  const { picks, snapHint } = measureState;
-  // Frozen segments between consecutive picks.
+  const { chains, picks, snapHint } = measureState;
+  // Hitboxes are derived state — rebuild every frame so pan / zoom / resize
+  // keep the click target glued to the visible ✕ glyph.
+  measureState.cancelHitboxes = [];
+
+  // Committed chains: solid segments + endpoint dots + per-segment labels +
+  // one ✕ cancel affordance per chain (anchored to the first segment).
+  for (let ci = 0; ci < chains.length; ci++) {
+    const c = chains[ci];
+    for (let i = 1; i < c.length; i++) {
+      drawMeasureSegment(c[i - 1], c[i], false);
+    }
+    for (const p of c) drawPickDot(p);
+    for (let i = 1; i < c.length; i++) {
+      const a = c[i - 1], b = c[i];
+      drawSegmentLabel(a, b, fmtCoord(Math.hypot(b[0] - a[0], b[1] - a[1])));
+    }
+    if (c.length >= 2) drawCancelButton(c[0], c[1], ci);
+  }
+
+  // Active chain: frozen segments between consecutive picks.
   for (let i = 1; i < picks.length; i++) {
     drawMeasureSegment(picks[i - 1], picks[i], false);
   }
-  // Endpoint dots on every pick.
+  // Endpoint dots on every active pick.
   for (const p of picks) drawPickDot(p);
   // Live rubber-band from the last pick to the snap-resolved cursor.
   const anchor = measureAnchor();
@@ -935,8 +1343,9 @@ function drawMeasureOverlay() {
   }
   if (snapHint) drawSnapMarker(snapHint);
 
-  // Midpoint label per segment. Frozen segments show their distance; the
-  // live segment additionally appends Σ once the chain has ≥ 2 picks.
+  // Midpoint label per active-chain segment. Frozen segments show their
+  // distance; the live segment additionally appends Σ once the chain has
+  // ≥ 2 picks.
   let frozenTotal = 0;
   for (let i = 1; i < picks.length; i++) {
     const a = picks[i - 1], b = picks[i];
@@ -955,6 +1364,62 @@ function drawMeasureOverlay() {
   }
 
   updateMeasureReadout();
+}
+
+// Draw a 14×14 CSS-px ✕ button next to the midpoint-offset label of
+// segment a..b, then push its CSS-pixel hitbox onto cancelHitboxes so
+// mousedown can route the click to chain removal. Position math mirrors
+// drawSegmentLabel so the ✕ tracks the label across pan/zoom.
+function drawCancelButton(a, b, chainIndex) {
+  const [sax, say] = worldToScreen(a[0], a[1]);
+  const [sbx, sby] = worldToScreen(b[0], b[1]);
+  const sdx = sbx - sax, sdy = sby - say;
+  const slen = Math.hypot(sdx, sdy);
+  if (slen < 2) return;
+  const mx = (sax + sbx) / 2;
+  const my = (say + sby) / 2;
+  const px = -sdy / slen, py = sdx / slen;
+  const offset = 10 * dpr;
+  const lcx = mx + px * offset;
+  const lcy = my + py * offset;
+
+  // Recompute the label box so we can park the ✕ flush to its right edge.
+  // drawSegmentLabel uses the same font/padding — keep them in sync.
+  const labelText = fmtCoord(Math.hypot(b[0] - a[0], b[1] - a[1]));
+  ctx.save();
+  ctx.font = `${12 * dpr}px ui-monospace, monospace`;
+  const labelW = ctx.measureText(labelText).width + 12 * dpr;     // text + 2 * padX
+  ctx.restore();
+
+  const btn = 14 * dpr;
+  const gap = 4 * dpr;
+  const bx = lcx + labelW / 2 + gap;          // left edge of the ✕ box
+  const by = lcy - btn / 2;                   // top edge
+
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,0.82)";
+  ctx.fillRect(bx, by, btn, btn);
+  ctx.strokeStyle = MEASURE_COLOR;
+  ctx.lineWidth = 1 * dpr;
+  ctx.strokeRect(bx, by, btn, btn);
+  // ✕ glyph: two diagonal strokes inset by 25% of the box.
+  const inset = btn * 0.25;
+  ctx.beginPath();
+  ctx.moveTo(bx + inset, by + inset);
+  ctx.lineTo(bx + btn - inset, by + btn - inset);
+  ctx.moveTo(bx + btn - inset, by + inset);
+  ctx.lineTo(bx + inset, by + btn - inset);
+  ctx.stroke();
+  ctx.restore();
+
+  // Hitbox in CSS pixels (screen coords above are in device pixels).
+  measureState.cancelHitboxes.push({
+    cssLeft:   bx / dpr,
+    cssTop:    by / dpr,
+    cssRight:  (bx + btn) / dpr,
+    cssBottom: (by + btn) / dpr,
+    chainIndex,
+  });
 }
 
 function fmtCoord(n) {
@@ -994,13 +1459,18 @@ const $ruleSidebarSummary = document.getElementById("rule-sidebar-summary");
 const $ruleSidebarBody = document.getElementById("rule-sidebar-body");
 const $ruleSidebarClose = document.getElementById("rule-sidebar-close");
 
-const RULE_FOLD_KEY = "smdr2.viewer.ruleFolded";
-function getRuleFolded() {
-  try { return new Set(JSON.parse(sessionStorage.getItem(RULE_FOLD_KEY) ?? "[]")); }
+// Rule sidebar defaults every rule to folded; the user-opened rules
+// are remembered per session so re-render (e.g. focusing a sub-rule)
+// doesn't snap them shut again. Inverted from the prior "remember the
+// folded ones" scheme — production rule sets are long, the user reads
+// fails first, and most rules stay closed by default.
+const RULE_OPEN_KEY = "smdr2.viewer.ruleOpened";
+function getOpenedRules() {
+  try { return new Set(JSON.parse(sessionStorage.getItem(RULE_OPEN_KEY) ?? "[]")); }
   catch { return new Set(); }
 }
-function setRuleFolded(s) {
-  sessionStorage.setItem(RULE_FOLD_KEY, JSON.stringify([...s]));
+function setOpenedRules(s) {
+  sessionStorage.setItem(RULE_OPEN_KEY, JSON.stringify([...s]));
 }
 
 let currentProductInfo = null;     // /api/products/{id} response cached for sibling links
@@ -1047,15 +1517,21 @@ function renderRuleSidebar(role) {
   $ruleSidebarSummary.textContent =
     `${d.pass_count}/${d.rule_count} pass`;
 
-  const folded = getRuleFolded();
-  for (const [name, rule] of Object.entries(d.results)) {
+  const opened = getOpenedRules();
+  // Fail rules render first so the engineer sees what needs attention
+  // without scrolling past the passes. Stable order within each group
+  // preserves the external rule function's emission sequence.
+  const entries = Object.entries(d.results).sort(([, a], [, b]) =>
+    a.pass === b.pass ? 0 : a.pass ? 1 : -1
+  );
+  for (const [name, rule] of entries) {
     const details = document.createElement("details");
     details.dataset.ruleName = name;
-    details.open = !folded.has(name);
+    details.open = opened.has(name);
     details.addEventListener("toggle", () => {
-      const f = getRuleFolded();
-      if (details.open) f.delete(name); else f.add(name);
-      setRuleFolded(f);
+      const o = getOpenedRules();
+      if (details.open) o.add(name); else o.delete(name);
+      setOpenedRules(o);
     });
 
     const summary = document.createElement("summary");
@@ -1087,17 +1563,34 @@ function renderRuleSidebar(role) {
   highlightFocusedInSidebar();
 }
 
+// Pick the DXF the sub-rule's geometry actually lives in. When the
+// backend tags the sub-rule with `file_id` (multi-DXF roles do, every
+// new rule SHOULD) we route on that exactly — otherwise the primary
+// file for the role is good enough (single-DXF case).
+function resolveSubRuleFile(sub) {
+  const siblings = currentProductInfo?.files_by_role_all?.[sub.part] ?? [];
+  if (sub.file_id) {
+    const match = siblings.find(f => f.id === sub.file_id);
+    if (match) return match;
+  }
+  return currentProductInfo?.files_by_role?.[sub.part] ?? null;
+}
+
 function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
   const li = document.createElement("li");
   li.dataset.ruleName = ruleName;
   li.dataset.idx = String(idx);
-  const sibling = currentProductInfo?.files_by_role?.[sub.part];
+  const targetFile = resolveSubRuleFile(sub);
+  // "Local focus" only when the sub-rule's geometry is on THIS DXF.
+  // For multi-DXF roles `sub.part === currentRole` isn't enough — two
+  // BD siblings share a role but live in separate coordinate spaces.
+  const isLocal = !!targetFile && targetFile.id === FILE_ID;
 
   let hintHtml = "";
-  if (sub.part === currentRole) {
+  if (isLocal) {
     li.classList.add("same-role");
     hintHtml = `<span class="nav-hint">show</span>`;
-  } else if (sibling) {
+  } else if (targetFile) {
     li.classList.add("other-role");
     hintHtml = `<span class="nav-hint">→ ${escapeHtml(sub.part)} viewer</span>`;
   } else {
@@ -1111,11 +1604,11 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
     hintHtml;
 
   li.addEventListener("click", () => {
-    if (sub.part === currentRole) {
+    if (isLocal) {
       focusSubRule(ruleName, idx, rulePass, sub);
       highlightFocusedInSidebar();
-    } else if (sibling) {
-      location.href = `/viewer/${sibling.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
+    } else if (targetFile) {
+      location.href = `/viewer/${targetFile.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
     }
   });
   return li;
@@ -1128,8 +1621,10 @@ function focusSubRule(ruleName, idx, rulePass, sub) {
     ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
     idx,
     part: sub.part,
-    from: sub.from || [],
-    to:   sub.to   || [],
+    from:     sub.from     ?? null,
+    to:       sub.to       ?? null,
+    tol:      sub.tol      ?? null,
+    tol_text: sub.tol_text ?? null,
     text: sub.text || "",
   };
   render();
@@ -1516,12 +2011,20 @@ function updateStatus() {
   }
 
   if (markMode) {
-    $modeHint.textContent = `MARK ${markMode} · drag a rectangle (Esc to cancel)`;
+    $modeHint.textContent = `MARK ${markMode} · drag a rectangle, Enter to keep, click to skip`;
   } else if (measureMode) {
     const n = measureState.picks.length;
-    $modeHint.textContent = n === 0
-      ? "MEASURE · pick first point"
-      : `MEASURE · pick next point · ${n} pt${n === 1 ? "" : "s"} (Shift = ortho, Esc to clear)`;
+    const m = measureState.chains.length;
+    const clearLabel = m ? "Esc to clear all" : "Esc to clear";
+    if (n === 0 && m === 0) {
+      $modeHint.textContent = "MEASURE · pick first point";
+    } else if (n === 0) {
+      $modeHint.textContent =
+        `MEASURE · pick first point · ${m} chain${m === 1 ? "" : "s"} saved (${clearLabel})`;
+    } else {
+      $modeHint.textContent =
+        `MEASURE · pick next point · ${n} pt${n === 1 ? "" : "s"} (Shift = ortho, ${clearLabel})`;
+    }
   } else if (addModeClass) {
     if (matchesStaged) {
       $modeHint.textContent = `ADD ${addModeClass} · press Enter to commit, Esc to cancel`;
@@ -1550,6 +2053,21 @@ $canvas.addEventListener("mousedown", (e) => {
     $canvas.classList.add("panning");
   } else if (e.button === 0) {
     const [wx, wy] = eventToWorld(e);
+    // Per-view × delete hitbox: takes precedence over every other left-click
+    // gesture (mark drag, measure pick, selection) so the user can always
+    // remove a specific view's rectangle from the canvas chrome.
+    if (sideLabelHitboxes.length) {
+      const rect = $canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      for (const h of sideLabelHitboxes) {
+        if (cssX >= h.cssLeft && cssX <= h.cssRight &&
+            cssY >= h.cssTop  && cssY <= h.cssBottom) {
+          clearSpecificView(h.view);
+          return;
+        }
+      }
+    }
     if (markMode) {
       // Mark-mode owns the canvas: left-press starts a one-shot rectangle
       // capture for the current side. No selection, no pickbox.
@@ -1558,6 +2076,20 @@ $canvas.addEventListener("mousedown", (e) => {
       return;
     }
     if (measureMode) {
+      // Per-chain ✕ cancel hitbox wins over the pick-append flow. Hitboxes
+      // are in CSS pixels — convert clientX/Y to canvas-local CSS pixels.
+      const rect = $canvas.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      for (const h of measureState.cancelHitboxes) {
+        if (cssX >= h.cssLeft && cssX <= h.cssRight &&
+            cssY >= h.cssTop  && cssY <= h.cssBottom) {
+          measureState.chains.splice(h.chainIndex, 1);
+          updateStatus();
+          render();
+          return;
+        }
+      }
       // Measure click: snap, then append to picks[]. Each click extends the
       // chain — picks[i],picks[i+1] are frozen segments, picks[last] anchors
       // the live rubber-band to the cursor.
@@ -1638,22 +2170,18 @@ window.addEventListener("mouseup", (e) => {
     const x0 = Math.min(x1, x2), xMax = Math.max(x1, x2);
     const y0 = Math.min(y1, y2), yMax = Math.max(y1, y2);
     const area = (xMax - x0) * (yMax - y0);
+    markDrag = null;
     if (area < MARK_MIN_AREA) {
-      // Treat as a slip — drop the drag and stay on the same side.
-      markDrag = null;
-      render();
+      // Bare-click (mousedown→mouseup at same point) — skip the current
+      // view, leaving sideRects[markMode] as-is, and advance.
+      advanceMarkSlot();
       return;
     }
+    // Real drag — capture provisionally and wait for Enter to commit.
+    // The rect is visible in the overlay immediately; pressing Enter
+    // advances to the next slot, pressing Esc reverts the whole session.
     sideRects[markMode] = { x0, y0, x1: xMax, y1: yMax };
-    markDrag = null;
-    const captured = markMode;
-    advanceMarkAfterCapture();
-    // Persist after every captured rectangle so a partial session (e.g. only
-    // frontside redraw) still saves.
-    patchSideRegions().then(() => {
-      // No-op on success; failure already surfaces via setBaseStatus.
-      void captured;
-    });
+    render();
     return;
   }
   if (!drag) return;
@@ -1710,12 +2238,95 @@ async function fetchClasses() {
   const res = await fetch(API.classes());
   const data = await res.json();
   classes = data.classes;
+  if (data.library_id) window.__libraryId = data.library_id;
   renderClassToolbar();
 }
 
+async function editClassStrategy(cls) {
+  const libId = window.__libraryId || null;
+  if (!libId) {
+    setBaseStatus("library id unknown; can't edit strategy");
+    return;
+  }
+  const currentStrategy = cls.match_strategy || "chamfer";
+  const strategyRaw = prompt(
+    `Match strategy for class "${cls.name}":\n` +
+    `  "chamfer" — per-vertex chamfer distance (default, BGA / SMD)\n` +
+    `  "signature" — bbox + aspect + vertex-count (substrate / lid)\n` +
+    `Enter "chamfer" or "signature":`,
+    currentStrategy,
+  );
+  if (strategyRaw === null) return;  // cancelled
+  const strategy = strategyRaw.trim().toLowerCase();
+  if (strategy !== "chamfer" && strategy !== "signature") {
+    setBaseStatus(`unknown strategy "${strategyRaw}" (use chamfer or signature)`);
+    return;
+  }
+  const body = { strategy };
+  if (strategy === "signature") {
+    const defaultRatio = cls.bbox_ratio != null ? cls.bbox_ratio : 0.05;
+    const ratioRaw = prompt(
+      `bbox_ratio for "${cls.name}" (±fraction agreement on bbox extent).\n` +
+      `Empty = 0.05 (5%, recommended for substrate). Range: (0, 1].`,
+      String(defaultRatio),
+    );
+    if (ratioRaw === null) return;  // cancelled
+    const trimmed = ratioRaw.trim();
+    if (trimmed !== "") {
+      const v = Number(trimmed);
+      if (!Number.isFinite(v) || v <= 0 || v > 1) {
+        setBaseStatus(`bbox_ratio must be in (0, 1] (got "${ratioRaw}")`);
+        return;
+      }
+      body.bbox_ratio = v;
+    }
+  }
+  const url = `/api/libraries/${encodeURIComponent(libId)}/classes/${encodeURIComponent(cls.name)}/strategy`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    setBaseStatus(`set strategy failed: ${res.status}`);
+    return;
+  }
+  await fetchClasses();
+  const saved = await res.json();
+  setBaseStatus(
+    saved.match_strategy === "signature"
+      ? `${cls.name} → signature (bbox_ratio=${saved.bbox_ratio})`
+      : `${cls.name} → chamfer (default)`,
+  );
+}
+
+// Less-common classes hidden from the toolbar by default to keep it tight.
+// Hotkeys still resolve to them — only the button is suppressed. Clicking
+// "More ▾" reveals them for the rest of the tab session; entering add-mode
+// for a hidden class (e.g. via hotkey) auto-expands so the active state is
+// visible.
+const COLLAPSED_TOOLBAR_CLASSES = new Set(["SMD-3T", "SMD-8T", "SMD-14T"]);
+const TOOLBAR_EXPAND_KEY = "smdr2.toolbar.expanded";
+function isToolbarExpanded() {
+  return sessionStorage.getItem(TOOLBAR_EXPAND_KEY) === "1";
+}
+function setToolbarExpanded(v) {
+  if (v) sessionStorage.setItem(TOOLBAR_EXPAND_KEY, "1");
+  else   sessionStorage.removeItem(TOOLBAR_EXPAND_KEY);
+}
+
 function renderClassToolbar() {
-  $classToolbar.innerHTML = "";
+  // Remove only the dynamically-rendered class buttons; static
+  // mode-toggle prefix (Chain, Sides, separator) stays put.
+  $classToolbar.querySelectorAll(".class-btn").forEach(n => n.remove());
+  const expanded = isToolbarExpanded()
+    || (addModeClass && COLLAPSED_TOOLBAR_CLASSES.has(addModeClass));
+  let hasCollapsed = false;
   classes.forEach((cls, i) => {
+    if (!expanded && COLLAPSED_TOOLBAR_CLASSES.has(cls.name)) {
+      hasCollapsed = true;
+      return;
+    }
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "class-btn";
@@ -1724,15 +2335,76 @@ function renderClassToolbar() {
     if (addModeClass === cls.name) {
       btn.classList.add(matchesStaged ? "staged" : "active");
     }
-    const hotkey = HOTKEYS[i] ?? "";
-    btn.innerHTML =
-      `<span class="icon">${addModeClass === cls.name && matchesStaged ? "✓" : "+"}</span>` +
-      `<span class="name">${cls.name}</span>` +
-      `<span class="count">(${cls.count})</span>` +
-      (hotkey ? `<span class="hotkey">[${hotkey}]</span>` : "");
+    btn.innerHTML = `<span class="name">${cls.name}</span>`;
+    const isSig = cls.match_strategy === "signature";
+    if (isSig) {
+      const tag = document.createElement("span");
+      tag.className = "class-strategy-tag";
+      tag.textContent = cls.bbox_ratio != null
+        ? `sig·${Math.round(cls.bbox_ratio * 100)}%`
+        : "sig";
+      btn.appendChild(tag);
+    }
+    // Live match count from the active scan-all / prematch overlay. Only
+    // rendered when scan-all has actually been computed for this file
+    // (scanAllSummary is null until loadPrematch or runScanAll populates
+    // it). A class with zero hits in the current scan still gets the chip
+    // so "did the matcher run vs. has it not been touched" reads clearly:
+    // missing chip = scan not run; "×0" = scan ran but this class has no
+    // matches in this image.
+    const matchN = scanAllSummary?.byClass?.[cls.name];
+    if (scanAllSummary && matchN !== undefined) {
+      const cnt = document.createElement("span");
+      cnt.className = "class-match-count";
+      cnt.textContent = `×${matchN}`;
+      if (matchN === 0) cnt.classList.add("zero");
+      btn.appendChild(cnt);
+    }
+    const matchedSuffix = scanAllSummary && matchN !== undefined
+      ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
+      : "";
+    btn.title = (isSig
+      ? `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+        `signature-only match (bbox/aspect/vertex-count) at ±${(cls.bbox_ratio ?? 0.05) * 100}% — right-click to edit`
+      : `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+        `chamfer match (default) — right-click to switch to signature mode`
+    ) + matchedSuffix;
     btn.addEventListener("click", () => enterAddMode(cls.name));
+    btn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      editClassStrategy(cls);
+    });
     $classToolbar.appendChild(btn);
   });
+  // Only show the toggle if there's something to hide/reveal at all.
+  if (expanded || hasCollapsed) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "class-btn class-btn-more";
+    // When collapsed and scan-all has hits in the hidden classes, surface
+    // the count on the toggle so the user doesn't have to open "More" to
+    // discover that SMD-3T / SMD-8T / SMD-14T actually matched something
+    // in this image.
+    let hiddenHits = 0;
+    if (!expanded && scanAllSummary) {
+      for (const name of COLLAPSED_TOOLBAR_CLASSES) {
+        hiddenHits += scanAllSummary.byClass?.[name] ?? 0;
+      }
+    }
+    toggle.textContent = expanded
+      ? "Less ▴"
+      : (hiddenHits > 0 ? `More ▾ ×${hiddenHits}` : "More ▾");
+    toggle.title = expanded
+      ? "Hide less-common SMD variants"
+      : `Show SMD-3T / SMD-8T / SMD-14T${
+          hiddenHits > 0 ? ` (${hiddenHits} matched in this image)` : ""
+        }`;
+    toggle.addEventListener("click", () => {
+      setToolbarExpanded(!expanded);
+      renderClassToolbar();
+    });
+    $classToolbar.appendChild(toggle);
+  }
 }
 
 function enterAddMode(className) {
@@ -1763,10 +2435,12 @@ async function scanCurrentSelection() {
   setBaseStatus(`scanning…`);
   const t0 = performance.now();
   try {
+    const reqBody = { handles: [...selection] };
+    if (addModeClass) reqBody.class_name = addModeClass;
     const res = await fetch(API.match(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ handles: [...selection] }),
+      body: JSON.stringify(reqBody),
     });
     if (!res.ok) {
       const err = await res.text();
@@ -1844,12 +2518,15 @@ async function runScanAll() {
       byClass[cls] = handles.length;
       for (const h of handles) byHandle.set(h, cls);
     }
+    applyViewConstraintsToScanAll(byHandle, byClass);
+    const filteredTotal = byHandle.size;
     scanAllByHandle = byHandle;
-    scanAllSummary = { byClass, total: data.total };
+    scanAllSummary = { byClass, total: filteredTotal };
     const dt = (performance.now() - t0).toFixed(0);
     const breakdown = Object.entries(byClass)
       .map(([c, n]) => `${c}:${n}`).join(" ");
-    setBaseStatus(`scan-all: ${data.total} hits in ${dt}ms · ${breakdown || "(empty library)"}`);
+    setBaseStatus(`scan-all: ${filteredTotal} hits in ${dt}ms · ${breakdown || "(empty library)"}`);
+    renderClassToolbar();
     updateStatus();
     render();
   } catch (e) {
@@ -1864,6 +2541,7 @@ function clearScanAll() {
   scanAllByHandle = null;
   scanAllSummary = null;
   $scanAllBtn.classList.remove("active");
+  renderClassToolbar();
   render();
 }
 
@@ -1892,6 +2570,8 @@ async function saveMatchJson() {
       `match saved: ${data.template_keys.length} template variant(s), ` +
       `${data.total_matches} total matches → ${data.saved_to} (${dt}ms)`
     );
+    if (currentFileInfo) currentFileInfo.match_saved = true;
+    refreshRoleSwitcher();
   } catch (e) {
     console.error(e);
     setBaseStatus(`save-match error: ${e.message}`);
@@ -1900,44 +2580,6 @@ async function saveMatchJson() {
   }
 }
 $saveMatchBtn.addEventListener("click", saveMatchJson);
-
-// ---- Layers modal -------------------------------------------------------
-// Opens the shared layer-selection modal. If the file has no manifest yet
-// (legacy, pre-feature), `triggerDiscovery` re-runs Phase 1 first. On
-// confirm we poll the file's status until it returns to ready_to_match,
-// then reload so the canvas re-fetches the newly-filtered primitives.
-async function openLayersModal() {
-  const hasManifest = await (async () => {
-    const probe = await fetch(`/api/files/${FILE_ID}/layers`);
-    return probe.ok;
-  })();
-  const fileName = document.body.dataset.fileName || "";
-  const result = await openLayerModal({
-    fileId: FILE_ID,
-    fileName,
-    triggerDiscovery: !hasManifest,
-    onConfirm: async () => {
-      if ($status) $status.textContent = "re-preprocessing with new layer set…";
-    },
-  });
-  if (!result.confirmed) return;
-  // Wait for Phase 2 to complete, then reload the page so the canvas
-  // re-fetches primitives, prematch, etc.
-  for (let i = 0; i < 200; i++) {
-    const r = await fetch(API.fileInfo());
-    if (r.ok) {
-      const f = await r.json();
-      if (f.status === "ready_to_match") break;
-      if (f.status === "error") {
-        if ($status) $status.textContent = `error: ${f.error || "preprocess failed"}`;
-        return;
-      }
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  location.reload();
-}
-$layersBtn.addEventListener("click", openLayersModal);
 
 // ---- Library modal ------------------------------------------------------
 $libraryBtn.addEventListener("click", openLibrary);
@@ -2011,11 +2653,17 @@ async function renderLibrary() {
   }
 }
 
-// Fold-state persistence so the user's "I folded bga_ball away" sticks
+// Fold-state persistence so the user's "I folded BGABall away" sticks
 // across opening/closing the modal (and across page reloads in the same tab).
+// Classes in DEFAULT_FOLDED_CLASSES start folded on first visit (less-common
+// SMD variants); once the user toggles anything, sessionStorage is written
+// and their explicit choices win from then on.
 const FOLD_KEY = "smdr2.library.folded";
+const DEFAULT_FOLDED_CLASSES = ["SMD-3T", "SMD-8T", "SMD-14T"];
 function getFoldedClasses() {
-  try { return new Set(JSON.parse(sessionStorage.getItem(FOLD_KEY) ?? "[]")); }
+  const raw = sessionStorage.getItem(FOLD_KEY);
+  if (raw === null) return new Set(DEFAULT_FOLDED_CLASSES);
+  try { return new Set(JSON.parse(raw)); }
   catch { return new Set(); }
 }
 function setFoldedClasses(s) {
@@ -2161,9 +2809,11 @@ async function loadPrematch() {
     byClass[cls] = handles.length;
     for (const h of handles) byHandle.set(h, cls);
   }
+  applyViewConstraintsToScanAll(byHandle, byClass);
   scanAllByHandle = byHandle;
-  scanAllSummary = { byClass, total: data.total };
+  scanAllSummary = { byClass, total: byHandle.size };
   $scanAllBtn.classList.add("active");
+  renderClassToolbar();
   render();
 }
 
@@ -2172,13 +2822,16 @@ window.addEventListener("keydown", (e) => {
   // Ignore when typing in an input (none right now, but defensive).
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-  // Esc cascade: cancel active box drag → clear active measurement (stay in
-  // measure mode) → cancel mark-mode drag / exit mark mode → clear scan-all
-  // overlay → exit add-mode → clear selection.
+  // Esc cascade: cancel active box drag → clear every measurement (active
+  // chain + every committed chain; stay in measure mode) → cancel mark-mode
+  // drag / exit mark mode → clear scan-all overlay → exit add-mode → clear
+  // selection.
   if (e.key === "Escape") {
     if (drag && drag.kind === "box") { drag = null; render(); return; }
-    if (measureMode && measureState.picks.length) {
+    if (measureMode && (measureState.picks.length || measureState.chains.length)) {
+      measureState.chains = [];
       measureState.picks = [];
+      measureState.snapHint = null;
       if ($measureReadout) $measureReadout.hidden = true;
       updateStatus();
       render();
@@ -2186,7 +2839,9 @@ window.addEventListener("keydown", (e) => {
     }
     if (markMode) {
       if (markDrag) { markDrag = null; render(); return; }
-      exitMarkMode();
+      // Cancel the entire session: revert any provisional rectangles
+      // drawn this session, exit without PATCHing the server.
+      exitMarkMode({ commit: false });
       return;
     }
     if (scanAllByHandle) { clearScanAll(); return; }
@@ -2241,6 +2896,33 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  // Enter inside mark mode = commit current slot's rectangle (provisional
+  // or unchanged) and advance to the next slot. After the last slot the
+  // session ends and PATCHes the three rectangles in one request.
+  if (e.key === "Enter" && markMode) {
+    if (markDrag) { markDrag = null; }
+    advanceMarkSlot();
+    e.preventDefault();
+    return;
+  }
+
+  // Enter inside measure mode = commit the active chain into chains[] and
+  // start a fresh active chain. Chains with < 2 picks have no segment to
+  // display, so we reset without committing. addMode and measureMode are
+  // mutually exclusive, so this branch sits before the addMode Enter below.
+  if (e.key === "Enter" && measureMode) {
+    if (measureState.picks.length >= 2) {
+      measureState.chains.push(measureState.picks);
+    }
+    measureState.picks = [];
+    measureState.snapHint = null;
+    if ($measureReadout) $measureReadout.hidden = true;
+    updateStatus();
+    render();
+    e.preventDefault();
+    return;
+  }
+
   // Enter = commit staged template.
   if (e.key === "Enter") {
     if (addModeClass && matchesStaged) {
@@ -2272,7 +2954,13 @@ function enterMeasureMode() {
 
 function exitMeasureMode() {
   measureMode = false;
-  measureState = { picks: [], snapHint: null, lastCursor: null };
+  measureState = {
+    chains: [],
+    picks: [],
+    snapHint: null,
+    lastCursor: null,
+    cancelHitboxes: [],
+  };
   if ($measureBtn) $measureBtn.classList.remove("active");
   if ($measureReadout) $measureReadout.hidden = true;
   updateStatus();
@@ -2305,12 +2993,32 @@ window.addEventListener("keyup", (e) => {
   }
 });
 
+// Right-click in measure mode pops the active chain's last pick (AutoCAD's
+// `U` inside DIST). The context menu is always suppressed while measure mode
+// is on so the user can right-click anywhere without browser surprise.
+$canvas.addEventListener("contextmenu", (e) => {
+  if (!measureMode) return;
+  e.preventDefault();
+  if (measureState.picks.length === 0) return;
+  measureState.picks.pop();
+  // Re-resolve so the rubber-band and snap marker visually catch up to the
+  // new anchor without requiring a mousemove.
+  if (measureState.lastCursor) {
+    const [wx, wy] = measureState.lastCursor;
+    measureState.snapHint = applyOrtho(wx, wy, e.shiftKey) ?? resolveSnap(wx, wy);
+  } else {
+    measureState.snapHint = null;
+  }
+  updateStatus();
+  render();
+});
+
 // ---- mark side regions tool ---------------------------------------------
 const $sidesBtn = document.getElementById("sides-btn");
 const $sidesMenu = document.getElementById("sides-menu");
 
 function drawSideRegionsOverlay(hairline) {
-  for (const side of ["frontside", "bottomside"]) {
+  for (const side of ["top_view", "bottom_view", "side_view"]) {
     const r = sideRects[side];
     if (!r) continue;
     const style = SIDE_STYLES[side];
@@ -2322,7 +3030,7 @@ function drawSideRegionsOverlay(hairline) {
     ctx.lineWidth = hairline * 1.5;
     ctx.strokeRect(x, y, w, h);
   }
-  // In-progress mark-mode drag — same style as the side we're currently
+  // In-progress mark-mode drag — same style as the view we're currently
   // capturing so the user sees the live preview in the right color.
   if (markMode && markDrag && markDrag.currentWorld) {
     const [x1, y1] = markDrag.startWorld;
@@ -2342,12 +3050,19 @@ function drawSideRegionsOverlay(hairline) {
 
 // Screen-space labels for the persistent side rectangles. Drawn after the
 // world-space ctx.restore() so text stays upright and a constant size.
+// Each committed view also gets an "×" delete glyph inside the label
+// background; its CSS-pixel hitbox is pushed into sideLabelHitboxes so
+// the mousedown handler can clear that specific view.
 function drawSideRegionLabels() {
+  sideLabelHitboxes.length = 0;
   ctx.save();
   ctx.font = `${12 * dpr}px ui-sans-serif, system-ui, sans-serif`;
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "center";
-  for (const side of ["frontside", "bottomside"]) {
+  const xGlyph = "×";
+  const xGlyphW = ctx.measureText(xGlyph).width;
+  const xGap = 6 * dpr;
+  for (const side of ["top_view", "bottom_view", "side_view"]) {
     const r = sideRects[side];
     if (!r) continue;
     const style = SIDE_STYLES[side];
@@ -2358,9 +3073,10 @@ function drawSideRegionLabels() {
     const m = ctx.measureText(style.label);
     const textW = m.width;
     const textH = 12 * dpr;
-    const bgX = sx - textW / 2 - padX;
+    const innerW = textW + xGap + xGlyphW;
+    const bgX = sx - innerW / 2 - padX;
     const bgY = syTop - gap - textH - padY * 2;
-    const bgW = textW + padX * 2;
+    const bgW = innerW + padX * 2;
     const bgH = textH + padY * 2;
     ctx.fillStyle = "rgba(10, 14, 22, 0.75)";
     ctx.fillRect(bgX, bgY, bgW, bgH);
@@ -2368,7 +3084,20 @@ function drawSideRegionLabels() {
     ctx.lineWidth = 1 * dpr;
     ctx.strokeRect(bgX, bgY, bgW, bgH);
     ctx.fillStyle = style.labelColor;
-    ctx.fillText(style.label, sx, bgY + bgH - padY);
+    const labelCx = bgX + padX + textW / 2;
+    const xCx = bgX + padX + textW + xGap + xGlyphW / 2;
+    ctx.fillText(style.label, labelCx, bgY + bgH - padY);
+    ctx.fillText(xGlyph, xCx, bgY + bgH - padY);
+    // Hitbox in CSS pixels (canvas coords are device pixels, scaled by dpr).
+    // Pad a few px so the click target is forgiving.
+    const tol = 4 * dpr;
+    sideLabelHitboxes.push({
+      view: side,
+      cssLeft:   (xCx - xGlyphW / 2 - tol) / dpr,
+      cssRight:  (xCx + xGlyphW / 2 + tol) / dpr,
+      cssTop:    (bgY + padY - tol) / dpr,
+      cssBottom: (bgY + bgH - padY + tol) / dpr,
+    });
   }
   // In-progress drag: label follows the live rectangle so the user sees
   // which side they're painting before they release.
@@ -2401,9 +3130,11 @@ function drawSideRegionLabels() {
 
 function enterMarkMode(queue) {
   if (addModeClass || measureMode) return false;
+  // Snapshot pre-session sideRects so Esc can revert any provisional drags.
+  sideRectsSnapshot = { ...sideRects };
   markQueue = queue.slice();
   markMode = markQueue.shift() ?? null;
-  if (!markMode) { exitMarkMode(); return false; }
+  if (!markMode) { exitMarkMode({ commit: false }); return false; }
   if ($sidesBtn) $sidesBtn.classList.add("active");
   markDrag = null;
   updateStatus();
@@ -2411,24 +3142,36 @@ function enterMarkMode(queue) {
   return true;
 }
 
-function exitMarkMode() {
+function exitMarkMode({ commit }) {
+  if (!commit && sideRectsSnapshot) {
+    // Revert: restore the three rectangles to their pre-session state.
+    sideRects.top_view = sideRectsSnapshot.top_view ?? null;
+    sideRects.bottom_view = sideRectsSnapshot.bottom_view ?? null;
+    sideRects.side_view = sideRectsSnapshot.side_view ?? null;
+  }
+  const shouldPatch = commit && !!sideRectsSnapshot;
+  sideRectsSnapshot = null;
   markMode = null;
   markQueue = [];
   markDrag = null;
   if ($sidesBtn) $sidesBtn.classList.remove("active");
   updateStatus();
   render();
+  if (shouldPatch) {
+    patchSideRegions();
+  }
 }
 
 function toggleMarkMode() {
-  if (markMode) { exitMarkMode(); return; }
-  enterMarkMode(["frontside", "bottomside"]);
+  if (markMode) { exitMarkMode({ commit: false }); return; }
+  enterMarkMode(["top_view", "bottom_view", "side_view"]);
 }
 
 async function patchSideRegions() {
   const body = {
-    frontside_rect: sideRects.frontside,
-    bottomside_rect: sideRects.bottomside,
+    top_view_rect: sideRects.top_view,
+    bottom_view_rect: sideRects.bottom_view,
+    side_view_rect: sideRects.side_view,
   };
   try {
     const res = await fetch(API.sideRegions(), {
@@ -2441,8 +3184,10 @@ async function patchSideRegions() {
       return false;
     }
     // The server clears match_saved on any region edit — refresh local copy
-    // so the dashboard / save-match button reflects the new state.
+    // so the dashboard / save-match button reflects the new state, and re-
+    // render the role switcher so a previously-green tab drops back.
     if (currentFileInfo) currentFileInfo.match_saved = false;
+    refreshRoleSwitcher();
     return true;
   } catch (e) {
     console.error(e);
@@ -2451,11 +3196,26 @@ async function patchSideRegions() {
   }
 }
 
-function advanceMarkAfterCapture() {
-  // Move to the next side in the queue, or exit mark mode if done.
+function clearSpecificView(view) {
+  // Clear one view's rectangle and persist immediately. Works inside or
+  // outside mark mode; when called during mark mode the snapshot is also
+  // cleared so Esc cannot restore what the user explicitly deleted.
+  if (!sideRects[view]) return;
+  sideRects[view] = null;
+  if (sideRectsSnapshot) sideRectsSnapshot[view] = null;
+  patchSideRegions();
+  render();
+}
+
+function advanceMarkSlot() {
+  // Move to the next slot in the queue, or commit + exit when done.
   markMode = markQueue.shift() ?? null;
-  if (!markMode) exitMarkMode();
-  else { updateStatus(); render(); }
+  if (!markMode) {
+    exitMarkMode({ commit: true });
+  } else {
+    updateStatus();
+    render();
+  }
 }
 
 if ($sidesBtn) {
@@ -2477,13 +3237,14 @@ if ($sidesMenu) {
     if (!btn) return;
     $sidesMenu.hidden = true;
     const action = btn.dataset.sidesAction;
-    if (action === "both") {
-      enterMarkMode(["frontside", "bottomside"]);
-    } else if (action === "frontside" || action === "bottomside") {
+    if (action === "all") {
+      enterMarkMode(["top_view", "bottom_view", "side_view"]);
+    } else if (action === "top_view" || action === "bottom_view" || action === "side_view") {
       enterMarkMode([action]);
     } else if (action === "clear") {
-      sideRects.frontside = null;
-      sideRects.bottomside = null;
+      sideRects.top_view = null;
+      sideRects.bottom_view = null;
+      sideRects.side_view = null;
       await patchSideRegions();
       render();
     }
@@ -2593,6 +3354,21 @@ $visibilityClose.addEventListener("click", () => { $visibilityPanel.hidden = tru
 $visibilityAll.addEventListener("click", showAllLayers);
 $visibilityInvert.addEventListener("click", invertLayerVisibility);
 
+// ---- developer matching-parameter modal --------------------------------
+// Matching-only on the viewer; DXF params and Re-preprocess live on the
+// dashboard. The gear shows itself iff dev mode is on in localStorage
+// (set by the dashboard's Developer Mode toggle — there's no toggle on
+// the viewer page).
+mountDevParamsModal({
+  toggleId: "dev-params-toggle",
+  modalId: "dev-params-modal",
+  bodyId: "dev-params-body",
+  applyId: "dev-params-apply",
+  resetId: "dev-params-reset",
+  moduleFilter: "matching",
+  statusEl: $status,
+});
+
 // ---- bootstrap -----------------------------------------------------------
 async function load() {
   resize();
@@ -2605,6 +3381,14 @@ async function load() {
   ]);
   const data = await primRes.json();
   const tFetch = (performance.now() - t0).toFixed(0);
+
+  // Fire-and-forget warm-up of the server-side EntityShape cache
+  // (`_cached_shapes` LRU). Without this the user's first /api/match or
+  // /api/scan-all pays the ~1–2 s `build_entity_shapes` cost on large
+  // drawings; with it, the build runs in the server's worker thread
+  // while the canvas is still drawing primitives. Errors are ignored —
+  // the cache will be populated lazily by the first scan if this fails.
+  fetch(API.warmShapes(), { method: "POST" }).catch(() => {});
 
   primitives = data.primitives;
   background = data.background || "#1a1f26";
