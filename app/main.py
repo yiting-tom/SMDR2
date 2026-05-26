@@ -1221,6 +1221,37 @@ async def get_product_rule_check(product_id: str) -> dict:
     }
 
 
+@app.post("/api/products/{product_id}/rule-check/upload")
+async def upload_product_rule_check(product_id: str, request: Request) -> dict:
+    """Dev-only: accept a hand-crafted RuleChecking JSON, validate it
+    against the envelope contract, and persist it as if the worker had
+    written it. Lets the external team iterate on output shape without
+    running their pipeline. Hidden in the UI unless dev mode is on; the
+    endpoint itself is always reachable (single-user dev tool)."""
+    from app.rule_check import RuleCheckOutputError, _validate_envelope
+
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid JSON: {exc}")
+    try:
+        _validate_envelope(payload)
+    except RuleCheckOutputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    rp = rule_check_path(product_id)
+    rp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    n_pass = sum(1 for v in payload.values() if v.get("pass"))
+    return {
+        "product_id": product_id,
+        "saved_to": str(rp),
+        "rule_count": len(payload),
+        "pass_count": n_pass,
+        "fail_count": len(payload) - n_pass,
+    }
+
+
 # ---- DRC handoff bundle (external rule-check team consumes this) --------
 @app.get("/api/products/{product_id}/drc-bundle")
 async def get_drc_bundle(product_id: str) -> Response:

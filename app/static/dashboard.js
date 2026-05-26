@@ -430,6 +430,19 @@ function productCard(p) {
     }
     dlAll.addEventListener("click", () => downloadAllMatch(p));
     footer.appendChild(dlAll);
+
+    // Dev mode: upload a hand-crafted RuleChecking JSON to simulate
+    // an external rule-check result. Persists straight to
+    // data/rule_check/{pid}.json after envelope validation; lets the
+    // external team iterate on output shape without running their
+    // pipeline.
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "rule-check-btn";
+    upBtn.textContent = "📤 Upload Rule JSON";
+    upBtn.title = "Upload a RuleChecking JSON to test the envelope and preview rendering";
+    upBtn.addEventListener("click", () => uploadRuleJson(p));
+    footer.appendChild(upBtn);
   }
   card.appendChild(footer);
 
@@ -450,6 +463,55 @@ async function downloadMatchJson(file) {
   } catch (e) {
     $status.textContent = `download failed: ${e.message}`;
   }
+}
+
+// Dev mode: prompt for a JSON file, POST it to the upload endpoint.
+// Surfaces envelope-validation errors inline (400 detail) so the user
+// can fix the JSON and try again.
+async function uploadRuleJson(product) {
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = "application/json,.json";
+  picker.addEventListener("change", async () => {
+    const file = picker.files?.[0];
+    if (!file) return;
+    $status.textContent = `uploading "${file.name}" for "${product.name}"…`;
+    let body;
+    try {
+      body = await file.text();
+      JSON.parse(body);  // fail fast before the round-trip
+    } catch (e) {
+      $status.textContent = `upload aborted: invalid JSON — ${e.message}`;
+      alert(`Invalid JSON in "${file.name}":\n\n${e.message}`);
+      return;
+    }
+    try {
+      const r = await fetch(`/api/products/${product.id}/rule-check/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      if (!r.ok) {
+        let detail = `${r.status}`;
+        try {
+          const j = await r.json();
+          if (typeof j?.detail === "string") detail = j.detail;
+        } catch { /* not JSON */ }
+        $status.textContent = `upload rejected: ${detail}`;
+        alert(`Upload rejected (envelope invalid):\n\n${detail}`);
+        return;
+      }
+      const summary = await r.json();
+      $status.textContent =
+        `Uploaded for "${product.name}": ` +
+        `${summary.pass_count}/${summary.rule_count} pass ` +
+        `(${summary.fail_count} fail)`;
+      await refresh();  // rule_check_available flips, "Rule Check" → "Re-run"
+    } catch (e) {
+      $status.textContent = `upload failed: ${e.message}`;
+    }
+  });
+  picker.click();
 }
 
 async function downloadAllMatch(product) {

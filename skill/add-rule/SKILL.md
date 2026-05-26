@@ -6,261 +6,227 @@ target: any-agent
 
 Add a new Design Rule Check (DRC) rule to SMDR2.
 
-This skill is agent-neutral — it describes the contract and procedure for
-extending `app/rule_check.py`. Any agent (Claude, custom tooling, scripted
-code-mod, etc.) can follow it.
+This skill is agent-neutral — it describes the contract and procedure
+for extending `app/external_rule_check/`. Any agent (Claude, custom
+tooling, scripted code-mod, etc.) can follow it.
 
-DRC is **product-scoped**: one call to `check_rules(product_id, dxfs_by_role)`
-sees every uploaded DXF in the product (keyed by role: `SBT / BD / POD /
-RING`) and emits a result dict the dashboard renders + the viewer can
-focus into. Adding a rule = adding one block inside that function.
+## Architecture
+
+Rule logic is owned by the external rule-checking team and lives in
+`app/external_rule_check/` (currently `_stub.py` + `_dev_mock.py`
+until the real module lands). SMDR2's `app/rule_check.py` is a thin
+adapter that:
+
+1. Calls `app.external_rule_check.check_rules(product_id, bundle_dir)`.
+2. Validates the returned envelope against the RuleChecking JSON
+   shape contract.
+3. Returns the result verbatim — no mutation, no padding.
+
+A rule lives entirely inside the external module. The adapter does
+not need to know about it.
 
 ## Required inputs from the human
 
-Before writing code, the agent MUST collect these. If any are missing or
-ambiguous, ask the human (use whatever clarification mechanism the agent
-runtime provides) — do not guess.
+Before writing code, the agent MUST collect these. If any are missing
+or ambiguous, ask the human — do not guess.
 
-1. **Rule name** — short identifier (`Rule4`, `BgaPitchCheck`, etc.); becomes the dict key.
-2. **What it checks** — one sentence; ends up in the `text` field shown on the dashboard card.
-3. **Which DXF role(s)** the rule needs (BD / SBT / POD / RING) and the failure-mode if a needed role is missing. Canonical pattern: fail with explanatory `text`, empty `rules: []`. Also ask: when a role legitimately holds **multiple DXFs** (top + bottom siblings, multiple revs), should the rule run per-file, aggregate across the role, or compare siblings against each other? See "Multi-DXF per role" below.
-4. **Geometry kind** — distance? count? containment? angle? something else?
-5. **Threshold(s)** — numeric values with units (mm) and the comparator (`<`, `<=`, `>`, `>=`, `==`).
+1. **Rule name** — short identifier (`Rule4`, `BgaPitchCheck`, ...);
+   becomes the outer dict key.
+2. **What it checks** — one sentence; ends up in the rule's `text`.
+3. **Which DXF role(s)** the rule needs (`SBT` / `BD` / `POD` / `RING`
+   / `LID`) and the failure-mode if a needed role is missing.
+   Canonical pattern when the role is absent: `pass: True` with an
+   explanatory `text` and empty `rules: []`, so the rule doesn't
+   false-fail a product that simply doesn't carry that role.
+4. **Geometry kind** — distance? count? containment? angle?
+5. **Threshold(s)** — numeric values with units (mm) and the
+   comparator (`<`, `<=`, `>`, `>=`, `==`).
 
-## Inputs & outputs (the contract)
+## Input: the bundle directory
 
-### Input shape: `dxfs_by_role`
+The external function receives the path to a materialised handoff
+bundle. Layout:
 
-```python
+    <bundle_dir>/
+        manifest.json
+        dxfs/<file_id>.dxf
+        match/<file_id>.json
+
+The manifest groups files by role. JSON schema lives at
+`openspec/specs/design-rule-checking/drc-manifest.schema.json`.
+Relevant fields:
+
+```json
 {
-    "BD": {
-        # First-file fallbacks (single-file-rule mental model). When the
-        # role holds ≥ 2 DXFs these point at file_ids[0] / dxf_paths[0].
-        "file_id":       "abc12345",
-        "dxf_path":      "data/uploads/abc12345.dxf",
-        # Authoritative lists. Single-file roles → length 1; multi-file
-        # roles (top + bottom siblings, etc.) → length 2+.
-        "file_ids":      ["abc12345", "def67890"],
-        "dxf_paths":     ["data/uploads/abc12345.dxf",
-                          "data/uploads/def67890.dxf"],
-        "match_json":    {                 # already user-saved, merged
-            "smd_2t.0":    [["abc12345:H1","abc12345:H2"], ...],
-            "substrate.0": [["abc12345:S1"]],
-            "bga_ball.0":  [["def67890:B1"], ...],
-        },
-        "entity_shapes": { "abc12345:H1": EntityShape(...), ... },
-    },
-    "SBT": {...},   # optional — may be missing
-    "POD": {...},
-    "RING": {...},
+  "bundle_version": "1.2.0",
+  "product_id": "...",
+  "customer_id": "...",
+  "files": [
+    {
+      "role": "SBT" | "BD" | "POD" | "RING" | "LID",
+      "file_id": "<lowercase-hex>",
+      "dxf": "dxfs/<file_id>.dxf",
+      "match_json": "match/<file_id>.json"
+    }
+  ]
 }
 ```
 
-- `match_json` key = `<class>.<template_index>`; value = list of matches; each match is the handle list that makes up that template occurrence.
-- `entity_shapes[handle]` gives `centroid`, `bbox`, `points` (ndarray of vertices), etc. — defined in `app/matching.py`.
-- When the role has ≥ 2 files, every handle in `match_json` and every key in `entity_shapes` is prefixed with `{file_id[:8]}:` so handles from different files don't collide. See "Multi-DXF per role" below; the formal contract lives in `openspec/specs/design-rule-checking/spec.md` → "Per-role bundle merging and handle prefix".
+Match JSON keys are `<class>.<index>` or `<view>.<class>.<index>`
+(where `<view>` ∈ `top_view` / `bottom_view` / `side_view`); values
+are lists of handle-list match instances.
 
-### Output shape (per rule)
+**Handles are raw and per-file.** The bundle ships one Match JSON per
+DXF — there is no merged `<file_id[:8]>:` prefix. A role with N
+sibling DXFs (e.g. BD top + bottom) appears as N separate entries in
+`manifest.files`; iterate by role to find them.
+
+## Output: the RuleChecking JSON contract
+
+The function returns a dict keyed by rule name. Each value:
 
 ```python
 {
-    "Rule4": {
-        "pass": bool,             # overall pass/fail
-        "text": str,              # description shown on the dashboard card
-        "rules": [                # 0..N concrete from→to sub-rules
-            {
-                "part": "BD",                # role; viewer routes here on click
-                "from": ["H1", "H2"],        # source handle(s)
-                "to":   ["S1"],              # target handle(s)
-                "text": "BGA #3 → substrate = 3.2 mm (< 5 mm)",
-            },
-            ...
-        ],
+    "<ruleName>": {
+        "pass": bool,
+        "text": str,                # overall rule description
+        "rules": [SubRule, ...],    # may be empty
     },
+    ...
 }
 ```
 
-The viewer draws the **shortest segment** between `from` and `to` (across all
-vertices of all listed handles). `from` / `to` being lists is forward-compat —
-single-entity rules just pass one handle.
+Each SubRule:
 
-## Reusable helpers (already in `app/rule_check.py`)
+| Key        | Type                                              | Meaning |
+|------------|---------------------------------------------------|---------|
+| `part`     | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` | Role whose viewer renders this annotation |
+| `file_id`  | `str` \| `None`                                    | Full id (not the 8-char short form) of the DXF the sub-rule's geometry lives in |
+| `from`     | `handleID` \| `None`                               | Single source DXF handle (raw, unprefixed) |
+| `to`       | `handleID` \| `None`                               | Single target DXF handle |
+| `text`     | `str`                                              | Per-sub-rule message (non-empty) |
+| `tol`      | `handleID` \| `None`                               | Annotation-only entity to highlight |
+| `tol_text` | `str` \| `None`                                    | Label adjacent to `tol`; only meaningful when `tol` is set |
 
-| Helper | Purpose |
-|---|---|
-| `_first_match_handles(mj, prefix)` | First `prefix.*` match's handle list — use for "the" substrate / "the" first SMD |
-| `_all_match_groups(mj, prefix)` | All `prefix.*` matches as a list of handle-lists — one inner list per occurrence |
-| `_all_handles_for_prefix(mj, prefix)` | Same, flattened — when you don't care about grouping |
-| `_count_for_prefix(mj, prefix)` | Just the count |
-| `_shortest_distance(shapes, hs_a, hs_b)` | Min distance (mm) between two handle groups' geometry; returns `None` when geometry can't be computed |
+### Envelope invariants (enforced by `app/rule_check.py`)
 
-If a new geometric primitive is needed (containment, angle, bbox-overlap, …),
-add it next to these as a module-private `_helper`. Keep it pure (no I/O).
+- `rules` MAY be empty; `pass` and `text` are still required.
+- When `rules` is non-empty, every sub-rule MUST carry non-empty `text`.
+- A sub-rule MUST set at least one of `from`, `tol`.
+- `to` MAY only be set when `from` is also set.
+- Any sub-rule with non-null `from` / `to` / `tol` MUST also carry a
+  non-null `file_id`.
+- `tol_text` MAY only be set when `tol` is also set.
 
-## Multi-DXF per role
+A violation raises `RuleCheckOutputError` and the rule-check worker
+maps it to a job-level `error`. The adapter does NOT mutate the
+output — pass-through verbatim once validation succeeds.
 
-A `(product, role)` may hold any number of DXFs — typical cases are
-"BD has both a `top` view and a `bottom` view", "SBT has a `multi`
-plus an extra revision". `run_product_rule_check` merges every per-role
-DXF into one bundle before calling `check_rules`, so a rule still sees
-**one** `dxfs_by_role[role]` dict regardless of how many files
-contributed.
+### Sub-rule display patterns
 
-The merge applies a handle prefix when the role holds ≥ 2 files:
+| Shape     | Fields                       | Viewer renders |
+|-----------|------------------------------|----------------|
+| Distance  | `from` + `to`                | Dashed segment along the shortest path between the two entities (vertex-vs-edge perpendicular-foot search); `text` at midpoint |
+| Highlight | `from` only                  | Highlight `from`; `text` adjacent |
+| Tolerance | `tol` (+ optional `tol_text`) | Highlight `tol`; `tol_text` adjacent. Independent of `from`/`to` — may co-exist on the same sub-rule |
 
-- **Single-file role** (`len(file_ids) == 1`): handles are the raw DXF
-  handles, no prefix.
-- **Multi-file role** (`len(file_ids) > 1`): every handle in
-  `match_json` and every key in `entity_shapes` is rewritten as
-  `f"{file_id[:8]}:{raw_handle}"`. The prefix is applied in lockstep
-  across `match_json` and `entity_shapes`, so any prefixed handle in
-  the match JSON is guaranteed to resolve in the shape dict.
+See `app/external_rule_check/_dev_mock.py` for a concrete example of
+all three patterns.
 
-**Most rules don't need to know this.** `_first_match_handles` /
-`_all_match_groups` / `_shortest_distance` treat handles as opaque
-strings — they round-trip prefixed handles through `match_json` →
-`entity_shapes` lookups without inspection. A rule that only asks
-"is the substrate ≥ 5 mm from the first SMD" works on a multi-file
-bundle with zero change.
-
-**For rules that DO need file-of-origin**, use the documented helper:
-
-```python
-from app.rule_check import _split_handle_prefix
-
-prefix, raw = _split_handle_prefix(h)
-# Multi-file: prefix = "abc12345", raw = "7AF"
-# Single-file: prefix = None, raw = h unchanged
-```
-
-Worked example — "BGA count on this role's two sibling DXFs must
-agree" (cross-file count comparison rule):
-
-```python
-# ---- Rule<N>: BD sibling BGA counts must match -----------------------
-rule_sub: list[SubRule] = []
-rule_pass = False
-bd = dxfs_by_role.get("BD")
-if bd is None or len(bd["file_ids"]) < 2:
-    rule_text = "BD requires ≥ 2 sibling DXFs (e.g. top + bottom)"
-else:
-    counts_by_file: dict[str, int] = {fid[:8]: 0 for fid in bd["file_ids"]}
-    for h in _all_handles_for_prefix(bd["match_json"], "bga_ball"):
-        prefix, _ = _split_handle_prefix(h)
-        if prefix is not None:
-            counts_by_file[prefix] = counts_by_file.get(prefix, 0) + 1
-    values = list(counts_by_file.values())
-    rule_pass = len(set(values)) == 1
-    rule_text = (
-        f"BGA counts across BD siblings: {counts_by_file} "
-        f"({'agree' if rule_pass else 'DISAGREE'})"
-    )
-results["Rule<N>"] = {"pass": rule_pass, "text": rule_text, "rules": rule_sub}
-```
-
-The formal contract — exactly which fields the bundle carries, when
-the prefix applies, and the opaque-handle invariant — lives in the
-`design-rule-checking` capability spec
-(`openspec/specs/design-rule-checking/spec.md`, requirement "Per-role
-bundle merging and handle prefix"). Read that when you need the
-unambiguous version; the snippet above is the how-to.
+The formal contract — every invariant the adapter enforces and every
+display rule the viewer implements — lives in
+`openspec/specs/design-rule-checking/spec.md` under "RuleChecking JSON
+output shape" and "External rule function contract". Read that when
+you need the unambiguous version.
 
 ## Steps
 
-1. **Read the existing rules** in `app/rule_check.py` for tone / structure:
-   - Rule1 — single-pair distance
-   - Rule2 — cross-DXF count comparison
-   - Rule3 — per-item distance loop
+1. **Read `_dev_mock.py`** for the wire-format shape; treat it as the
+   template for the dict you emit.
 
-   New rules should match one of these shapes whenever possible.
+2. **Add the rule** in the external module. While the codebase is
+   still on the stub (`_stub.py` raises `NotImplementedError` outside
+   `SMDR2_DEV_MOCK_DRC=1`):
+   - For experimentation, extend `_dev_mock.py` — add one builder
+     function and one new entry in the dict returned by
+     `check_rules`.
+   - For a real customer-bound rule, coordinate with the external
+     team before adding code; the long-term home is their module
+     that will replace `_stub.py`.
 
-2. **Pick a constant name** for any threshold and put it near the existing
-   `SUBSTRATE_TO_SMD_MIN_DIST = 5.0` block (or beside the rule if it's
-   single-use). One constant per threshold, named in the rule's terms.
+3. **Constants** for thresholds live at module scope, one per
+   threshold, named in the rule's terms (`SUBSTRATE_TO_SMD_MIN_DIST_MM
+   = 5.0`, not `THRESHOLD_1 = 5.0`).
 
-3. **Insert the rule block** inside `check_rules` *before* `return results`:
+4. **Navigate the bundle** by reading `manifest.json` and the
+   per-file Match JSONs. Helpers like `_class_from_key` and
+   `_candidates_by_role` in `_dev_mock.py` show the pattern. There
+   is no shared helper module — own the small primitives you need
+   next to the rule.
 
-   ```python
-   # ---- Rule<N>: <one-line summary> -------------------------------------
-   rule<N>_sub: list[SubRule] = []
-   rule<N>_pass = False
-   bd = dxfs_by_role.get("BD")            # or whichever role(s) you need
-   if bd is None:
-       rule<N>_text = "BD DXF required (not uploaded)"
-   else:
-       <pull handles via _first_match_handles / _all_match_groups>
-       shapes = bd["entity_shapes"]
-       if <required matches missing>:
-           rule<N>_text = "<explain what's missing>"
-       else:
-           # compute geometry, set rule<N>_pass, append sub-rules
-           ...
-           rule<N>_text = "<rule description w/ thresholds>"
-   results["Rule<N>"] = {
-       "pass": rule<N>_pass,
-       "text": rule<N>_text,
-       "rules": rule<N>_sub,
-   }
-   ```
+5. **Build the sub-rule list** per the patterns above. When a rule
+   fails, emit a sub-rule for each offending entity-pair so the
+   viewer has something to highlight; empty `rules: []` is valid
+   only when there is genuinely nothing to draw.
 
-4. **Emit a sub-rule even on failure** so the viewer has something to draw —
-   the existing rules all do this. The `text` on the sub-rule should include
-   the measured value and the comparator.
+6. **Add tests:**
+   - Adapter-level tests in `tests/test_rule_check.py` cover the
+     envelope contract — only touch them if you change the contract
+     itself (e.g. a new sub-rule field).
+   - Rule-specific tests belong with the external module owned by
+     the external team.
 
-5. **Add tests** in `tests/test_rule_check.py`. The file already exposes:
-   - `_shape(handle, x, y)` — synthetic 1×1 square at (x, y)
-   - `_bundle(match_json, shapes)` — wraps into the role bundle
-   - `_check_envelope(result)` — asserts every rule has the right keys
-
-   Cover at least: happy-path pass, failing threshold, missing-role /
-   missing-match failure modes. Follow the naming of `test_rule1_*` /
-   `test_rule3_*`.
-
-6. **Verify**:
-   - `uv run pytest tests/test_rule_check.py -v` — all green
+7. **Verify:**
+   - `uv run pytest tests/test_rule_check.py -v`
+   - `uv run pytest tests/test_rule_check_job.py -v`
    - `uv run pytest tests/` — full suite still green
 
-7. **No UI changes required.** The dashboard's rule-check modal walks the
-   result dict generically and emits one card per `Rule*` with one
-   `View in <part> →` link per sub-rule. The viewer's `?rule=…&idx=…`
-   route picks up your sub-rule by key.
+8. **End-to-end smoke** (dev-mode only):
+   - `SMDR2_DEV_MOCK_DRC=1 uv run uvicorn app.main:app --reload`
+   - Upload a product, save matches, click Rule Check, confirm the
+     dashboard renders the rule card and the viewer renders the
+     sub-rule highlight when clicked.
 
-   *Exception:* if the rule is significant enough to deserve a documented
-   behavior contract (i.e., a real customer requirement, not a mock),
-   add a `### Requirement:` block in
-   `openspec/specs/design-rule-checking/spec.md` describing the rule and
-   its scenarios, mirroring the existing Rule1 entry. For internal /
-   experimental rules, skip this.
+9. **No UI changes required.** The dashboard's rule-check modal walks
+   the result dict generically and emits one card per `Rule*` with one
+   `View in <part> →` link per sub-rule. The viewer's `?rule=…&idx=…`
+   route picks up the sub-rule by key.
+
+   *Exception:* if the rule is significant enough to deserve a
+   documented behavior contract (real customer requirement, not a
+   mock), add a `### Requirement:` block in
+   `openspec/specs/design-rule-checking/spec.md`.
 
 ## Common pitfalls
 
-- **Forgetting `entity_shapes`.** `_shortest_distance` needs `shapes`, not
-  `match_json` — get it from `bd["entity_shapes"]`, not the match list.
-- **Hard-coding role.** If the rule legitimately spans more than one role
-  (e.g., "BGA count must agree across SBT and POD"), iterate roles
-  explicitly — see Rule2 for the template.
-- **Skipping the sub-rule list on failure.** Empty `rules: []` is a valid
-  state (nothing to draw), but if the offending entities are known, emit
-  them so the viewer can highlight what failed. Rule3 demonstrates.
-- **Using centroids when shortest-distance is the right metric.** SMDR2
-  geometry is mostly polygons / arcs flattened to polylines — centroids
-  lie. Use `_shortest_distance` whenever the question is "are these two
-  shapes close enough."
-- **Threshold inversion bugs.** Write the comparator in the result text
-  too (e.g., `"< 5 mm"` vs `">= 5 mm"`) — the test that asserts the
-  threshold value is in `text` will catch flipped signs.
-- **Parsing the prefix yourself.** Use `_split_handle_prefix(h)` —
-  never inline a regex or string split against `:`. The prefix scheme
-  is documented in the `design-rule-checking` capability spec; any
-  rule that hand-rolls the parser will silently break the day the
-  scheme changes (or, more likely today, the day someone adds a
-  single-file role check and a handle of the form `7AF:something`
-  trips a bespoke split).
+- **Editing `app/rule_check.py` directly.** That file is the
+  validation adapter; rule logic does not live there. Touching it
+  for a new rule is a layering violation.
+- **Forgetting `file_id` on a sub-rule with a handle.** Any
+  `from` / `to` / `tol` requires `file_id` to be the **full** hex id
+  (from `manifest.files[*].file_id`), not the 8-char short form. The
+  adapter raises if you omit it.
+- **Inventing a `from` / `to` list.** The contract is a single handle
+  per field, not a list. Multi-entity highlight = multiple sub-rules,
+  or use `tol` to add an annotation-only third entity to the same
+  sub-rule.
+- **Setting `to` without `from`.** The adapter rejects it. If you
+  want a single entity highlighted, use `from` alone (or `tol`).
+- **Parsing handles for a file prefix.** Bundle handles are raw and
+  per-file — there is no `<file_id[:8]>:` prefix to split. Use the
+  `file_id` on each `manifest.files[*]` entry to know which file each
+  handle belongs to.
+- **Hard-coding role.** If the rule legitimately spans more than one
+  role, iterate `manifest.files` and group by `role` rather than
+  assuming one DXF per role.
+- **Threshold inversion bugs.** Write the comparator in the result
+  text too (e.g. `"< 5 mm"` vs `">= 5 mm"`); a test that asserts the
+  threshold value appears in `text` catches flipped signs.
 
 ## Output
 
 After the rule is added, the agent should report:
-- Which file(s) it changed and the new rule's name
-- The test command run and its result
+- Which file(s) it changed and the new rule's name.
+- The test commands run and their result.
 - A pointer to `POST /api/products/{pid}/rule-check` (or the dashboard
-  "Rule Check" button) so the human can see it fire end-to-end
+  "Rule Check" button) so the human can see it fire end-to-end.
