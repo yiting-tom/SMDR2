@@ -2887,6 +2887,15 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  // C = toggle chain-select mode. No-op while add-mode, measure-mode, or
+  // mark-mode owns the canvas (chain mode is a selection-modifier; firing
+  // it inside a tool-mode would be confusing).
+  if ((e.key === "c" || e.key === "C") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (!addModeClass && !measureMode && !markMode) toggleChainMode();
+    e.preventDefault();
+    return;
+  }
+
   // Hotkeys → enter add mode for that class. Don't fire while typing or
   // while measure mode is active (measure mode owns the keyboard).
   if (!e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -2947,11 +2956,13 @@ window.addEventListener("keydown", (e) => {
 });
 
 // ---- chain mode toggle ---------------------------------------------------
-$chainBtn.addEventListener("click", () => {
+function toggleChainMode() {
   chainMode = !chainMode;
   $chainBtn.classList.toggle("active", chainMode);
   if (chainMode) ensureConnectivity();  // build eagerly so first click feels instant
-});
+}
+
+$chainBtn.addEventListener("click", toggleChainMode);
 
 // ---- measure tool toggle -------------------------------------------------
 const $measureBtn = document.getElementById("measure-btn");
