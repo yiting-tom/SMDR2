@@ -104,12 +104,17 @@ def test_align_mirrored_copy():
 
 
 def test_align_within_scale_tolerance():
-    scaled = scale(RECT, 1.04)  # within 0.95~1.05
+    # `SCALE_MIN/MAX` were tightened to 0.99/1.01 in 9f06022 — the original
+    # 1.04 candidate now reads as a near-miss instead of a match. 1.005 is
+    # comfortably inside the current window and still proves the gate
+    # accepts non-1.0 scales.
+    from app.matching import SCALE_MIN, SCALE_MAX
+    scaled = scale(RECT, 1.005)
     res = align_score(np.asarray(RECT), np.asarray(scaled))
     assert res is not None
     score, sc = res
     assert score < TRANSFORM_NOISE_FLOOR
-    assert 0.95 <= sc <= 1.05
+    assert SCALE_MIN <= sc <= SCALE_MAX
 
 
 def test_align_outside_scale_tolerance_returns_none():
