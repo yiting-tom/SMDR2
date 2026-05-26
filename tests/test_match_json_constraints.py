@@ -310,3 +310,147 @@ def test_save_match_json_emits_arbitration_counts(monkeypatch):
     assert bga_handles_out == set(grid_handles)
     assert fid_handles_out == set(fid_handles)
     assert bga_handles_out.isdisjoint(fid_handles_out)
+
+
+def test_scan_all_applies_arbitration_to_bga_fiducial_crossfire(monkeypatch):
+    """`GET /api/files/{file_id}/scan-all` SHALL apply the same
+    arbitration pipeline `save_match_json` uses, so the overlay's
+    per-class colouring matches what Save Match would persist.
+
+    Regression test: without this, when BGABall + FiducialCircle
+    templates cross-fire on identical circle geometry, the overlay
+    paints every BGA ball with the FiducialCircle colour even though
+    the saved match.json correctly arbitrates them to BGABall.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    fid = "scan-arb-1"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": -50, "y0": -50, "x1": -10, "y1": -10},
+        bottom={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        side=None,
+    )
+    library_id = _make_lib_with_arbitration_classes(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    # 3×3 BGA grid inside bottom_view + 2 isolated fiducials in top.
+    # Same fixture shape as the save_match_json arbitration test above.
+    grid_handles = [f"g{i}_{j}" for i in range(3) for j in range(3)]
+    grid_coords = [(float(i), float(j)) for i in range(3) for j in range(3)]
+    fid_handles = ["f0", "f1"]
+    fid_coords = [(-30.0, -30.0), (-20.0, -20.0)]
+
+    shapes = {}
+    for h, (x, y) in zip(grid_handles, grid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+    for h, (x, y) in zip(fid_handles, fid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+
+    # Both matchers return all handles to simulate the cross-fire that
+    # arbitration exists to resolve.
+    all_matches = [_mr([h]) for h in grid_handles + fid_handles]
+    matches = {
+        "BGABall":        list(all_matches),
+        "FiducialCircle": list(all_matches),
+    }
+    _install_fakes(monkeypatch, shapes, matches)
+
+    with TestClient(app) as client:
+        r = client.get(f"/api/files/{fid}/scan-all")
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+    # Response shape unchanged: {by_class: {<display_name>: [handle, ...]}, total: N}.
+    assert set(body.keys()) == {"by_class", "total"}
+    by_class = body["by_class"]
+
+    # Grid handles arbitrated to BGABall (≥ MinNeighbors(2)), fiducials
+    # to FiducialCircle (≤ MaxNeighbors(1)). No cross-fire residue.
+    assert set(by_class.get("BGABall", [])) == set(grid_handles), (
+        f"every grid ball should appear in BGABall after arbitration. "
+        f"got BGABall={by_class.get('BGABall', [])}"
+    )
+    assert set(by_class.get("FiducialCircle", [])) == set(fid_handles), (
+        f"only the 2 isolated fiducials should appear in FiducialCircle. "
+        f"got FiducialCircle={by_class.get('FiducialCircle', [])}"
+    )
+    # No handle leaks across classes.
+    bga_set = set(by_class.get("BGABall", []))
+    fid_set = set(by_class.get("FiducialCircle", []))
+    assert bga_set.isdisjoint(fid_set)
+    # Total accounts for every handle exactly once.
+    assert body["total"] == len(grid_handles) + len(fid_handles)
+
+
+def test_scan_all_matches_save_match_json_class_assignment(monkeypatch):
+    """End-to-end consistency: scan-all's per-handle class assignment
+    SHALL be identical to what save_match_json persists. This locks in
+    the single-source-of-truth contract that the new arbitration
+    pipeline establishes."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.storage import match_path
+
+    fid = "scan-arb-2-parity"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": -50, "y0": -50, "x1": -10, "y1": -10},
+        bottom={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        side=None,
+    )
+    library_id = _make_lib_with_arbitration_classes(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    grid_handles = [f"g{i}_{j}" for i in range(3) for j in range(3)]
+    grid_coords = [(float(i), float(j)) for i in range(3) for j in range(3)]
+    fid_handles = ["f0", "f1"]
+    fid_coords = [(-30.0, -30.0), (-20.0, -20.0)]
+
+    shapes = {}
+    for h, (x, y) in zip(grid_handles, grid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+    for h, (x, y) in zip(fid_handles, fid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+
+    all_matches = [_mr([h]) for h in grid_handles + fid_handles]
+    matches = {
+        "BGABall":        list(all_matches),
+        "FiducialCircle": list(all_matches),
+    }
+    _install_fakes(monkeypatch, shapes, matches)
+
+    with TestClient(app) as client:
+        scan = client.get(f"/api/files/{fid}/scan-all").json()
+        save_resp = client.post(f"/api/files/{fid}/match-json")
+        assert save_resp.status_code == 200, save_resp.text
+
+    saved = json.loads(match_path(fid).read_text())
+
+    # Build the same handle→class mapping from each side.
+    scan_assignment = {
+        h: cls
+        for cls, handles in scan["by_class"].items()
+        for h in handles
+    }
+
+    save_assignment: dict[str, str] = {}
+    snake_to_display = {"bga_ball": "BGABall", "fiducial_circle": "FiducialCircle"}
+    for key, hls in saved.items():
+        # Keys are like "bottom_view.bga_ball.0".
+        parts = key.split(".")
+        # Find the class-snake portion (between optional view prefix and trailing idx).
+        cls_snake = parts[-2] if len(parts) >= 2 else parts[0]
+        cls_display = snake_to_display.get(cls_snake, cls_snake)
+        for hl in hls:
+            for h in hl:
+                save_assignment[h] = cls_display
+
+    assert scan_assignment == save_assignment, (
+        f"scan-all and save_match_json must agree on every handle's class.\n"
+        f"scan-only handles: {set(scan_assignment) - set(save_assignment)}\n"
+        f"save-only handles: {set(save_assignment) - set(scan_assignment)}\n"
+        f"disagreements: {{h: (scan_assignment.get(h), save_assignment.get(h)) "
+        f"for h in scan_assignment if scan_assignment[h] != save_assignment.get(h)}}"
+    )

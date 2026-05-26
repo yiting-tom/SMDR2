@@ -42,7 +42,7 @@ from app.files import (
     PREPROCESSING,
     READY,
 )
-from app.class_arbitration import arbitrate
+from app.class_arbitration import _parse_key, arbitrate
 from app.library import (
     CLASS_ARBITRATION_GROUPS,
     CLASS_JSON_KEY,
@@ -1019,25 +1019,88 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
 
 @app.get("/api/files/{file_id}/scan-all")
 async def scan_all(file_id: str) -> dict:
+    """Overlay-only preview of "what class does each handle belong to".
+
+    Runs the *same* pipeline as `save_match_json` — view split via
+    `split_matches_by_side` then `arbitrate` against
+    `CLASS_ARBITRATION_GROUPS` — so the overlay's per-class colouring
+    matches what Save Match would persist to disk. Without this, a
+    template that cross-fires on geometry shared with another class
+    (e.g. FiducialCircle + BGABall sharing a circle radius) would
+    paint the overlay one way and the saved JSON another.
+
+    Response shape is unchanged from before this endpoint started
+    arbitrating: `{by_class: {<display_name>: [handle, ...]}, total: N}`.
+    Front-end overlay code (`runScanAll` in `canvas.js`) reads
+    `data.by_class[cls]` exactly as before.
+    """
     rec = _resolve_file(file_id)
     lib = LIBRARIES.get(rec.library_id)
     _, shapes = _shapes_for(file_id)
-    by_class: dict[str, list[str]] = {}
+
+    # View-rect dispatch (mirror of save_match_json). Used by
+    # split_matches_by_side and by the skip-when-impossible gate below.
+    rect_for = {
+        "top_view": rec.top_view_rect,
+        "bottom_view": rec.bottom_view_rect,
+        "side_view": rec.side_view_rect,
+    }
+
+    # Prefixed-key dict that arbitrate consumes. Same shape
+    # save_match_json builds before persistence.
+    out: dict[str, list[list[str]]] = {}
+
     for cls_name in lib.classes:
+        # Skip-when-impossible: class is view-constrained and none of
+        # its allowed view rects is set on the file → every match would
+        # be dropped by split_matches_by_side anyway. Pure perf gate.
+        allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
+        if allowed is not None and not any(rect_for[v] is not None for v in allowed):
+            continue
         strategy, bbox_ratio = lib.strategy_of(cls_name)
-        seen: set[str] = set()
-        for tmpl in lib.templates_of(cls_name):
-            out = find_matches_from_pointsets(
+        for idx, tmpl in enumerate(lib.templates_of(cls_name)):
+            result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
                 strategy=strategy, bbox_ratio=bbox_ratio,
             )
-            for m in out.matches:
-                for h in m.handles:
-                    seen.add(h)
-        if seen:
-            by_class[cls_name] = sorted(seen)
-    return {"by_class": by_class, "total": sum(len(v) for v in by_class.values())}
+            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
+            base_key = f"{json_cls}.{idx}"
+            grouped, _cnts = split_matches_by_side(
+                base_key, result.matches, shapes,
+                rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
+                class_name=cls_name,
+            )
+            for k, v in grouped.items():
+                out.setdefault(k, []).extend(v)
+
+    # Resolve cross-fire across arbitration-group members (e.g.
+    # BGABall vs FiducialCircle on same-radius circles).
+    out, _arbitration_counts, _view_drops = arbitrate(
+        out, shapes, CLASS_ARBITRATION_GROUPS,
+    )
+
+    # Collapse prefixed-keys back to the flat {display_name: handles}
+    # shape the overlay expects. Reverse-map snake_case → display name
+    # via CLASS_JSON_KEY (classes without a snake override use the
+    # snake name as their display name via .get fallback).
+    display_by_snake = {v: k for k, v in CLASS_JSON_KEY.items()}
+    by_class_sets: dict[str, set[str]] = {}
+    for key, instance_lists in out.items():
+        parsed = _parse_key(key)
+        if parsed is None:
+            continue
+        _prefix, cls_snake, _idx = parsed
+        cls_display = display_by_snake.get(cls_snake, cls_snake)
+        bucket = by_class_sets.setdefault(cls_display, set())
+        for hl in instance_lists:
+            bucket.update(hl)
+
+    by_class = {k: sorted(v) for k, v in by_class_sets.items()}
+    return {
+        "by_class": by_class,
+        "total": sum(len(v) for v in by_class.values()),
+    }
 
 
 # ---- Pre-match cache (written by preprocess worker) ---------------------
