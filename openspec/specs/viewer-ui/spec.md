@@ -71,11 +71,23 @@ A toggle "Chain" button SHALL enable an alternate selection mode where
 single-click on an entity expands the selection to all entities whose
 endpoints lie within a tolerance of the clicked entity, transitively.
 Connectivity SHALL be computed lazily via a spatial hash over endpoint
-positions.
+positions. The `C` keyboard hotkey SHALL toggle the same mode as the
+button — except while add-mode, measure-mode, or mark-mode owns the
+canvas, where the hotkey SHALL be suppressed (chain mode is a
+selection-modifier; firing it inside another tool would be confusing).
 
 #### Scenario: Chain-select gathers connected lines
 - **WHEN** chain mode is on and the user clicks one of three lines whose endpoints share positions
 - **THEN** the selection contains all three lines
+
+#### Scenario: C hotkey toggles chain mode
+- **WHEN** the user presses `C` with no add-mode / measure-mode / mark-mode active
+- **THEN** the chain mode toggles on (if off) or off (if on)
+- **AND** the Chain button's active state mirrors the new mode
+
+#### Scenario: C hotkey suppressed inside add / measure / mark mode
+- **WHEN** the user presses `C` while add-mode, measure-mode, or mark-mode is active
+- **THEN** chain mode is not toggled and the active tool keeps the keyboard
 
 ### Requirement: Per-class hotkeys and scan workflow
 
