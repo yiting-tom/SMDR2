@@ -40,6 +40,12 @@ VERTEX_COUNT_RATIO = 0.3       # candidate must be within ±25% vertex count
 PATH_LENGTH_RATIO = 0.20        # ±20% path length (covers scale range + sampling noise)
 RADIUS_RATIO = 0.20             # ±20% max-radius-from-centroid (rotation-invariant)
 SIGMA_RATIO_TOL = 0.15          # absolute Δ on σ₂/σ₁ ∈ [0,1] — principal-axis aspect
+# Above this σ₂/σ₁ a shape is treated as isotropic (circle, regular polygon,
+# rounded square, cross) — its PCA principal-axis direction is numerically
+# unstable across instances, so the multi-entity matcher's pose recovery
+# falls back to 2-point centroid alignment instead of PCA-axes rotation.
+# Conservative: real anisotropic shapes (narrow rect, L-shape) sit < 0.7.
+ISOTROPIC_SIGMA_RATIO_THRESHOLD = 0.95
 # Decimal digits kept when bucketing CIRCLE radii for the exact-radius fast
 # path. 10⁻⁶ corresponds to 1 nm precision in mm-unit DXFs — six orders of
 # magnitude finer than any meaningful BGA / SMD design tolerance, yet loose
@@ -1106,61 +1112,178 @@ def _match_multi(
                 seen_seed.add(h)
                 seed_bucket.append(h)
 
-    for cand_handle in seed_bucket:
-        if cand_handle in skip:
-            continue
-        # A candidate whose cluster matches one of the template's
-        # cluster keys sits at the template's exact physical position —
-        # i.e. it's a stacked twin of the template that the user just
-        # happened not to select. Re-matching against the template's
-        # own position is not what the user asked for.
-        if _cluster_key(drawing[cand_handle]) in template_cluster_keys:
-            continue
-        cand = drawing[cand_handle]
+    seed_is_isotropic = _sigma_ratio(seed) > ISOTROPIC_SIGMA_RATIO_THRESHOLD
 
-        # Candidate's PCA frame in world.
-        cand_axes, _ = _pca_axes(cand.points - cand.centroid)
+    if seed_is_isotropic:
+        # ---- 2-point alignment fallback for isotropic seeds ----------
+        # PCA principal-axis direction is numerically unstable for
+        # circles, regular polygons, rounded squares (σ₂/σ₁ ≈ 1). The
+        # 4 sign variants the anisotropic path uses only cover
+        # 90°/mirror — not arbitrary rotation — so seed-driven pose
+        # recovery misses copy-paste instances whose PCA happens to
+        # spin to a random angle. Instead, derive the rigid transform
+        # from the line between two centroid pairs: template
+        # (seed→first-other) vs drawing (cand_seed→cand_other_first).
+        # No PCA orientation needed.
+        other_first_t, _, other_first_fp, other_first_key = others_local[0]
+        template_vec = other_first_t.centroid - seed.centroid
+        template_dist = float(np.linalg.norm(template_vec))
+        if template_dist < CENTROID_NOISE_TOL:
+            # Coincident template entities — fall back to anisotropic
+            # path; nothing the 2-point alignment can do here.
+            seed_is_isotropic = False
 
-        for sx, sy in sign_variants:
-            # 4 mirror/flip variants of how candidate's PCA aligns to template's.
-            scaled_axes = cand_axes * np.array([[sx], [sy]])
+    if seed_is_isotropic:
+        # Per-template orthonormal basis aligned with the seed→other_first
+        # line. `(x_local, y_local)` of each remaining other-template
+        # entity is its offset projected onto this basis.
+        t_x = template_vec / template_dist
+        t_y = np.array([-t_x[1], t_x[0]])  # 90° CCW perpendicular
+        others_local_xy: list[tuple[
+            float, float, tuple[int, int, int],
+            tuple[int, int, tuple[int, int, int]],
+        ]] = []
+        for t, _local_pos_pca, t_fp, t_key in others_local[1:]:
+            off = t.centroid - seed.centroid
+            others_local_xy.append((
+                float(off @ t_x), float(off @ t_y), t_fp, t_key,
+            ))
 
-            matched: list[tuple[str, tuple[int, int, tuple[int, int, int]]]] = [(cand_handle, seed_key)]
-            matched_handle_set: set[str] = {cand_handle}
-            consistent = True
+        # First-other-entity bucket (same ±1 neighbour expansion as
+        # seed enumeration; same `_fingerprint_neighbours` helper).
+        other_first_bucket: list[str] = []
+        seen_other_first: set[str] = set()
+        for fp in _fingerprint_neighbours(other_first_fp):
+            for h in buckets.get(fp, []):
+                if h not in seen_other_first:
+                    seen_other_first.add(h)
+                    other_first_bucket.append(h)
 
-            for t, local_pos, t_fp, t_key in others_local:
-                expected = local_pos @ scaled_axes + cand.centroid
-                # `query_ball_point` (not k=1) is essential when the
-                # drawing has stacked duplicates or neighbour SMDs whose
-                # pads coincide with the predicted spot — KDTree's k=1
-                # tiebreak returns the lowest-index handle, which may
-                # be in `skip` even when an acceptable cluster-mate is
-                # sitting at the same coordinate.
-                nearby = tree.query_ball_point(expected, r=CENTROID_NOISE_TOL)
-                found: str | None = None
-                for idx in nearby:
-                    h = handles[idx]
-                    if h in skip or h in matched_handle_set:
-                        continue
-                    if not _fingerprint_matches(
-                        _fingerprint(drawing[h]), t_fp,
-                    ):
-                        continue
-                    found = h
-                    break
-                if found is None:
-                    consistent = False
-                    break
-                matched.append((found, t_key))
-                matched_handle_set.add(found)
+        # N≥3 templates still need to cover mirror ambiguity (2 points
+        # only constrain rotation; for 3+ the handedness matters).
+        mirror_variants = (False,) if len(template_shapes) <= 2 else (False, True)
 
-            if consistent:
-                group = tuple(sorted(matched_handle_set))
-                if group not in seen_groups:
-                    seen_groups.add(group)
-                    raw_matches.append(matched)
-                break  # don't try other sign variants — first hit wins
+        for cand_seed_handle in seed_bucket:
+            if cand_seed_handle in skip:
+                continue
+            if _cluster_key(drawing[cand_seed_handle]) in template_cluster_keys:
+                continue
+            cand_seed = drawing[cand_seed_handle]
+
+            for cand_other_handle in other_first_bucket:
+                if cand_other_handle == cand_seed_handle:
+                    continue
+                if cand_other_handle in skip:
+                    continue
+                if _cluster_key(drawing[cand_other_handle]) in template_cluster_keys:
+                    continue
+                cand_other = drawing[cand_other_handle]
+
+                cand_vec = cand_other.centroid - cand_seed.centroid
+                cand_dist = float(np.linalg.norm(cand_vec))
+                if abs(cand_dist - template_dist) > CENTROID_NOISE_TOL:
+                    continue  # distance gate — fast reject most pairs
+
+                d_x = cand_vec / cand_dist
+                d_y = np.array([-d_x[1], d_x[0]])
+
+                for mirror in mirror_variants:
+                    matched_iso: list[tuple[str, tuple[int, int, tuple[int, int, int]]]] = [
+                        (cand_seed_handle, seed_key),
+                        (cand_other_handle, other_first_key),
+                    ]
+                    matched_iso_handles: set[str] = {cand_seed_handle, cand_other_handle}
+                    consistent_iso = True
+
+                    for x_local, y_local, t_fp, t_key in others_local_xy:
+                        y_eff = -y_local if mirror else y_local
+                        expected = (
+                            cand_seed.centroid
+                            + x_local * d_x
+                            + y_eff * d_y
+                        )
+                        nearby = tree.query_ball_point(expected, r=CENTROID_NOISE_TOL)
+                        found_iso: str | None = None
+                        for idx in nearby:
+                            h = handles[idx]
+                            if h in skip or h in matched_iso_handles:
+                                continue
+                            if not _fingerprint_matches(
+                                _fingerprint(drawing[h]), t_fp,
+                            ):
+                                continue
+                            found_iso = h
+                            break
+                        if found_iso is None:
+                            consistent_iso = False
+                            break
+                        matched_iso.append((found_iso, t_key))
+                        matched_iso_handles.add(found_iso)
+
+                    if consistent_iso:
+                        group = tuple(sorted(matched_iso_handles))
+                        if group not in seen_groups:
+                            seen_groups.add(group)
+                            raw_matches.append(matched_iso)
+                        break  # first successful mirror variant wins for this pair
+    else:
+        # ---- Anisotropic-seed path: PCA-driven 4-sign-variant rigid transform.
+        # Unchanged from the original implementation.
+        for cand_handle in seed_bucket:
+            if cand_handle in skip:
+                continue
+            # A candidate whose cluster matches one of the template's
+            # cluster keys sits at the template's exact physical position —
+            # i.e. it's a stacked twin of the template that the user just
+            # happened not to select. Re-matching against the template's
+            # own position is not what the user asked for.
+            if _cluster_key(drawing[cand_handle]) in template_cluster_keys:
+                continue
+            cand = drawing[cand_handle]
+
+            # Candidate's PCA frame in world.
+            cand_axes, _ = _pca_axes(cand.points - cand.centroid)
+
+            for sx, sy in sign_variants:
+                # 4 mirror/flip variants of how candidate's PCA aligns to template's.
+                scaled_axes = cand_axes * np.array([[sx], [sy]])
+
+                matched: list[tuple[str, tuple[int, int, tuple[int, int, int]]]] = [(cand_handle, seed_key)]
+                matched_handle_set: set[str] = {cand_handle}
+                consistent = True
+
+                for t, local_pos, t_fp, t_key in others_local:
+                    expected = local_pos @ scaled_axes + cand.centroid
+                    # `query_ball_point` (not k=1) is essential when the
+                    # drawing has stacked duplicates or neighbour SMDs whose
+                    # pads coincide with the predicted spot — KDTree's k=1
+                    # tiebreak returns the lowest-index handle, which may
+                    # be in `skip` even when an acceptable cluster-mate is
+                    # sitting at the same coordinate.
+                    nearby = tree.query_ball_point(expected, r=CENTROID_NOISE_TOL)
+                    found: str | None = None
+                    for idx in nearby:
+                        h = handles[idx]
+                        if h in skip or h in matched_handle_set:
+                            continue
+                        if not _fingerprint_matches(
+                            _fingerprint(drawing[h]), t_fp,
+                        ):
+                            continue
+                        found = h
+                        break
+                    if found is None:
+                        consistent = False
+                        break
+                    matched.append((found, t_key))
+                    matched_handle_set.add(found)
+
+                if consistent:
+                    group = tuple(sorted(matched_handle_set))
+                    if group not in seen_groups:
+                        seen_groups.add(group)
+                        raw_matches.append(matched)
+                    break  # don't try other sign variants — first hit wins
 
     # Expand each match to its full position-cluster set, bounded by
     # `template_multiplicity` so every match group ends up with the

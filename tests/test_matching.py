@@ -1146,3 +1146,128 @@ def test_match_multi_wrong_shape_seed_rejected():
         assert "X" not in m.handles, (
             f"wrong-shape seed leaked into a match: handles={m.handles}"
         )
+
+
+# ---- isotropic-seed 2-point alignment fallback --------------------------
+
+def _square_pad(handle: str, cx: float, cy: float, side: float = 0.5):
+    """Symmetric square pad — σ₂/σ₁ ≈ 1.0 → isotropic for PCA purposes."""
+    h = side / 2.0
+    return shape(handle, [
+        (cx - h, cy - h), (cx + h, cy - h),
+        (cx + h, cy + h), (cx - h, cy + h),
+        (cx - h, cy - h),
+    ])
+
+
+def test_match_multi_isotropic_two_square_template_finds_full_row():
+    """Regression: a 2-entity template made of two isotropic shapes
+    (rounded-square SMD marks) plus a row of copy-paste copies SHALL
+    have every copy matched. Previously the matcher used the seed's
+    PCA principal axes to derive rotation, and isotropic seeds
+    (σ₂/σ₁ ≈ 1.0) have numerically-unstable PCA orientation — so the
+    4 sign variants only covered 90°/mirror flips, leaving the
+    remaining arbitrary-angle drift unhandled. Some copies matched
+    (PCA happened to land near a sign-variant-friendly angle), some
+    didn't — irregular partial recall.
+
+    The 2-point alignment fallback derives rotation purely from the
+    line between the two centroid pairs, no PCA needed. Full recall.
+    """
+    # Two square pads — `template_offset` apart — represent one
+    # "SMD's left + right marks". Both pads are isotropic.
+    template_offset = 4.0
+
+    def _square_points(cx, cy, side=0.5):
+        # Closed polyline (5 verts) so EntityShape's path_length includes
+        # the closing segment — matches what the drawing-side squares
+        # produce, so their fingerprints align.
+        h = side / 2.0
+        return [
+            (cx - h, cy - h), (cx + h, cy - h),
+            (cx + h, cy + h), (cx - h, cy + h),
+            (cx - h, cy - h),
+        ]
+
+    template_point_sets = [
+        _square_points(0.0, 0.0),
+        _square_points(template_offset, 0.0),
+    ]
+
+    # Sanity check the test premise: both template entities are
+    # isotropic. If this fails the test isn't actually exercising
+    # the fallback path.
+    from app.matching import _sigma_ratio, ISOTROPIC_SIGMA_RATIO_THRESHOLD
+    for i, pts in enumerate(template_point_sets):
+        s = EntityShape.from_points(f"_tpremise_{i}", pts)
+        assert _sigma_ratio(s) > ISOTROPIC_SIGMA_RATIO_THRESHOLD, (
+            f"test premise broken: template[{i}] σ₂/σ₁={_sigma_ratio(s):.3f} "
+            f"is not isotropic (> {ISOTROPIC_SIGMA_RATIO_THRESHOLD})"
+        )
+
+    # 6 copy-paste copies of the template, spacing 10 mm along x.
+    copies_spacing = 10.0
+    n_copies = 6
+    drawing: dict[str, EntityShape] = {}
+    for i in range(n_copies):
+        x0 = i * copies_spacing + 100.0  # offset away from template's origin
+        drawing[f"L{i}"] = EntityShape.from_points(f"L{i}", _square_points(x0, 0.0))
+        drawing[f"R{i}"] = EntityShape.from_points(
+            f"R{i}", _square_points(x0 + template_offset, 0.0),
+        )
+
+    # `find_matches_from_pointsets` is the scan-all / library-scan
+    # entry point — the same code path users hit through the UI.
+    output = find_matches_from_pointsets(template_point_sets, drawing)
+    assert len(output.matches) == n_copies, (
+        f"isotropic 2-entity template should match every row copy. "
+        f"Got {len(output.matches)} / {n_copies} matches "
+        f"(handles per match: {[m.handles for m in output.matches]})"
+    )
+    # Each match should pair an L<i> with its R<i>.
+    matched_pairs = {tuple(sorted(m.handles)) for m in output.matches}
+    expected_pairs = {tuple(sorted([f"L{i}", f"R{i}"])) for i in range(n_copies)}
+    assert matched_pairs == expected_pairs, (
+        f"match pairings wrong. expected {expected_pairs}, got {matched_pairs}"
+    )
+
+
+def test_sigma_ratio_canonical_shapes():
+    """Lock the isotropy threshold's separation power. The matcher's
+    isotropic-fallback gate (`σ₂/σ₁ > 0.95`) relies on these ranges
+    holding — if a future change to `_pca_singular_values` /
+    `EntityShape.from_points` shifts them, the gate could
+    mis-classify and the fallback would fire for the wrong shapes.
+    """
+    from app.matching import _sigma_ratio
+
+    square = _square_pad("sq", 0.0, 0.0, side=1.0)
+    assert _sigma_ratio(square) > 0.95, (
+        f"square pad must be isotropic, σ₂/σ₁={_sigma_ratio(square):.3f}"
+    )
+
+    # Polygon-approximated circle (32 vertices) — also isotropic.
+    n = 32
+    circle_pts = [
+        (math.cos(2 * math.pi * k / n), math.sin(2 * math.pi * k / n))
+        for k in range(n)
+    ] + [(1.0, 0.0)]
+    circle = shape("circ", circle_pts)
+    assert _sigma_ratio(circle) > 0.95, (
+        f"polygon-circle must be isotropic, σ₂/σ₁={_sigma_ratio(circle):.3f}"
+    )
+
+    # 2:1 rectangle — clearly anisotropic.
+    rect = _pad("rect", 0.0, 0.0, w=2.0, h=1.0)
+    sr = _sigma_ratio(rect)
+    assert 0.4 < sr < 0.6, (
+        f"2:1 rectangle σ₂/σ₁ expected in [0.4, 0.6], got {sr:.3f}"
+    )
+
+    # Thin line (10:1 rect) — near-zero σ₂/σ₁.
+    thin = _pad("thin", 0.0, 0.0, w=10.0, h=1.0)
+    sr_thin = _sigma_ratio(thin)
+    assert sr_thin < 0.2, (
+        f"10:1 thin rectangle σ₂/σ₁ expected < 0.2, got {sr_thin:.3f}"
+    )
+
