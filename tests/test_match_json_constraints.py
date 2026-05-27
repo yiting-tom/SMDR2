@@ -107,6 +107,25 @@ def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class,
                         lambda _prims: {})
     monkeypatch.setattr(app.matching, "build_entity_shapes",
                         lambda _prims, _hi: dict(shapes_by_handle))
+    # `_save_match_worker` reads templates via `Store.load_library`
+    # directly (NOT through `LIBRARIES`, which would hit a stale
+    # per-process cache). Wrap the returned templates_by_class dict so
+    # the fake matcher's class-name side channel still fires on every
+    # per-class iteration. This keeps the test fixture aligned with
+    # both the old `lib.templates_of` shape and the new fresh-store
+    # shape used by the production worker.
+    _orig_load = app.library.Store.load_library
+
+    def _wrapped_load(self, library_id):
+        classes, configs, templates = _orig_load(self, library_id)
+
+        class _TrackingDict(dict):
+            def get(_self, key, default=None):
+                _CURRENT_CLASS_NAME[0] = key
+                return dict.get(_self, key, default)
+        return classes, configs, _TrackingDict(templates)
+
+    monkeypatch.setattr(app.library.Store, "load_library", _wrapped_load)
     if tmp_path is not None:
         stub = tmp_path / "stub_parsed.json"
         stub.write_text('{"primitives": []}')
@@ -655,3 +674,61 @@ def test_save_match_post_with_missing_parsed_file_returns_synchronous_error(
     assert r.status_code >= 400 and r.status_code != 202, r.text
     # No new entry registered in the in-memory job dict.
     assert set(jobs._jobs) == jobs_before
+
+
+# ---- Regression: worker does NOT use LIBRARIES (stale cache bug) -------
+#
+# A production bug surfaced: in the async-save-match flow, the worker
+# subprocess called `LIBRARIES.get(library_id)` which returned a stale
+# per-process `Library` cache. Templates added in the FastAPI parent
+# process after the worker first cached the library never landed in
+# the worker's view, so save_match produced an empty (or partial)
+# match JSON. The fix bypasses LIBRARIES entirely in the worker —
+# `_save_match_worker` reads templates from a fresh `Store.load_library`
+# call every job (mirroring `_preprocess_worker`'s existing pattern).
+# This test pins that contract: poisoning `LIBRARIES.get` to fail
+# must NOT break `_save_match_worker`.
+
+def test_save_match_worker_does_not_use_libraries_cache(monkeypatch, tmp_path):
+    """`_save_match_worker` SHALL NOT call `LIBRARIES.get(...)`. The
+    worker reads templates via `Store.load_library` so it always sees
+    the latest committed templates, regardless of cache staleness."""
+    from app.jobs import _save_match_worker
+    from app.storage import match_path
+    import app.library
+
+    fid = "no-libraries-cache"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    shapes = {"TC4": _shape("TC4", [(5.0, 5.0)])}
+    matches = {"C4Ball": [_mr(["TC4"])], "BGABall": [], "SMD-2T": []}
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
+
+    # Poison LIBRARIES.get — if the worker calls it, the test fails.
+    libraries_get_calls: list[str] = []
+
+    def boom(library_id):
+        libraries_get_calls.append(library_id)
+        raise RuntimeError(
+            f"LIBRARIES.get({library_id!r}) called from worker — the "
+            f"worker should use Store.load_library directly"
+        )
+
+    monkeypatch.setattr(app.library.LIBRARIES, "get", boom)
+
+    result = _save_match_worker(fid, str(match_path(fid)))
+
+    assert libraries_get_calls == [], (
+        f"worker called LIBRARIES.get; this caches per-process and goes "
+        f"stale across save_match jobs. Calls: {libraries_get_calls}"
+    )
+    # Worker still produced a valid result despite the poisoned cache,
+    # which proves it read templates from the fresh-store path.
+    assert "top_view.c4_ball.0" in result["template_keys"]
+    assert result["total_matches"] >= 1

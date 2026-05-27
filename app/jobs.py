@@ -639,26 +639,44 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     # skip-when-impossible guard, same `arbitrate()` call, same on-disk
     # JSON layout. Only the surrounding plumbing (HTTP handler → process
     # pool) changes.
+    #
+    # IMPORTANT: read the library via `Store.load_library(...)` rather
+    # than `LIBRARIES.get(...)`. The `LIBRARIES` singleton caches a
+    # per-process `Library` instance whose `_templates` dict is only
+    # ever updated by in-process `add_template` calls — in this worker
+    # process, those mutations never happen (templates are added in the
+    # parent FastAPI process). Using the cache here means: the FIRST
+    # save_match job in a given worker process snapshots whatever was
+    # in the DB then, and EVERY subsequent job in the same worker sees
+    # that stale snapshot. The symptoms reported in production:
+    #   - first save → match.json is `{}` (cache seeded empty)
+    #   - later saves → match.json is missing newly-added classes
+    # The `_preprocess_worker` already follows this fresh-load pattern;
+    # we mirror it here.
     from app.class_arbitration import arbitrate
     from app.files import FILE_STORE
     from app.library import (
         CLASS_ARBITRATION_GROUPS,
         CLASS_JSON_KEY,
         CLASS_VIEW_CONSTRAINTS,
-        LIBRARIES,
+        Store,
         build_handle_index,
     )
     from app.matching import build_entity_shapes, find_matches_from_pointsets
     from app.side_regions import split_matches_by_side
+    from app.storage import DB_PATH
 
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise RuntimeError(f"file {file_id!r} not found in worker")
-    lib = LIBRARIES.get(rec.library_id)
-    if lib is None:
+    store = Store(DB_PATH)
+    if store.get_library(rec.library_id) is None:
         raise RuntimeError(
             f"library {rec.library_id!r} not registered in worker"
         )
+    classes, configs_by_class, templates_by_class = store.load_library(
+        rec.library_id
+    )
     pp = parsed_path(file_id)
     if not pp.exists():
         raise RuntimeError(f"parsed file missing for {file_id!r}: {pp}")
@@ -678,14 +696,16 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
         "bottom_view": rec.bottom_view_rect,
         "side_view": rec.side_view_rect,
     }
-    for cls_name in lib.classes:
+    for cls_name in classes:
         allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
         if allowed is not None and not any(
             rect_for[v] is not None for v in allowed
         ):
             continue
-        strategy, bbox_ratio = lib.strategy_of(cls_name)
-        for idx, tmpl in enumerate(lib.templates_of(cls_name)):
+        cfg = configs_by_class.get(cls_name) or {}
+        strategy = cfg.get("match_strategy") or "chamfer"
+        bbox_ratio = cfg.get("bbox_ratio")
+        for idx, tmpl in enumerate(templates_by_class.get(cls_name, [])):
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
