@@ -22,7 +22,7 @@ deletable.
 
 ### Requirement: Default class seeding
 
-Every newly-created library SHALL be seeded with the following 16
+Every newly-created library SHALL be seeded with the following 17
 canonical IC-packaging classes, in this order, and the order SHALL
 be the toolbar / class-list order surfaced in the UI:
 
@@ -34,14 +34,15 @@ be the toolbar / class-list order surfaced in the UI:
 6. `DieArea`
 7. `FiducialCircle`
 8. `FiducialCross`
-9. `SMD-2T`
-10. `C4Ball`
-11. `BGABall`
-12. `Protrusion`
-13. `2DBarcode`
-14. `SMD-3T`
-15. `SMD-8T`
-16. `SMD-14T`
+9. `FiducialSquare`
+10. `SMD-2T`
+11. `C4Ball`
+12. `BGABall`
+13. `Protrusion`
+14. `2DBarcode`
+15. `SMD-3T`
+16. `SMD-8T`
+17. `SMD-14T`
 
 The trailing three SMD variants (`SMD-3T`, `SMD-8T`, `SMD-14T`)
 SHALL be members of the viewer's collapsed-toolbar fold group so
@@ -49,14 +50,16 @@ the toolbar stays compact by default.
 
 Two classes that previously appeared in the seed list SHALL be
 deprecated and SHALL NOT be seeded into any new or existing
-library: `FiducialMark` (superseded by the `FiducialCircle` /
-`FiducialCross` split) and `Side` (unused in practice).
+library: `FiducialMark` (superseded by the
+`FiducialCircle` / `FiducialCross` / `FiducialSquare` family) and
+`Side` (unused in practice).
 
-#### Scenario: New library has the 16 default classes in canonical order
+#### Scenario: New library has the 17 default classes in canonical order
 - **WHEN** the user creates a new library via `POST /api/libraries`
-- **THEN** `GET /api/libraries/{id}/classes` returns the 16 names listed above
+- **THEN** `GET /api/libraries/{id}/classes` returns the 17 names listed above
 - **AND** the names appear in the listed order (Substrate first, SMD-14T last)
 - **AND** `C4Ball` appears immediately before `BGABall`
+- **AND** `FiducialSquare` appears immediately after `FiducialCross`
 
 #### Scenario: Deprecated classes are not seeded
 - **WHEN** a new library is created
@@ -68,7 +71,8 @@ library: `FiducialMark` (superseded by the `FiducialCircle` /
 - **THEN** the migration drops every template filed under `FiducialMark`
   or `Side`
 - **AND** drops the `FiducialMark` and `Side` rows from `classes`
-- **AND** seeds the missing defaults (`FiducialCircle`, `FiducialCross`, `C4Ball`)
+- **AND** seeds the missing defaults (`FiducialCircle`, `FiducialCross`,
+  `FiducialSquare`, `C4Ball`)
 - **AND** re-ranks the surviving rows so they match the canonical order
 
 #### Scenario: Boot seeds C4Ball into existing libraries
@@ -76,6 +80,15 @@ library: `FiducialMark` (superseded by the `FiducialCircle` /
   pre-`C4Ball` canonical set (15 classes, no `C4Ball` row)
 - **THEN** after migration every library has a `C4Ball` class row
 - **AND** its `rank` places it immediately before `BGABall` in the
+  ordered class listing
+
+#### Scenario: Boot seeds FiducialSquare into existing libraries
+- **WHEN** a Store boots against a DB whose libraries already have the
+  pre-`FiducialSquare` canonical set (16 classes, no `FiducialSquare`
+  row)
+- **THEN** after migration every library has a `FiducialSquare` class
+  row
+- **AND** its `rank` places it immediately after `FiducialCross` in the
   ordered class listing
 
 ### Requirement: Per-file library binding with reassignment
@@ -101,12 +114,24 @@ templates.
 ### Requirement: Template CRUD
 
 The library SHALL support creating, listing, deleting and moving
-templates between classes within the same library.
+templates between classes within the same library. Creation SHALL
+follow the per-class storage scope rule (see
+`Per-class storage scope` above): library-scoped classes persist
+templates with `product_id IS NULL`; product-scoped classes persist
+with `product_id = <file's product>`. Deletion and class-rename
+operations SHALL operate by template primary key and SHALL NOT change
+a template's scope.
 
 #### Scenario: Commit creates a template under a file's library
 - **WHEN** the user posts handles to `POST /api/files/{id}/commit` with a class name
 - **THEN** the template is added to the file's library, not any other library
 - **AND** the response carries the new template id and the bound `library_id`
+
+#### Scenario: Commit honours per-class storage scope
+- **WHEN** the user commits handles to a product-scoped class
+- **THEN** the persisted row has `product_id = file.product_id`
+- **AND** when the user commits handles to a library-scoped class
+- **THEN** the persisted row has `product_id IS NULL`
 
 #### Scenario: Delete removes a template
 - **WHEN** `DELETE /api/templates/{template_id}` is called
@@ -117,6 +142,144 @@ templates between classes within the same library.
 - **WHEN** `PATCH /api/templates/{template_id}` is called with a new `class_name`
 - **THEN** the template is moved into that class within its current library
 - **AND** the new class is auto-created in the library if missing
+- **AND** the template's `product_id` is left unchanged (a class
+  rename does not implicitly re-scope the row)
+
+### Requirement: Per-class storage scope (library vs. product)
+
+The library SHALL partition its 17 default classes into two
+storage-scope tiers via a module-level constant
+`library.PRODUCT_SCOPED_CLASSES: frozenset[str]`.
+
+**Product-scoped (8)** — templates SHALL be stored per-product;
+templates of one product SHALL NOT be visible to any other product
+sharing the same library:
+
+- `Substrate`
+- `Lid`
+- `LidOuter`
+- `LidInner`
+- `DieArea`
+- `C4Ball`
+- `BGABall`
+- `Protrusion`
+
+**Library-scoped (the remaining 9 defaults plus any custom user
+class)** — templates SHALL be stored per-library and SHALL be visible
+to every product bound to that library:
+
+- `SMD-2T`, `SMD-3T`, `SMD-8T`, `SMD-14T`
+- `FiducialCircle`, `FiducialCross`, `FiducialSquare`
+- `Pin-1`
+- `2DBarcode`
+- any class added by the user that is not in `PRODUCT_SCOPED_CLASSES`
+
+The system SHALL expose a helper
+`library.is_product_scoped(class_name: str) -> bool` returning `True`
+iff `class_name in PRODUCT_SCOPED_CLASSES`.
+
+The `templates` table SHALL carry a nullable `product_id` column. A
+template's scope SHALL be encoded by that column: `NULL` means
+library-scoped, a non-null value means product-scoped to that product.
+The class's membership in `PRODUCT_SCOPED_CLASSES` SHALL be the only
+input that determines which value is written; the caller SHALL NOT
+choose the scope independently of the class.
+
+#### Scenario: Helper reflects the partition
+- **WHEN** `is_product_scoped` is called for `"Substrate"`, `"C4Ball"`,
+  `"BGABall"`, `"DieArea"`, `"Protrusion"`, `"Lid"`, `"LidOuter"`, or
+  `"LidInner"`
+- **THEN** it returns `True`
+- **AND** for `"SMD-2T"`, `"FiducialCircle"`, `"FiducialSquare"`,
+  `"Pin-1"`, `"2DBarcode"`, or any custom class name
+- **THEN** it returns `False`
+
+#### Scenario: Library-scoped templates are visible to every product in the library
+- **WHEN** a template T is committed to library L through a file
+  belonging to product A with class `SMD-2T`
+- **AND** a file in product B (same library L) loads its library
+- **THEN** T appears in the loaded `templates_by_class["SMD-2T"]`
+  list for the file in product B
+
+#### Scenario: Product-scoped templates are isolated to their product
+- **WHEN** a template T is committed to library L through a file
+  belonging to product A with class `Substrate`
+- **AND** a file in product B (same library L) loads its library
+- **THEN** T does NOT appear in the loaded `templates_by_class["Substrate"]`
+  list for the file in product B
+- **AND** a file in product A loading its library DOES see T in
+  `templates_by_class["Substrate"]`
+
+### Requirement: Scope-aware template loading
+
+`Store.load_library` SHALL accept an optional keyword-only
+`product_id: str | None = None` parameter. The returned
+`templates_by_class` dict SHALL contain:
+
+- every template row where `library_id = <given>` AND `product_id IS NULL`
+  (library-scoped), and
+- every template row where `library_id = <given>` AND `product_id = <given product_id>`
+  (the current product's product-scoped templates) — but only when
+  `product_id` is non-null at the call site.
+
+Calling `load_library(library_id)` without a `product_id` SHALL return
+ONLY the library-scoped rows. This is the library-admin view (used by
+`GET /api/libraries/{id}/templates`).
+
+The match worker (`app/jobs.py`) and the Scan All endpoint
+(`app/main.py`) SHALL pass the file record's `product_id` into
+`load_library`. The library-admin endpoints SHALL NOT.
+
+#### Scenario: load_library without product_id returns library-scoped only
+- **WHEN** the library has one library-scoped `SMD-2T` template and
+  one product-scoped `Substrate` template (any product)
+- **AND** `Store.load_library("default")` is called with no product_id
+- **THEN** the returned `templates_by_class["SMD-2T"]` has length 1
+- **AND** the returned `templates_by_class["Substrate"]` has length 0
+
+#### Scenario: load_library with product_id merges scopes
+- **WHEN** the library has one library-scoped `SMD-2T` template and
+  one product-scoped `Substrate` template for product `p1`
+- **AND** `Store.load_library("default", product_id="p1")` is called
+- **THEN** the returned `templates_by_class["SMD-2T"]` has length 1
+- **AND** the returned `templates_by_class["Substrate"]` has length 1
+
+#### Scenario: load_library with a different product_id excludes other products' templates
+- **WHEN** the library has one product-scoped `Substrate` template for
+  product `p1` and none for product `p2`
+- **AND** `Store.load_library("default", product_id="p2")` is called
+- **THEN** the returned `templates_by_class["Substrate"]` has length 0
+
+### Requirement: Commit routes templates by class scope
+
+`POST /api/files/{file_id}/commit` SHALL persist new templates with
+their `product_id` derived from the file and the class:
+
+- if `is_product_scoped(class_name)` is `True`, the new template's
+  `product_id` SHALL equal the file's `product_id`;
+- otherwise the new template's `product_id` SHALL be `NULL`
+  (library-scoped).
+
+A file with a NULL `product_id` SHALL NOT be allowed to commit a
+template for a product-scoped class — the API SHALL return HTTP 400
+with a clear error message ("file is not bound to a product; cannot
+commit product-scoped class").
+
+#### Scenario: Commit on a library-scoped class lands library-scoped
+- **WHEN** a file bound to product `p1` commits handles to class
+  `SMD-2T`
+- **THEN** the new `templates` row has `product_id IS NULL`
+
+#### Scenario: Commit on a product-scoped class lands product-scoped
+- **WHEN** a file bound to product `p1` commits handles to class
+  `Substrate`
+- **THEN** the new `templates` row has `product_id = "p1"`
+
+#### Scenario: Commit on a product-scoped class without a product fails
+- **WHEN** a file with `product_id IS NULL` POSTs to
+  `/api/files/{id}/commit` with `class_name = "C4Ball"`
+- **THEN** the API returns HTTP 400 with a body explaining that the
+  file must be bound to a product
 
 ### Requirement: SQLite persistence with migration from pre-multi-library schema
 
@@ -128,13 +291,19 @@ multi-library schema and migrate them in-place by:
 3. adding `library_id` to the `templates` table and rebuilding it to
    drop the stale `class_name → classes(name)` foreign key,
 4. adding `library_id` to the `files` table,
-5. on every boot — idempotently — purging classes listed in
+5. adding the nullable `product_id` column to the `templates` table
+   (idempotent — gated on a `PRAGMA table_info(templates)` check),
+6. on every boot — idempotently — purging classes listed in
    `DEPRECATED_CLASSES` (and any templates filed under them),
    seeding any missing entry from `DEFAULT_CLASSES` for every existing
-   library, and re-ranking every library's `classes` rows so the
-   `rank` column tracks the current `DEFAULT_CLASSES` order. Classes
-   added by the user that are not in `DEFAULT_CLASSES` SHALL be
-   pushed after the canonical rows, preserving their relative order.
+   library, re-ranking every library's `classes` rows so the
+   `rank` column tracks the current `DEFAULT_CLASSES` order, AND
+   deleting every `templates` row whose `class_name IN
+   PRODUCT_SCOPED_CLASSES AND product_id IS NULL` (these are the
+   library-scope-mis-stored templates from before the class-scope
+   split — the user re-commits them per product after the migration).
+   Classes added by the user that are not in `DEFAULT_CLASSES` SHALL
+   be pushed after the canonical rows, preserving their relative order.
 
 #### Scenario: Round-trip persistence
 - **WHEN** a template is added and the application is restarted
@@ -157,6 +326,19 @@ multi-library schema and migrate them in-place by:
 - **AND** their `rank` values place them at positions 7 and 8 in the
   ordered class listing, between `DieArea` and `SMD-2T`
 
+#### Scenario: First boot drops library-scoped product-class templates
+- **WHEN** the Store boots against a DB that contains a `templates`
+  row with `class_name = "Substrate"` and `product_id IS NULL`
+- **THEN** after migration that row no longer exists
+- **AND** a re-boot leaves the table unchanged (idempotent)
+
+#### Scenario: Migration adds product_id column idempotently
+- **WHEN** the Store boots against a DB whose `templates` table has
+  no `product_id` column
+- **THEN** after migration the column exists and is `NULL` for every
+  pre-existing row
+- **AND** a second boot does not re-issue the `ALTER TABLE`
+
 ### Requirement: Display name vs. match-JSON key separation
 
 Every class SHALL have two stable identifiers:
@@ -164,34 +346,35 @@ Every class SHALL have two stable identifiers:
 - a **display ID** used in the database, viewer toolbar, API
   responses about templates, and user-facing labels — the
   CamelCase / hyphenated form (`Substrate`, `Pin-1`, `BGABall`,
-  `C4Ball`, `SMD-2T`, `FiducialCircle`, …);
+  `C4Ball`, `SMD-2T`, `FiducialCircle`, `FiducialSquare`, …);
 - a **match-JSON key** used inside `data/match/{file_id}.json` and
   any downstream consumer that reads that file — the snake_case
   identifier-safe form (`substrate`, `pin_1`, `bga_ball`, `c4_ball`,
-  `smd_2t`, `fiducial_circle`, …).
+  `smd_2t`, `fiducial_circle`, `fiducial_square`, …).
 
 The mapping SHALL be defined by `library.CLASS_JSON_KEY` and SHALL
 be applied wherever match-JSON keys are constructed. Other layers
 (viewer, library API, UI hotkey labels, color map) SHALL continue
 to use the display ID.
 
-| Display ID       | Match-JSON key   |
-|------------------|------------------|
-| `Substrate`      | `substrate`      |
-| `Pin-1`          | `pin_1`          |
-| `Lid`            | `lid`            |
-| `LidOuter`       | `lid_outer`      |
-| `LidInner`       | `lid_inner`      |
-| `DieArea`        | `die_area`       |
-| `FiducialCircle` | `fiducial_circle`|
-| `FiducialCross`  | `fiducial_cross` |
-| `SMD-2T`         | `smd_2t`         |
-| `C4Ball`         | `c4_ball`        |
-| `BGABall`        | `bga_ball`       |
-| `2DBarcode`      | `2d_barcode`     |
-| `SMD-3T`         | `smd_3t`         |
-| `SMD-8T`         | `smd_8t`         |
-| `SMD-14T`        | `smd_14t`        |
+| Display ID       | Match-JSON key    |
+|------------------|-------------------|
+| `Substrate`      | `substrate`       |
+| `Pin-1`          | `pin_1`           |
+| `Lid`            | `lid`             |
+| `LidOuter`       | `lid_outer`       |
+| `LidInner`       | `lid_inner`       |
+| `DieArea`        | `die_area`        |
+| `FiducialCircle` | `fiducial_circle` |
+| `FiducialCross`  | `fiducial_cross`  |
+| `FiducialSquare` | `fiducial_square` |
+| `SMD-2T`         | `smd_2t`          |
+| `C4Ball`         | `c4_ball`         |
+| `BGABall`        | `bga_ball`        |
+| `2DBarcode`      | `2d_barcode`      |
+| `SMD-3T`         | `smd_3t`          |
+| `SMD-8T`         | `smd_8t`          |
+| `SMD-14T`        | `smd_14t`         |
 
 A class added by the user that is not in this table SHALL fall back
 to using its display ID verbatim as the match-JSON key.
@@ -208,10 +391,18 @@ to using its display ID verbatim as the match-JSON key.
 - **THEN** the saved JSON contains the key `c4_ball.0`
 - **AND** the saved JSON does NOT contain the key `C4Ball.0`
 
+#### Scenario: FiducialSquare match JSON uses snake_case key
+- **WHEN** a library contains one `FiducialSquare` template at index 0
+- **AND** the user invokes `POST /api/files/{id}/match-json`
+- **THEN** the saved JSON contains the key `fiducial_square.0`
+- **AND** the saved JSON does NOT contain the key `FiducialSquare.0`
+
 #### Scenario: Display ID is preserved in library APIs
 - **WHEN** the user fetches `GET /api/libraries/default/classes`
 - **THEN** the response lists `BGABall` (display ID), not `bga_ball`
 - **AND** the response lists `C4Ball` (display ID), not `c4_ball`
+- **AND** the response lists `FiducialSquare` (display ID), not
+  `fiducial_square`
 
 #### Scenario: Custom class falls through unchanged
 - **WHEN** the user has added a custom class named `MyMarker` and

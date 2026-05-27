@@ -10,6 +10,7 @@ from app.library import (
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_CLASSES,
     DEFAULT_LIBRARY_ID,
+    PRODUCT_SCOPED_CLASSES,
     ArbitrationGroup,
     Library,
     LibraryRegistry,
@@ -20,10 +21,15 @@ from app.library import (
     _build_arbitration_index,
     arbitration_group_for,
     is_allowed_view,
+    is_product_scoped,
 )
 
 
-def _make_template(class_name="BGABall"):
+def _make_template(class_name="SMD-2T"):
+    # Default to a library-scoped class so persistence-round-trip tests
+    # using `add_template` (no product context) don't get purged by the
+    # migration on reload. Tests exercising product-scope semantics use
+    # the Store / add_template_for_file API directly.
     return Template.from_entities(
         class_name,
         [[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]],
@@ -44,14 +50,14 @@ def test_store_creates_default_classes(tmp_db):
 
 def test_add_template_persists(tmp_db):
     lib = _default_lib(tmp_db)
-    t = _make_template("BGABall")
+    t = _make_template("SMD-2T")
     lib.add_template(t)
-    assert lib.count("BGABall") == 1
+    assert lib.count("SMD-2T") == 1
 
     # Re-open: template survives.
     lib2 = _default_lib(tmp_db)
-    assert lib2.count("BGABall") == 1
-    assert lib2.templates_of("BGABall")[0].id == t.id
+    assert lib2.count("SMD-2T") == 1
+    assert lib2.templates_of("SMD-2T")[0].id == t.id
 
 
 def test_delete_template(tmp_db):
@@ -71,13 +77,15 @@ def test_delete_nonexistent_returns_false(tmp_db):
 
 def test_move_template_changes_class_and_persists(tmp_db):
     lib = _default_lib(tmp_db)
-    t = _make_template("BGABall")
+    # Start in a library-scoped class so `add_template` lands a
+    # surviving row; move it to another library-scoped class.
+    t = _make_template("SMD-3T")
     lib.add_template(t)
     assert lib.move_template(t.id, "SMD-2T")
-    assert lib.count("BGABall") == 0
+    assert lib.count("SMD-3T") == 0
     assert lib.count("SMD-2T") == 1
     lib2 = _default_lib(tmp_db)
-    assert lib2.count("BGABall") == 0
+    assert lib2.count("SMD-3T") == 0
     assert lib2.count("SMD-2T") == 1
 
 
@@ -181,7 +189,9 @@ def test_all_templates_returns_indexed_tuples(tmp_db):
     lib = _default_lib(tmp_db)
     t1 = _make_template("SMD-2T")
     t2 = _make_template("SMD-2T")
-    t3 = _make_template("BGABall")
+    # FiducialCircle is library-scoped like SMD-2T; both survive an
+    # `add_template` (no product) round-trip.
+    t3 = _make_template("FiducialCircle")
     for t in (t1, t2, t3):
         lib.add_template(t)
     flat = lib.all_templates()
@@ -189,7 +199,7 @@ def test_all_templates_returns_indexed_tuples(tmp_db):
     assert flat_by_id[t1.id][0] == "SMD-2T"
     assert flat_by_id[t1.id][1] == 0
     assert flat_by_id[t2.id][1] == 1
-    assert flat_by_id[t3.id][0] == "BGABall"
+    assert flat_by_id[t3.id][0] == "FiducialCircle"
     assert flat_by_id[t3.id][1] == 0
 
 
@@ -197,17 +207,19 @@ def test_all_templates_returns_indexed_tuples(tmp_db):
 def test_multiple_libraries_isolated(tmp_db):
     reg = LibraryRegistry(Store(tmp_db))
     lib_a = reg.get(DEFAULT_LIBRARY_ID)
-    lib_b = reg.create("BGA Variants")
+    lib_b = reg.create("Other Library")
 
-    t = _make_template("BGABall")
+    # Library-scoped class so `add_template` lands a row that survives
+    # boot migration; the test's intent is cross-library isolation.
+    t = _make_template("SMD-2T")
     lib_a.add_template(t)
-    assert lib_a.count("BGABall") == 1
-    assert lib_b.count("BGABall") == 0  # other library is independent
+    assert lib_a.count("SMD-2T") == 1
+    assert lib_b.count("SMD-2T") == 0  # other library is independent
 
     # Reload and confirm separation persists.
     reg2 = LibraryRegistry(Store(tmp_db))
-    assert reg2.get(DEFAULT_LIBRARY_ID).count("BGABall") == 1
-    assert reg2.get(lib_b.library_id).count("BGABall") == 0
+    assert reg2.get(DEFAULT_LIBRARY_ID).count("SMD-2T") == 1
+    assert reg2.get(lib_b.library_id).count("SMD-2T") == 0
 
 
 def test_cannot_delete_default_library(tmp_db):
@@ -239,6 +251,86 @@ def test_c4ball_ordered_immediately_before_bgaball(tmp_db):
 
 def test_c4ball_json_key_mapping():
     assert CLASS_JSON_KEY["C4Ball"] == "c4_ball"
+
+
+def test_fiducial_square_ordered_immediately_after_fiducial_cross(tmp_db):
+    """All three fiducial classes share the alignment-marker role; the
+    canonical order groups them together with FiducialSquare last."""
+    lib = _default_lib(tmp_db)
+    assert "FiducialSquare" in lib.classes
+    cross_idx = lib.classes.index("FiducialCross")
+    square_idx = lib.classes.index("FiducialSquare")
+    assert cross_idx + 1 == square_idx, (
+        f"expected FiducialSquare directly after FiducialCross, "
+        f"got positions {cross_idx} and {square_idx}"
+    )
+
+
+def test_fiducial_square_json_key_mapping():
+    assert CLASS_JSON_KEY["FiducialSquare"] == "fiducial_square"
+
+
+def test_legacy_library_gets_fiducial_square_seeded_and_ranked(tmp_db):
+    """A library that pre-dates the FiducialSquare addition (16 canonical
+    classes, no FiducialSquare row) SHALL gain FiducialSquare on next
+    Store boot and SHALL re-rank it to sit immediately after
+    FiducialCross — mirrors the C4Ball seeding behavior."""
+    import sqlite3
+    import time
+
+    conn = sqlite3.connect(str(tmp_db))
+    conn.executescript(
+        """
+        CREATE TABLE libraries (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        );
+        CREATE TABLE classes (
+            library_id     TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            rank           INTEGER NOT NULL,
+            created_at     REAL NOT NULL,
+            match_strategy TEXT NOT NULL DEFAULT 'chamfer',
+            bbox_ratio     REAL,
+            PRIMARY KEY (library_id, name)
+        );
+        CREATE TABLE templates (
+            id                 TEXT PRIMARY KEY,
+            library_id         TEXT NOT NULL,
+            class_name         TEXT NOT NULL,
+            entity_point_sets  TEXT NOT NULL,
+            centroid_x         REAL NOT NULL,
+            centroid_y         REAL NOT NULL,
+            bbox_xmin          REAL NOT NULL,
+            bbox_ymin          REAL NOT NULL,
+            bbox_xmax          REAL NOT NULL,
+            bbox_ymax          REAL NOT NULL,
+            created_at         REAL NOT NULL,
+            entity_kinds       TEXT
+        );
+        INSERT INTO libraries (id, name, created_at) VALUES ('default', 'Default', 0);
+        """
+    )
+    legacy_classes = [c for c in DEFAULT_CLASSES if c != "FiducialSquare"]
+    now = time.time()
+    for rank, name in enumerate(legacy_classes):
+        conn.execute(
+            "INSERT INTO classes (library_id, name, rank, created_at, match_strategy, bbox_ratio) "
+            "VALUES ('default', ?, ?, ?, 'chamfer', NULL)",
+            (name, rank, now),
+        )
+    conn.commit()
+    conn.close()
+
+    lib = _default_lib(tmp_db)
+    assert "FiducialSquare" in lib.classes
+    cross_idx = lib.classes.index("FiducialCross")
+    square_idx = lib.classes.index("FiducialSquare")
+    assert cross_idx + 1 == square_idx, (
+        f"after migration expected FiducialSquare directly after FiducialCross, "
+        f"got positions {cross_idx} and {square_idx}"
+    )
 
 
 def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
@@ -417,3 +509,147 @@ def test_arbitration_index_rejects_class_in_two_groups():
     )
     with pytest.raises(ValueError, match="appears in two arbitration groups"):
         _build_arbitration_index((g1, g2))
+
+
+# ---- Per-class storage scope (library vs. product) -----------------------
+def test_is_product_scoped_partition():
+    """The 8 design-specific classes return True; library-scoped classes
+    (SMD/Fiducial/Pin-1/2DBarcode) and arbitrary custom classes return False."""
+    for cls in (
+        "Substrate", "Lid", "LidOuter", "LidInner", "DieArea",
+        "C4Ball", "BGABall", "Protrusion",
+    ):
+        assert is_product_scoped(cls) is True, cls
+    for cls in (
+        "SMD-2T", "SMD-3T", "SMD-8T", "SMD-14T",
+        "FiducialCircle", "FiducialCross", "FiducialSquare",
+        "Pin-1", "2DBarcode",
+        "MyMarker",  # arbitrary user-added class
+    ):
+        assert is_product_scoped(cls) is False, cls
+
+
+def test_product_scoped_classes_subset_of_defaults():
+    assert PRODUCT_SCOPED_CLASSES <= set(DEFAULT_CLASSES)
+
+
+def _seeded_store(tmp_db):
+    """Boot a Store + hydrate the default Library so its classes table is
+    fully seeded — needed before exercising raw Store.insert_template /
+    load_library calls."""
+    reg = LibraryRegistry(Store(tmp_db))
+    reg.get(DEFAULT_LIBRARY_ID)  # triggers DEFAULT_CLASSES seeding
+    return reg.store
+
+
+def test_load_library_default_is_library_scope_only(tmp_db):
+    """Without a product_id, load_library returns ONLY library-scoped
+    rows (product_id IS NULL). Product-scoped templates are hidden."""
+    store = _seeded_store(tmp_db)
+    lib_id = DEFAULT_LIBRARY_ID
+    t_lib = Template.from_entities("SMD-2T", [[(0.0, 0.0), (1.0, 0.0)]])
+    t_prod = Template.from_entities("Substrate", [[(0.0, 0.0), (1.0, 0.0)]])
+    store.insert_template(lib_id, t_lib)  # product_id default None
+    store.insert_template(lib_id, t_prod, product_id="p1")
+
+    classes, _configs, templates = store.load_library(lib_id)
+    assert "SMD-2T" in classes
+    assert len(templates.get("SMD-2T", [])) == 1
+    assert len(templates.get("Substrate", [])) == 0
+
+
+def test_load_library_with_product_id_merges_scopes(tmp_db):
+    """With product_id=p1, load_library merges library-scoped rows with
+    p1's product-scoped rows."""
+    store = _seeded_store(tmp_db)
+    lib_id = DEFAULT_LIBRARY_ID
+    t_lib = Template.from_entities("SMD-2T", [[(0.0, 0.0), (1.0, 0.0)]])
+    t_prod = Template.from_entities("Substrate", [[(0.0, 0.0), (1.0, 0.0)]])
+    store.insert_template(lib_id, t_lib)
+    store.insert_template(lib_id, t_prod, product_id="p1")
+
+    _classes, _configs, templates = store.load_library(lib_id, product_id="p1")
+    assert len(templates.get("SMD-2T", [])) == 1
+    assert len(templates.get("Substrate", [])) == 1
+
+
+def test_load_library_other_product_does_not_see_substrate(tmp_db):
+    """Product p2 does not see product p1's Substrate template."""
+    store = _seeded_store(tmp_db)
+    lib_id = DEFAULT_LIBRARY_ID
+    t_prod = Template.from_entities("Substrate", [[(0.0, 0.0), (1.0, 0.0)]])
+    store.insert_template(lib_id, t_prod, product_id="p1")
+
+    _classes, _configs, templates = store.load_library(lib_id, product_id="p2")
+    assert len(templates.get("Substrate", [])) == 0
+
+
+def test_insert_template_keyword_product_id_roundtrips(tmp_db):
+    """A template inserted with product_id="p1" comes back via
+    load_library(product_id="p1") but not via load_library() alone."""
+    store = _seeded_store(tmp_db)
+    lib_id = DEFAULT_LIBRARY_ID
+    t = Template.from_entities("C4Ball", [[(0.0, 0.0), (1.0, 0.0)]])
+    store.insert_template(lib_id, t, product_id="p1")
+
+    _, _, lib_only = store.load_library(lib_id)
+    assert len(lib_only.get("C4Ball", [])) == 0
+
+    _, _, with_p1 = store.load_library(lib_id, product_id="p1")
+    assert len(with_p1.get("C4Ball", [])) == 1
+    assert with_p1["C4Ball"][0].id == t.id
+
+
+def test_migration_purges_legacy_library_scope_product_class_rows(tmp_db):
+    """A pre-class-scope DB has product_id IS NULL rows for product-scoped
+    classes. First boot SHALL drop them. Subsequent boots SHALL be no-ops."""
+    import sqlite3
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+
+    # First Store() call initialises the schema + runs _migrate(). After
+    # that we sneak in a legacy-shape row (Substrate with product_id IS NULL)
+    # to mimic what was on disk before this change shipped.
+    Store(tmp_db)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            "INSERT INTO templates "
+            "(id, library_id, class_name, entity_point_sets, centroid_x, centroid_y, "
+            " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds, product_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+            (
+                str(_uuid.uuid4()), DEFAULT_LIBRARY_ID, "Substrate",
+                _json.dumps([[(0.0, 0.0), (1.0, 0.0)]]),
+                0.0, 0.0, -1.0, -1.0, 1.0, 1.0, _time.time(),
+            ),
+        )
+        conn.commit()
+
+    # Confirm the row was inserted.
+    with sqlite3.connect(str(tmp_db)) as conn:
+        n_before = conn.execute(
+            "SELECT COUNT(*) FROM templates "
+            "WHERE class_name = 'Substrate' AND product_id IS NULL"
+        ).fetchone()[0]
+    assert n_before == 1
+
+    # Re-open: migration purges the orphan row.
+    Store(tmp_db)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        n_after = conn.execute(
+            "SELECT COUNT(*) FROM templates "
+            "WHERE class_name = 'Substrate' AND product_id IS NULL"
+        ).fetchone()[0]
+    assert n_after == 0
+
+
+def test_migration_purge_is_idempotent(tmp_db):
+    """Booting twice in succession leaves the templates table identical
+    on the second boot."""
+    Store(tmp_db)
+    Store(tmp_db)  # idempotent — should not raise or change anything
+
+    with __import__("sqlite3").connect(str(tmp_db)) as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(templates)").fetchall()]
+    assert "product_id" in cols

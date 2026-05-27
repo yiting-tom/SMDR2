@@ -514,6 +514,7 @@ const CLASS_COLORS = {
   "Pin-1":        "#f48fb1",  // soft pink
   "FiducialCircle": "#4dd0e1",  // teal
   "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
+  "FiducialSquare": "#00acc1",  // even darker teal — sibling of FiducialCircle / FiducialCross
   "2DBarcode":      "#c6ff00",  // lime
 };
 const FALLBACK_CLASS_COLOR = "#888888";

@@ -23,7 +23,7 @@ def test_classes_endpoint_lists_defaults(monkeypatch, tmp_path):
         classes = r.json()["classes"]
         names = {c["name"] for c in classes}
         # Default classes should be present.
-        assert {"SMD-2T", "C4Ball", "BGABall", "Substrate"}.issubset(names)
+        assert {"SMD-2T", "C4Ball", "BGABall", "Substrate", "FiducialSquare"}.issubset(names)
 
 
 def test_files_endpoint_returns_a_list():
@@ -87,6 +87,104 @@ def test_warm_shapes_endpoint_on_missing_file_404s():
     with TestClient(app) as client:
         r = client.post("/api/files/nonexistent/warm-shapes")
         assert r.status_code == 404
+
+
+# ---- Per-class storage scope routing (library vs. product) --------------
+def test_add_template_for_file_routes_library_scoped(tmp_path, monkeypatch):
+    """Library-scoped class lands with product_id IS NULL even when a
+    product_id is supplied by the caller."""
+    monkeypatch.setenv("SMDR2_DATA_DIR", str(tmp_path))
+    from app.library import (
+        DEFAULT_LIBRARY_ID, LibraryRegistry, Store, Template,
+    )
+    db = tmp_path / "library.sqlite"
+    reg = LibraryRegistry(Store(db))
+    lib = reg.get(DEFAULT_LIBRARY_ID)
+    tmpl = Template.from_entities("SMD-2T", [[(0.0, 0.0), (1.0, 0.0)]])
+    lib.add_template_for_file(tmpl, product_id="some-product")
+
+    import sqlite3
+    with sqlite3.connect(str(db)) as conn:
+        row = conn.execute(
+            "SELECT product_id FROM templates WHERE id = ?",
+            (tmpl.id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] is None  # library-scoped
+
+
+def test_add_template_for_file_routes_product_scoped(tmp_path, monkeypatch):
+    """Product-scoped class lands with product_id = the supplied value."""
+    monkeypatch.setenv("SMDR2_DATA_DIR", str(tmp_path))
+    from app.library import (
+        DEFAULT_LIBRARY_ID, LibraryRegistry, Store, Template,
+    )
+    db = tmp_path / "library.sqlite"
+    reg = LibraryRegistry(Store(db))
+    lib = reg.get(DEFAULT_LIBRARY_ID)
+    tmpl = Template.from_entities("Substrate", [[(0.0, 0.0), (1.0, 0.0)]])
+    lib.add_template_for_file(tmpl, product_id="p1")
+
+    import sqlite3
+    with sqlite3.connect(str(db)) as conn:
+        row = conn.execute(
+            "SELECT product_id FROM templates WHERE id = ?",
+            (tmpl.id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "p1"
+
+
+def test_commit_product_scoped_class_on_orphan_file_400s():
+    """A file with no product binding cannot commit a product-scoped
+    class — the API rejects with HTTP 400 explaining the reason."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.files import FILE_STORE, READY
+
+    file_id = "orphan-commit-test"
+    # Register a file with NO product binding (product_id default None).
+    FILE_STORE.register(file_id, f"{file_id}.dxf", 1, initial_status=READY)
+    with TestClient(app) as client:
+        r = client.post(
+            f"/api/files/{file_id}/commit",
+            json={"handles": ["A"], "class_name": "Substrate"},
+        )
+    assert r.status_code == 400, r.text
+    body = r.json()
+    assert "not bound to a product" in body["detail"]
+    assert "Substrate" in body["detail"]
+
+
+def test_scan_all_isolates_product_scoped_templates(tmp_path, monkeypatch):
+    """Two products share a library. A Substrate template committed
+    under product p1 SHALL NOT be visible to a file in product p2's
+    Store.load_library call. SMD-2T (library-scoped) IS visible to both.
+
+    Tests the underlying scope rule the scan-all endpoint depends on
+    without spinning up a real preprocessed file."""
+    monkeypatch.setenv("SMDR2_DATA_DIR", str(tmp_path))
+    from app.library import (
+        DEFAULT_LIBRARY_ID, LibraryRegistry, Store, Template,
+    )
+    db = tmp_path / "library.sqlite"
+    reg = LibraryRegistry(Store(db))
+    lib = reg.get(DEFAULT_LIBRARY_ID)
+
+    t_smd = Template.from_entities("SMD-2T", [[(0.0, 0.0), (1.0, 0.0)]])
+    t_sub = Template.from_entities("Substrate", [[(0.0, 0.0), (1.0, 0.0)]])
+    lib.add_template_for_file(t_smd, product_id="p1")
+    lib.add_template_for_file(t_sub, product_id="p1")
+
+    # File in p1 sees both.
+    _, _, p1_view = reg.store.load_library(DEFAULT_LIBRARY_ID, product_id="p1")
+    assert len(p1_view.get("SMD-2T", [])) == 1
+    assert len(p1_view.get("Substrate", [])) == 1
+
+    # File in p2 sees only SMD-2T (library-scoped).
+    _, _, p2_view = reg.store.load_library(DEFAULT_LIBRARY_ID, product_id="p2")
+    assert len(p2_view.get("SMD-2T", [])) == 1
+    assert len(p2_view.get("Substrate", [])) == 0
 
 
 def test_side_regions_patch_persists_and_normalises(tmp_path, monkeypatch):

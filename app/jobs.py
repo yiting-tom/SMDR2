@@ -71,6 +71,7 @@ def _preprocess_worker(
     transient_primitives: str | None = None,
     dev_overrides_snapshot: dict[str, Any] | None = None,
     user_unit_override: str | None = None,
+    product_id: str | None = None,
 ) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly.
     import math
@@ -175,7 +176,9 @@ def _preprocess_worker(
     )
 
     store = Store(DB_PATH)
-    classes, configs_by_class, templates_by_class = store.load_library(library_id)
+    classes, configs_by_class, templates_by_class = store.load_library(
+        library_id, product_id=product_id
+    )
     out: dict[str, list[list[str]]] = {}
     # Iterate the `classes` list (deterministic order) and look up
     # templates via `.get(cls, [])` — same pattern `_save_match_worker`
@@ -295,6 +298,7 @@ def submit_preprocess(
     library_id: str = "default",
     selected_layers: list[str] | None = None,
     user_unit_override: str | None = None,
+    product_id: str | None = None,
 ) -> str:
     """Submit a preprocess job. When `user_unit_override` is None,
     the worker reads the file row's persisted override (set in a
@@ -335,6 +339,7 @@ def submit_preprocess(
         str(transient),
         _current_dev_overrides() or None,
         user_unit_override,
+        product_id,
     )
     fut.add_done_callback(lambda f: _on_preprocess_done(job_id, f))
     with _lock:
@@ -377,6 +382,7 @@ def submit_unit_override_preprocess(file_id: str, unit: str) -> str:
         library_id=rec.library_id,
         selected_layers=rec.selected_layers,
         user_unit_override=unit,
+        product_id=rec.product_id,
     )
 
 
@@ -732,7 +738,7 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
             f"library {rec.library_id!r} not registered in worker"
         )
     classes, configs_by_class, templates_by_class = store.load_library(
-        rec.library_id
+        rec.library_id, product_id=rec.product_id
     )
     pp = parsed_path(file_id)
     if not pp.exists():

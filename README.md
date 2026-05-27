@@ -206,7 +206,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | 常數 | 行 | 作用 |
 |---|---|---|
-| `DEFAULT_CLASSES` | 32 | 新 library 自動 seed 的 16 個類別清單（Substrate / Pin-1 / Lid / LidOuter / LidInner / DieArea / FiducialCircle / FiducialCross / SMD-2T / C4Ball / BGABall / Protrusion / 2DBarcode / SMD-3T / SMD-8T / SMD-14T）|
+| `DEFAULT_CLASSES` | 32 | 新 library 自動 seed 的 17 個類別清單（Substrate / Pin-1 / Lid / LidOuter / LidInner / DieArea / FiducialCircle / FiducialCross / FiducialSquare / SMD-2T / C4Ball / BGABall / Protrusion / 2DBarcode / SMD-3T / SMD-8T / SMD-14T）|
 | `DEPRECATED_CLASSES` | 53 | 已停用但歷史 DB 可能還有 — migration 會清除 |
 | `CLASS_JSON_KEY` | 59 | 顯示名 → match JSON 內 snake_case key 對照 |
 | `LEGACY_CLASS_RENAME` | 80 | 一次性 migration：舊 class 名 → 新 ID |

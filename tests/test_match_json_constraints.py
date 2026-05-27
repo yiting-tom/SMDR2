@@ -25,15 +25,25 @@ class _FakeFindResult:
     matches: list[MatchResult]
 
 
-def _register_file_with_rects(monkeypatch, file_id, *, top, bottom, side):
+def _register_file_with_rects(
+    monkeypatch, file_id, *, top, bottom, side, product_id="test-product",
+):
     """Register a stub file in READY status with the given view
     rectangles. ``save_match_json`` requires ``status == ready_to_match``
-    via ``_resolve_file``."""
+    via ``_resolve_file``.
+
+    The file is bound to ``product_id`` so the matcher can see
+    product-scoped templates (C4Ball, BGABall, …) committed under the
+    same synthetic product id by the test fixtures.
+    """
     from app.files import FILE_STORE, READY
     from fastapi.testclient import TestClient
     from app.main import app
 
-    FILE_STORE.register(file_id, f"{file_id}.dxf", 1, initial_status=READY)
+    FILE_STORE.register(
+        file_id, f"{file_id}.dxf", 1,
+        initial_status=READY, product_id=product_id,
+    )
     with TestClient(app) as client:
         r = client.patch(
             f"/api/files/{file_id}/side-regions",
@@ -116,8 +126,10 @@ def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class,
     # shape used by the production worker.
     _orig_load = app.library.Store.load_library
 
-    def _wrapped_load(self, library_id):
-        classes, configs, templates = _orig_load(self, library_id)
+    def _wrapped_load(self, library_id, *, product_id=None):
+        classes, configs, templates = _orig_load(
+            self, library_id, product_id=product_id
+        )
 
         class _TrackingDict(dict):
             def get(_self, key, default=None):
@@ -156,26 +168,32 @@ def _wrap_templates_of(lib):
     lib.templates_of = wrapped
 
 
-def _make_lib_with_constrained_templates(monkeypatch):
+def _make_lib_with_constrained_templates(monkeypatch, product_id="test-product"):
     """Create a fresh library with one C4Ball and one BGABall template,
-    plus one SMD-2T (unconstrained) for control. Returns library_id."""
+    plus one SMD-2T (unconstrained) for control. C4Ball and BGABall
+    are product-scoped, so their templates are persisted under the
+    given ``product_id`` — the test file in `_register_file_with_rects`
+    binds to the same product so the matcher's `load_library` call
+    surfaces them. Returns library_id."""
     lib = LIBRARIES.create("test-constraints")
     # Each template is just a single-point cloud; the matcher is faked
     # so the geometry doesn't matter.
     for cls in ("C4Ball", "BGABall", "SMD-2T"):
         t = Template.from_entities(cls, [[(0.0, 0.0), (1.0, 0.0)]])
-        lib.add_template(t)
+        lib.add_template_for_file(t, product_id=product_id)
     _wrap_templates_of(lib)
     return lib.library_id
 
 
-def _make_lib_with_arbitration_classes(monkeypatch):
+def _make_lib_with_arbitration_classes(monkeypatch, product_id="test-product"):
     """A library that has BOTH BGABall and FiducialCircle templates so
-    arbitration has both members populated."""
+    arbitration has both members populated. BGABall is product-scoped
+    so it's persisted under ``product_id``; FiducialCircle is
+    library-scoped so its persisted row has product_id IS NULL."""
     lib = LIBRARIES.create("test-arbitration")
     for cls in ("BGABall", "FiducialCircle"):
         t = Template.from_entities(cls, [[(0.0, 0.0), (1.0, 0.0)]])
-        lib.add_template(t)
+        lib.add_template_for_file(t, product_id=product_id)
     _wrap_templates_of(lib)
     return lib.library_id
 
@@ -812,6 +830,9 @@ def test_preprocess_prematch_uses_arbitration_like_save_match(
         transient_primitives=str(transient),
         dev_overrides_snapshot=None,
         user_unit_override=None,
+        # Same synthetic product the file fixture binds to and the
+        # library fixture persisted BGABall templates under.
+        product_id="test-product",
     )
     # call_log captured for future assertions; not directly asserted on
     # because the iteration order over `lib.classes` is the same in

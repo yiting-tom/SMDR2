@@ -53,6 +53,7 @@ from app.library import (
     build_handle_index,
     collect_entity_kinds,
     collect_entity_points,
+    is_product_scoped,
 )
 from app.matching import (
     EntityShape,
@@ -468,6 +469,7 @@ async def upload_product_file(
         # primitive" signal — no new code path inside the worker.
         job_id = jobs.submit_preprocess(
             fid, library_id=product.library_id, selected_layers=None,
+            product_id=product.id,
         )
     else:
         job_id = jobs.submit_discover_layers(fid)
@@ -525,6 +527,7 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
         file_id,
         library_id=req.library_id,
         selected_layers=rec.selected_layers,
+        product_id=rec.product_id,
     )
     return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
 
@@ -699,6 +702,7 @@ async def confirm_layers(file_id: str, req: LayersConfirmRequest) -> dict:
         file_id,
         library_id=rec.library_id,
         selected_layers=ordered,
+        product_id=rec.product_id,
     )
     return {
         "file_id": file_id,
@@ -849,6 +853,13 @@ async def classes_default(file_id: str | None = None,
 
 @app.get("/api/libraries/{library_id}/templates")
 async def list_templates_for_library(library_id: str) -> dict:
+    """Library-admin view: returns ONLY library-scoped templates
+    (product_id IS NULL). Product-scoped templates (Substrate, Lid,
+    DieArea, Ball, Protrusion) are intentionally invisible here — they
+    belong to a specific product, not the library. The cached
+    `Library` instance is hydrated by `Store.load_library(library_id)`
+    with no product_id, so its `all_templates()` cache only ever
+    contains library-scoped rows."""
     if not LIBRARIES.exists(library_id):
         raise HTTPException(status_code=404, detail="library not found")
     lib = LIBRARIES.get(library_id)
@@ -1012,6 +1023,18 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
     rec = _resolve_file(file_id)
+    # Product-scoped classes need a product to land in. A file with no
+    # product binding (legacy uploads, dev fixtures) cannot commit one
+    # — fail loud rather than silently land the template at library
+    # scope where it would leak across every product.
+    if is_product_scoped(req.class_name) and rec.product_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"file is not bound to a product; cannot commit "
+                f"product-scoped class {req.class_name!r}"
+            ),
+        )
     lib = LIBRARIES.get(rec.library_id)
     if req.class_name not in {c["name"] for c in lib.summary()}:
         lib.add_class(req.class_name)
@@ -1027,7 +1050,7 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
         collect_entity_kinds(data["primitives"], handle_index, h) for h in req.handles
     ]
     tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
-    lib.add_template(tmpl)
+    lib.add_template_for_file(tmpl, product_id=rec.product_id)
     return {
         "template_id": tmpl.id,
         "class_name": tmpl.class_name,
@@ -1054,7 +1077,20 @@ async def scan_all(file_id: str) -> dict:
     `data.by_class[cls]` exactly as before.
     """
     rec = _resolve_file(file_id)
-    lib = LIBRARIES.get(rec.library_id)
+    # Scope-aware load: merge library-scoped templates with this file's
+    # product-scoped templates. Bypass the cached `Library` (LIBRARIES.get)
+    # because that cache is hydrated once at library scope only and would
+    # not see product-scoped Substrate/Lid/DieArea/Ball templates committed
+    # by other files in the same product. The cache is intentionally
+    # library-only for admin views (`/api/libraries/{id}/templates`); the
+    # matcher reads through this fresh Store call instead.
+    if LIBRARIES.get(rec.library_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"library {rec.library_id!r} not registered"
+        )
+    classes, configs_by_class, templates_by_class = LIBRARIES.store.load_library(
+        rec.library_id, product_id=rec.product_id
+    )
     _, shapes = _shapes_for(file_id)
 
     # View-rect dispatch (mirror of save_match_json). Used by
@@ -1069,15 +1105,17 @@ async def scan_all(file_id: str) -> dict:
     # save_match_json builds before persistence.
     out: dict[str, list[list[str]]] = {}
 
-    for cls_name in lib.classes:
+    for cls_name in classes:
         # Skip-when-impossible: class is view-constrained and none of
         # its allowed view rects is set on the file → every match would
         # be dropped by split_matches_by_side anyway. Pure perf gate.
         allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
         if allowed is not None and not any(rect_for[v] is not None for v in allowed):
             continue
-        strategy, bbox_ratio = lib.strategy_of(cls_name)
-        for idx, tmpl in enumerate(lib.templates_of(cls_name)):
+        cfg = configs_by_class.get(cls_name, {})
+        strategy = cfg.get("match_strategy") or "chamfer"
+        bbox_ratio = cfg.get("bbox_ratio")
+        for idx, tmpl in enumerate(templates_by_class.get(cls_name, [])):
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,

@@ -211,7 +211,7 @@ def test_submit_unit_override_preprocess_writes_row_immediately(tmp_path, monkey
     fs.register("ovx", "o.dxf", 1)
     # Stub submit_preprocess so we don't actually spin up a worker.
     captured = {}
-    def fake_submit(file_id, library_id="default", selected_layers=None, user_unit_override=None):
+    def fake_submit(file_id, library_id="default", selected_layers=None, user_unit_override=None, product_id=None):
         captured["file_id"] = file_id
         captured["unit"] = user_unit_override
         return "fake-job-id"

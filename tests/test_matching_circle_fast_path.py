@@ -327,23 +327,33 @@ def test_circle_fast_path_is_fast():
 
 # ---- entity_kinds round-trip through SQLite -----------------------------
 def test_entity_kinds_roundtrips_through_sqlite(tmp_db):
-    """A committed template's entity_kinds survives a store reload."""
+    """A committed template's entity_kinds survives a store reload.
+
+    Use a library-scoped class (FiducialCircle) so the surviving row's
+    product_id IS NULL and the library-admin reload sees it. The
+    entity_kinds round-trip is the only thing under test here; class
+    choice is incidental."""
     store = Store(tmp_db)
     lib = LibraryRegistry(store).get(DEFAULT_LIBRARY_ID)
     tpl_points = _sample_circle(0.0, 0.0, 1.0)
-    tpl = Template.from_entities("BGABall", [tpl_points], entity_kinds=["circle"])
+    tpl = Template.from_entities("FiducialCircle", [tpl_points], entity_kinds=["circle"])
     lib.add_template(tpl)
 
     # Reload from disk.
     lib2 = LibraryRegistry(Store(tmp_db)).get(DEFAULT_LIBRARY_ID)
-    reloaded = lib2.templates_of("BGABall")
+    reloaded = lib2.templates_of("FiducialCircle")
     assert len(reloaded) == 1
     assert reloaded[0].entity_kinds == ["circle"]
 
 
 def test_legacy_template_loads_with_null_kinds(tmp_db):
     """A row inserted with entity_kinds=NULL (simulating pre-migration data)
-    parses back as [None, ...]."""
+    parses back as [None, ...].
+
+    Use a library-scoped class (FiducialCircle) so the row's null
+    product_id is legitimate and survives the boot purge. The test's
+    point is the entity_kinds=NULL → [None] fallback; class choice is
+    incidental."""
     import sqlite3
     import json as _json
     import time as _time
@@ -360,7 +370,7 @@ def test_legacy_template_loads_with_null_kinds(tmp_db):
             " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             (
-                str(_uuid.uuid4()), DEFAULT_LIBRARY_ID, "BGABall",
+                str(_uuid.uuid4()), DEFAULT_LIBRARY_ID, "FiducialCircle",
                 _json.dumps(raw_points), 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, _time.time(),
             ),
         )
@@ -368,7 +378,7 @@ def test_legacy_template_loads_with_null_kinds(tmp_db):
 
     # Reload via Library and confirm fallback.
     lib = LibraryRegistry(Store(tmp_db)).get(DEFAULT_LIBRARY_ID)
-    reloaded = lib.templates_of("BGABall")
+    reloaded = lib.templates_of("FiducialCircle")
     assert len(reloaded) == 1
     assert reloaded[0].entity_kinds == [None]
 
