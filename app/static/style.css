@@ -1114,6 +1114,16 @@ body.dashboard header .spacer { flex: 1; }
   font-size: 0.78rem;
   padding: 0.4rem 0.5rem;
 }
+/* Sub-rules with no `from`/`to`/`tol` cannot be located in the
+   viewer — render them dimmed so the operator sees at a glance the
+   row is informational (no link, no click affordance). */
+.rule-result-card .subrules li.subrule-text-only {
+  opacity: 0.7;
+  cursor: default;
+}
+.rule-result-card .subrules li.subrule-text-only:hover {
+  background: #0f1318;
+}
 
 #upload-zone {
   border: 2px dashed #2a3340;

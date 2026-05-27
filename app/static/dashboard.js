@@ -908,6 +908,15 @@ $ruleResultsModal.addEventListener("click", (e) => {
   if (e.target.matches("[data-close]")) $ruleResultsModal.hidden = true;
 });
 
+// A sub-rule is "locatable" iff it carries at least one handle field
+// the viewer can highlight (from / to / tol). Per the DRC integration
+// contract every well-formed sub-rule SHOULD be locatable, but the
+// dashboard stays defensive against malformed emits so a click on a
+// no-handles row doesn't open the viewer to an empty highlight.
+function isLocatable(sub) {
+  return Boolean(sub && (sub.from || sub.to || sub.tol));
+}
+
 function showRuleResults(product, data) {
   $ruleResultsTitle.textContent = `Rule Check — ${product.name}`;
   $ruleResultsSummary.textContent =
@@ -919,15 +928,30 @@ function showRuleResults(product, data) {
     card.className = "rule-result-card";
     const status = rule.pass ? "✓" : "✗";
     const statusClass = rule.pass ? "pass" : "fail";
+
+    // Affordance chip: tells the operator at a glance how many of this
+    // rule's sub-rules can be located in the viewer vs. are text-only.
+    const subs = rule.rules || [];
+    let chipText, chipTitle;
+    if (subs.length === 0) {
+      chipText = "ℹ no locator";
+      chipTitle = "no sub-rules emitted";
+    } else {
+      const nLocatable = subs.filter(isLocatable).length;
+      const nTextOnly = subs.length - nLocatable;
+      chipText = `🎯 ${nLocatable} · ℹ ${nTextOnly}`;
+      chipTitle = `${nLocatable} locatable · ${nTextOnly} text-only sub-rule(s)`;
+    }
+
     card.innerHTML =
       `<header>` +
         `<span class="status ${statusClass}">${status}</span>` +
         `<span class="name">${escapeHtml(name)}</span>` +
         `<span class="text">${escapeHtml(rule.text || "")}</span>` +
+        `<span class="rescaled-pill" title="${escapeHtml(chipTitle)}">${escapeHtml(chipText)}</span>` +
       `</header>` +
       `<ol class="subrules"></ol>`;
     const subList = card.querySelector(".subrules");
-    const subs = rule.rules || [];
     if (!subs.length) {
       const li = document.createElement("li");
       li.className = "empty";
@@ -946,14 +970,27 @@ function showRuleResults(product, data) {
         const siblings = product.files_by_role_all?.[sub.part] ?? [];
         const file = (sub.file_id && siblings.find(f => f.id === sub.file_id))
                   || product.files_by_role[sub.part];
+        const locatable = isLocatable(sub);
         const li = document.createElement("li");
-        const viewBtn = file
-          ? `<a class="view-link" href="/viewer/${file.id}?rule=${encodeURIComponent(name)}&idx=${idx}">View in ${sub.part} →</a>`
-          : `<span class="no-file">${sub.part} not uploaded</span>`;
+        // Three branches: (a) file not uploaded → existing no-file
+        // message, no icon; (b) locatable → 🎯 + clickable link;
+        // (c) text-only → ℹ + dimmed row, no link.
+        let trailing;
+        let textPrefix = "";
+        if (!file) {
+          trailing = `<span class="no-file">${escapeHtml(sub.part)} not uploaded</span>`;
+        } else if (locatable) {
+          textPrefix = "🎯 ";
+          trailing = `<a class="view-link" href="/viewer/${file.id}?rule=${encodeURIComponent(name)}&idx=${idx}">View in ${escapeHtml(sub.part)} →</a>`;
+        } else {
+          textPrefix = "ℹ ";
+          trailing = "";
+          li.classList.add("subrule-text-only");
+        }
         li.innerHTML =
           `<span class="part">${escapeHtml(sub.part)}</span>` +
-          `<span class="text">${escapeHtml(sub.text || "")}</span>` +
-          viewBtn;
+          `<span class="text">${escapeHtml(textPrefix + (sub.text || ""))}</span>` +
+          trailing;
         subList.appendChild(li);
       });
     }
