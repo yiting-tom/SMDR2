@@ -106,6 +106,7 @@ def _preprocess_worker(
         and transient_primitives
         and Path(transient_primitives).exists()
     )
+    recover_notes: dict[str, Any] | None = None
     if use_cache:
         with open(transient_primitives) as f:
             cached = json.load(f)
@@ -114,13 +115,22 @@ def _preprocess_worker(
         background = cached.get("background", "#ffffff")
         insunits = cached.get("insunits")
         applied_scale = float(cached.get("applied_scale", 1.0))
+        # Phase 1 stashes the recover audit if it used the recover path;
+        # propagate it so Phase 2's persistence path keeps the same notes
+        # even when we never re-open the DXF in this process.
+        cached_notes = cached.get("recover_notes")
+        if isinstance(cached_notes, dict):
+            recover_notes = cached_notes
     else:
-        out = flatten_for_render(src, user_unit_override=user_unit_override)
+        out = flatten_for_render(
+            src, user_unit_override=user_unit_override, file_id=file_id,
+        )
         primitives = out.primitives
         bbox = out.bbox
         background = out.background
         insunits = out.insunits
         applied_scale = out.applied_scale
+        recover_notes = out.recover_notes
 
     # 2. Apply layer filter (None = legacy, keep everything).
     if selected_layers is not None:
@@ -208,6 +218,7 @@ def _preprocess_worker(
         "detector_factor": detector_factor,
         "user_unit_override_requested": user_unit_override,
         "prematch_total": sum(len(v) for v in by_class.values()),
+        "dxf_recover_notes": recover_notes,
     }
 
 
@@ -345,6 +356,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
         insunits=result.get("insunits"),
         applied_scale=float(result.get("applied_scale", 1.0)),
     )
+    FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
     if factor_changed:
         _invalidate_match_after_rescale(file_id)
     _maybe_clear_redundant_unit_override(file_id, result)
@@ -403,7 +415,7 @@ def _discover_layers_worker(
         sanitize_layer_name,
     )
 
-    out = flatten_for_render(src)
+    out = flatten_for_render(src, file_id=file_id)
     by_layer = group_primitives_by_layer(out.primitives)
 
     preview = Path(preview_dir)
@@ -434,12 +446,15 @@ def _discover_layers_worker(
     (preview / "layers.json").write_text(json.dumps(manifest))
 
     # Transient primitives cache — Phase 2 picks it up to skip re-parsing.
+    # The `recover_notes` carry-over lets Phase 2 persist the audit summary
+    # without re-opening the DXF when it reuses this cache.
     (preview / "primitives.json").write_text(json.dumps({
         "primitives": out.primitives,
         "bbox": out.bbox,
         "background": out.background,
         "insunits": out.insunits,
         "applied_scale": out.applied_scale,
+        "recover_notes": out.recover_notes,
     }))
 
     return {
@@ -873,6 +888,7 @@ def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
         insunits=result.get("insunits"),
         applied_scale=float(result.get("applied_scale", 1.0)),
     )
+    FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
     if factor_changed:
         _invalidate_match_after_rescale(file_id)
     _maybe_clear_redundant_unit_override(file_id, result)

@@ -73,7 +73,12 @@ CREATE TABLE IF NOT EXISTS files (
     -- picker. One of 'mm' | 'cm' | 'm' | 'inch' | 'μm', or NULL when
     -- the auto-rescale detector has authority. See
     -- `app.dxf.UNIT_TO_SCALE` for the multiplier table.
-    user_unit_override TEXT
+    user_unit_override TEXT,
+    -- Summary of ezdxf's recover audit, populated only when strict
+    -- mode rejected the file and recover saved it. JSON-encoded dict
+    -- with keys strict_error / n_fixed / n_unrecoverable /
+    -- audit_messages. NULL means the file parsed cleanly via strict.
+    dxf_recover_notes TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -123,6 +128,12 @@ class FileRecord:
     # the multiplier and skips the detector. `None` means detector has
     # authority. The viewer's "set by you" badge keys off this field.
     user_unit_override: str | None = None
+    # Set when this file was opened via ezdxf's recover fallback (strict
+    # mode raised). Shape:
+    # {"strict_error": "<ExcCls>: <msg>", "n_fixed": int,
+    #  "n_unrecoverable": int, "audit_messages": ["<msg>", …]}.
+    # `None` for files that parsed cleanly via strict.
+    dxf_recover_notes: dict | None = None
 
     def to_dict(self) -> dict:
         # When the preprocessor applied a rescale, the persisted bbox is
@@ -170,6 +181,7 @@ class FileRecord:
                 if self.applied_scale != 1.0 else None
             ),
             "user_unit_override": self.user_unit_override,
+            "dxf_recover_notes": self.dxf_recover_notes,
         }
 
 
@@ -349,6 +361,12 @@ class FileStore:
                 self.conn.execute(
                     "ALTER TABLE files ADD COLUMN user_unit_override TEXT"
                 )
+            if "dxf_recover_notes" not in cols:
+                # NULL = file parsed via ezdxf strict mode; any non-NULL is
+                # a JSON-encoded audit summary from the recover fallback.
+                self.conn.execute(
+                    "ALTER TABLE files ADD COLUMN dxf_recover_notes TEXT"
+                )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -458,6 +476,18 @@ class FileStore:
                 (1 if value else 0, file_id),
             )
 
+    def set_dxf_recover_notes(
+        self, file_id: str, notes: dict | None,
+    ) -> None:
+        """Persist the recover-fallback audit summary on the file row.
+        Pass `None` to clear (file parsed cleanly via strict)."""
+        raw = _json.dumps(notes) if notes is not None else None
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET dxf_recover_notes = ? WHERE id = ?",
+                (raw, file_id),
+            )
+
     def list_by_product(self, product_id: str) -> list[FileRecord]:
         with self.lock:
             rows = self.conn.execute(
@@ -560,6 +590,15 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
     top_view_rect = _decode_rect(_get("top_view_rect"))
     bottom_view_rect = _decode_rect(_get("bottom_view_rect"))
     side_view_rect = _decode_rect(_get("side_view_rect"))
+    raw_notes = _get("dxf_recover_notes")
+    dxf_recover_notes: dict | None = None
+    if raw_notes:
+        try:
+            parsed_notes = _json.loads(raw_notes)
+            if isinstance(parsed_notes, dict):
+                dxf_recover_notes = parsed_notes
+        except (ValueError, TypeError):
+            dxf_recover_notes = None
     return FileRecord(
         id=row["id"],
         name=row["name"],
@@ -583,6 +622,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         insunits=_get("insunits"),
         applied_scale=float(_get("applied_scale", 1.0) or 1.0),
         user_unit_override=_get("user_unit_override"),
+        dxf_recover_notes=dxf_recover_notes,
     )
 
 

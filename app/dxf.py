@@ -22,6 +22,7 @@ from typing import Any, Iterable
 
 import ezdxf
 import ezdxf.bbox
+import ezdxf.recover
 import numpy as np
 from ezdxf.addons.drawing import Frontend, RenderContext
 from ezdxf.addons.drawing.backend import BackendInterface
@@ -88,6 +89,13 @@ class RenderOutput:
     # * applied_scale`. `1.0` means "no rescale". See `detect_scale_factor`
     # for the trigger rules.
     applied_scale: float = 1.0
+    # When the source DXF could not be opened in strict mode and ezdxf's
+    # recover path was used instead, this dict summarises what the audit
+    # patched. `None` means the file parsed cleanly via strict — there
+    # is no notion of "recovered with zero fixes". Shape:
+    # {"strict_error": "<ExcCls>: <msg>", "n_fixed": int,
+    #  "n_unrecoverable": int, "audit_messages": ["<msg>", …]}.
+    recover_notes: dict[str, Any] | None = None
 
 
 # Expected packaging-design diagonal range (mm) for the unitless path of
@@ -493,17 +501,68 @@ class JSONBackend(BackendInterface):
         return (self._xmin, self._ymin, self._xmax, self._ymax)
 
 
+def _open_dxf(
+    dxf_path: str | Path, *, file_id: str | None = None,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Open a DXF using strict mode first, falling back to ezdxf's
+    recover mode on parser errors. Returns `(doc, recover_notes)`
+    where `recover_notes` is `None` for strict-OK files and a small
+    summary dict for files that took the recover path.
+
+    Non-parser exceptions (FileNotFoundError, PermissionError, OS
+    errors) propagate unchanged — recover cannot fix those and we'd
+    just confuse the operator with a misleading audit message. When
+    both strict and recover raise, this raises `RuntimeError` whose
+    message includes both exception classes and messages so the
+    worker's error handler can persist a combined diagnostic."""
+    path_str = str(dxf_path)
+    try:
+        return ezdxf.readfile(path_str), None
+    except ezdxf.DXFError as strict_exc:
+        try:
+            doc, auditor = ezdxf.recover.readfile(path_str)
+        except ezdxf.DXFError as recover_exc:
+            raise RuntimeError(
+                f"strict: {type(strict_exc).__name__}: {strict_exc} "
+                f"| recover: {type(recover_exc).__name__}: {recover_exc}"
+            ) from recover_exc
+        fixes = list(auditor.fixes) if auditor is not None else []
+        errors = list(auditor.errors) if auditor is not None else []
+        audit_messages = [str(f) for f in fixes[:5]]
+        recover_notes = {
+            "strict_error": f"{type(strict_exc).__name__}: {strict_exc}",
+            "n_fixed": len(fixes),
+            "n_unrecoverable": len(errors),
+            "audit_messages": audit_messages,
+        }
+        logger.warning(
+            "dxf parse: strict failed → recover ok "
+            "(file_id=%s, path=%s, strict=%s: %s, fixed=%d, "
+            "unrecoverable=%d, sample=%r)",
+            file_id, path_str, type(strict_exc).__name__,
+            str(strict_exc)[:200],
+            recover_notes["n_fixed"], recover_notes["n_unrecoverable"],
+            audit_messages,
+        )
+        return doc, recover_notes
+
+
 def flatten_for_render(
     dxf_path: str | Path,
     user_unit_override: str | None = None,
+    *,
+    file_id: str | None = None,
 ) -> RenderOutput:
     """Parse a DXF file and return drawing primitives + bbox.
 
     When `user_unit_override` is set, the rescale step uses that
     unit's multiplier and skips `detect_scale_factor`. Callers reach
     this path when the operator has used the viewer's unit picker;
-    standard uploads pass `None` and fall through to the detector."""
-    doc = ezdxf.readfile(str(dxf_path))
+    standard uploads pass `None` and fall through to the detector.
+
+    `file_id` is plumbed through to the strict/recover log line —
+    optional because the test suite + ad-hoc callers don't have one."""
+    doc, recover_notes = _open_dxf(dxf_path, file_id=file_id)
     msp = doc.modelspace()
     # HATCH is pure decorative noise in packaging DXFs (solder-mask fills,
     # copper pours) and its boundary edges otherwise reach the backend as
@@ -528,6 +587,7 @@ def flatten_for_render(
         background=backend.background,
         flatten_tolerance=tol,
         insunits=_read_insunits(doc),
+        recover_notes=recover_notes,
     )
     render, _ = _maybe_rescale(render, user_unit_override=user_unit_override)
     return render

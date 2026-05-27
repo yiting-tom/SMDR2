@@ -495,3 +495,88 @@ def test_legacy_db_alter_adds_user_unit_override(tmp_path):
     assert rec.user_unit_override is None
     # Existing applied_scale survived the ALTER.
     assert rec.applied_scale == pytest.approx(25.4)
+
+
+# ---- dxf_recover_notes (recover-fallback persistence) -------------------
+def test_dxf_recover_notes_default_null_on_fresh_register(tmp_db):
+    """A freshly-registered FileRecord SHALL have `dxf_recover_notes == None`
+    and the dashboard payload SHALL carry the same field as `None`."""
+    fs = FileStore(tmp_db)
+    fs.register("rn-fresh", "f.dxf", 1)
+    rec = fs.get("rn-fresh")
+    assert rec.dxf_recover_notes is None
+    assert rec.to_dict()["dxf_recover_notes"] is None
+
+
+def test_dxf_recover_notes_round_trip(tmp_db):
+    """`set_dxf_recover_notes(notes)` persists JSON-encoded; `get()` decodes
+    it back to a dict; `to_dict()` exposes the same shape."""
+    fs = FileStore(tmp_db)
+    fs.register("rn-round", "f.dxf", 1)
+    notes = {
+        "strict_error": "DXFStructureError: invalid header tag",
+        "n_fixed": 12,
+        "n_unrecoverable": 1,
+        "audit_messages": ["msg #1", "msg #2"],
+    }
+    fs.set_dxf_recover_notes("rn-round", notes)
+    rec = fs.get("rn-round")
+    assert rec.dxf_recover_notes == notes
+    assert rec.to_dict()["dxf_recover_notes"] == notes
+    # Clear it back to None.
+    fs.set_dxf_recover_notes("rn-round", None)
+    rec2 = fs.get("rn-round")
+    assert rec2.dxf_recover_notes is None
+
+
+def test_legacy_db_alter_adds_dxf_recover_notes_column(tmp_path):
+    """Open a pre-recover-fallback DB and confirm the ALTER fires and old
+    data survives; new column is NULL on every legacy row."""
+    import sqlite3
+    db_path = tmp_path / "legacy_no_recover_notes.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE files (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            size            INTEGER NOT NULL,
+            uploaded_at     REAL NOT NULL,
+            status          TEXT NOT NULL,
+            error           TEXT,
+            parsed_at       REAL,
+            primitive_count INTEGER,
+            bbox_xmin       REAL,
+            bbox_ymin       REAL,
+            bbox_xmax       REAL,
+            bbox_ymax       REAL,
+            background      TEXT,
+            library_id      TEXT NOT NULL DEFAULT 'default',
+            product_id      TEXT,
+            dxf_role        TEXT,
+            dxf_view        TEXT,
+            match_saved     INTEGER NOT NULL DEFAULT 0,
+            selected_layers TEXT,
+            top_view_rect   TEXT,
+            bottom_view_rect TEXT,
+            side_view_rect  TEXT,
+            insunits        INTEGER,
+            applied_scale   REAL NOT NULL DEFAULT 1.0,
+            user_unit_override TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO files (id, name, size, uploaded_at, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("legacy-rn", "x.dxf", 1, 0.0, "ready_to_match"),
+    )
+    conn.commit()
+    conn.close()
+    fs = FileStore(db_path)
+    cols = [r["name"] for r in fs.conn.execute("PRAGMA table_info(files)")]
+    assert "dxf_recover_notes" in cols
+    rec = fs.get("legacy-rn")
+    # Legacy rows default to NULL — they parsed via strict (or pre-date the
+    # column entirely; either way "no recover audit").
+    assert rec.dxf_recover_notes is None

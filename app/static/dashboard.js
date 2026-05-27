@@ -650,15 +650,30 @@ function appendUnitScaleAnnotation(parent, f) {
     }
     pill.title = title;
     parent.appendChild(pill);
-    return;
-  }
-  if (f.unit_scale_warning) {
+  } else if (f.unit_scale_warning) {
     const badge = document.createElement("span");
     badge.className = "warn-badge";
     badge.textContent = "⚠ unit";
     badge.title = f.unit_scale_warning_detail || "";
     parent.appendChild(badge);
   }
+  // Recover pill — independent of rescale/warning; spec says when both
+  // are present render rescale first then recover, which is the order
+  // of append calls here. Reuses `.rescaled-pill` for the same neutral
+  // informational style.
+  appendRecoverAnnotation(parent, f);
+}
+
+function appendRecoverAnnotation(parent, f) {
+  const notes = f.dxf_recover_notes;
+  if (!notes) return;
+  const pill = document.createElement("span");
+  pill.className = "rescaled-pill";
+  const nFixed = notes.n_fixed ?? 0;
+  const nUnrec = notes.n_unrecoverable ?? 0;
+  pill.textContent = `ℹ recovered (${nFixed}/${nUnrec})`;
+  pill.title = notes.strict_error || "";
+  parent.appendChild(pill);
 }
 
 function fileStatusBits(f) {
