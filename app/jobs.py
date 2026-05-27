@@ -157,26 +157,83 @@ def _preprocess_worker(
     # 4. Pre-match against this file's library (read fresh from SQLite).
     # Per-class (match_strategy, bbox_ratio) governs which matcher pipeline
     # runs for each class's templates.
+    #
+    # We build the per-template `out` dict in the same prefixed-key shape
+    # `save_match_json` uses, then run `arbitrate(...)` over it, then
+    # collapse back to the flat `by_class: {display_name: [handle, ...]}`
+    # shape the prematch JSON contract expects. Without this collapse,
+    # cross-firing classes (e.g. BGABall + FiducialCircle on identical
+    # circle geometry) would each list every handle in their `by_class`
+    # bucket → the viewer's class-toolbar count chip reports inflated
+    # numbers (e.g. FiducialCircle ×17486 when the post-arbitration
+    # save-match output has only 3). Mirrors the same arbitration the
+    # scan-all and save-match-json endpoints already apply.
+    from app.class_arbitration import _parse_key, arbitrate
+    from app.library import (
+        CLASS_ARBITRATION_GROUPS,
+        CLASS_JSON_KEY,
+    )
+
     store = Store(DB_PATH)
-    _, configs_by_class, templates_by_class = store.load_library(library_id)
-    by_class: dict[str, list[str]] = {}
-    for cls_name, templates in templates_by_class.items():
+    classes, configs_by_class, templates_by_class = store.load_library(library_id)
+    out: dict[str, list[list[str]]] = {}
+    # Iterate the `classes` list (deterministic order) and look up
+    # templates via `.get(cls, [])` — same pattern `_save_match_worker`
+    # uses, lets test fakes hook the dict to drive their per-class
+    # find_matches stub.
+    for cls_name in classes:
         cfg = configs_by_class.get(cls_name) or {}
         strategy = cfg.get("match_strategy") or "chamfer"
         bbox_ratio = cfg.get("bbox_ratio")
-        seen: set[str] = set()
-        for tmpl in templates:
+        for idx, tmpl in enumerate(templates_by_class.get(cls_name, [])):
             result = find_matches_from_pointsets(
                 tmpl.entity_point_sets, shapes,
                 entity_kinds=tmpl.entity_kinds,
                 strategy=strategy,
                 bbox_ratio=bbox_ratio,
             )
+            json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
+            base_key = f"{json_cls}.{idx}"
+            # Each match instance is one handle-list. No side-view
+            # prefix at preprocess time — side regions get drawn later,
+            # so we keep keys unprefixed and let arbitrate pool by
+            # snake-class alone (it doesn't require prefixes).
             for m in result.matches:
-                for h in m.handles:
-                    seen.add(h)
-        if seen:
-            by_class[cls_name] = sorted(seen)
+                out.setdefault(base_key, []).append(list(m.handles))
+
+    # Apply the same cross-fire resolution save_match_json runs, but
+    # WITHOUT view-constraint enforcement: side regions aren't drawn
+    # yet at preprocess time (no rects on the file record), so every
+    # instance's `view_prefix` is None — and an arbitrate() with
+    # `enforce_view_constraints=True` would drop every match of a
+    # view-constrained class (BGABall, C4Ball). The pre-arbitration
+    # cross-fire (e.g. BGABall+FiducialCircle on a shared circle
+    # radius) is still resolved; once the operator draws side regions
+    # and runs scan-all / save-match, those flows re-arbitrate WITH
+    # view enforcement and produce the strict outcome.
+    out, _arbitration_counts, _view_drops = arbitrate(
+        out, shapes, CLASS_ARBITRATION_GROUPS,
+        enforce_view_constraints=False,
+    )
+
+    # Collapse arbitrated `out` (keys like `bga_ball.0`) back to the
+    # flat display-name → handles shape the prematch JSON contract
+    # exposes. Reverse the snake → display mapping; classes without an
+    # entry in `CLASS_JSON_KEY` use their display name verbatim.
+    display_by_snake = {v: k for k, v in CLASS_JSON_KEY.items()}
+    by_class_sets: dict[str, set[str]] = {}
+    for key, instance_lists in out.items():
+        parsed = _parse_key(key)
+        if parsed is None:
+            continue
+        _prefix, cls_snake, _idx = parsed
+        cls_display = display_by_snake.get(cls_snake, cls_snake)
+        bucket = by_class_sets.setdefault(cls_display, set())
+        for hl in instance_lists:
+            bucket.update(hl)
+    by_class: dict[str, list[str]] = {
+        k: sorted(v) for k, v in by_class_sets.items()
+    }
 
     Path(prematch_dst).parent.mkdir(parents=True, exist_ok=True)
     with open(prematch_dst, "w") as f:

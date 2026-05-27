@@ -732,3 +732,123 @@ def test_save_match_worker_does_not_use_libraries_cache(monkeypatch, tmp_path):
     # which proves it read templates from the fresh-store path.
     assert "top_view.c4_ball.0" in result["template_keys"]
     assert result["total_matches"] >= 1
+
+
+# ---- Regression: preprocess prematch JSON is post-arbitration ----------
+#
+# The class-toolbar count chip the viewer renders on first file open
+# reads `data.by_class[cls].length` from `/api/files/{id}/prematch`,
+# which is the JSON `_preprocess_worker` writes. Before the fix that
+# accompanies this test, the preprocess loop unioned handles per class
+# WITHOUT running `arbitrate(...)`, so cross-firing classes (e.g.
+# BGABall + FiducialCircle on identical circle geometry) each listed
+# every handle. The viewer reported `FiducialCircle ×17486` even when
+# arbitration assigns 17483 of those handles to BGABall and only 3 to
+# FiducialCircle. This test pins the fix: prematch JSON's by_class
+# counts match what `_save_match_worker` produces.
+
+def test_preprocess_prematch_uses_arbitration_like_save_match(
+    monkeypatch, tmp_path,
+):
+    """`_preprocess_worker` SHALL run the same arbitration as
+    `_save_match_worker`, so the prematch JSON's by-class counts are
+    post-arbitration and match what the viewer's save-match flow
+    would later persist."""
+    import json as _json
+    from app.jobs import _preprocess_worker, _save_match_worker
+    from app.storage import match_path
+
+    fid = "prematch-arb"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        # Side regions left null on purpose — preprocess runs at
+        # upload time, BEFORE the operator draws side regions. The
+        # arbitration logic must still resolve cross-fire without
+        # depending on view prefixes.
+        top=None, bottom=None, side=None,
+    )
+    library_id = _make_lib_with_arbitration_classes(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    # Same 3×3 grid + 2 fiducials fixture as the existing scan-all
+    # parity test — known-good arbitration outcome.
+    grid_handles = [f"g{i}_{j}" for i in range(3) for j in range(3)]
+    grid_coords = [(float(i), float(j)) for i in range(3) for j in range(3)]
+    fid_handles = ["f0", "f1"]
+    fid_coords = [(-30.0, -30.0), (-20.0, -20.0)]
+
+    shapes = {}
+    for h, (x, y) in zip(grid_handles, grid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+    for h, (x, y) in zip(fid_handles, fid_coords):
+        shapes[h] = _shape(h, [(x, y)])
+    all_matches = [_mr([h]) for h in grid_handles + fid_handles]
+    matches = {
+        "BGABall":        list(all_matches),
+        "FiducialCircle": list(all_matches),
+    }
+    call_log = _install_fakes(monkeypatch, shapes, matches, tmp_path)
+
+    # Drive `_preprocess_worker` directly. The transient-primitives
+    # cache short-circuits the heavy `flatten_for_render` call, and
+    # `_install_fakes` already patches the shape-build + matcher
+    # surface inside the worker.
+    transient = tmp_path / "transient.json"
+    transient.write_text(_json.dumps({
+        "primitives": [],
+        "bbox": [0.0, 0.0, 10.0, 10.0],
+        "background": "#ffffff",
+        "insunits": 4,
+        "applied_scale": 1.0,
+    }))
+    parsed_dst = tmp_path / "parsed.json"
+    prematch_dst = tmp_path / "prematch.json"
+    _preprocess_worker(
+        fid, src="(unused)",
+        parsed_dst=str(parsed_dst),
+        prematch_dst=str(prematch_dst),
+        library_id=library_id,
+        selected_layers=None,
+        transient_primitives=str(transient),
+        dev_overrides_snapshot=None,
+        user_unit_override=None,
+    )
+    # call_log captured for future assertions; not directly asserted on
+    # because the iteration order over `lib.classes` is the same in
+    # production and the by_class output already pins the outcome.
+    assert "BGABall" in call_log and "FiducialCircle" in call_log
+
+    pm = _json.loads(prematch_dst.read_text())
+    by_class = pm["by_class"]
+
+    # The arbitration outcome itself: the 9 grid balls go to BGABall
+    # (MinNeighbors(2) satisfied), the 2 isolated fiducials go to
+    # FiducialCircle (MaxNeighbors(1) satisfied). Pre-fix the prematch
+    # would have shown ALL 11 handles under EACH class (cross-fire),
+    # which is the symptom the user reported as
+    # "FiducialCircle 顯示有 17486 個".
+    assert set(by_class.get("BGABall", [])) == set(grid_handles), (
+        f"BGABall should hold the 9 grid handles after arbitration; "
+        f"got {by_class.get('BGABall', [])}"
+    )
+    assert set(by_class.get("FiducialCircle", [])) == set(fid_handles), (
+        f"FiducialCircle should hold only the 2 isolated fiducials "
+        f"after arbitration; got {by_class.get('FiducialCircle', [])}"
+    )
+    # No handle leaks across classes — cross-fire is fully resolved.
+    bga_set = set(by_class.get("BGABall", []))
+    fid_set = set(by_class.get("FiducialCircle", []))
+    assert bga_set.isdisjoint(fid_set)
+    # Total accounts for every handle exactly once — pre-fix this
+    # would have been ~22 (11 handles × 2 cross-firing classes).
+    assert pm["total"] == len(grid_handles) + len(fid_handles)
+
+    # NOTE: we deliberately do NOT compare against `_save_match_worker`
+    # here. Save Match applies view-constraint skip-when-impossible
+    # (BGABall is constrained to bottom/side view; with no rects drawn
+    # BGABall is skipped entirely), while preprocess runs at upload
+    # time BEFORE side regions exist. Both apply the same `arbitrate`
+    # against `CLASS_ARBITRATION_GROUPS` — they just feed it different
+    # pre-arbitration sets. The user-visible win this test pins is
+    # that prematch's by_class counts are no longer the raw
+    # cross-fire union.

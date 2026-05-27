@@ -260,6 +260,8 @@ def arbitrate(
     out: dict[str, list[list[str]]],
     shapes: Mapping[str, object],
     groups: Iterable[ArbitrationGroup],
+    *,
+    enforce_view_constraints: bool = True,
 ) -> tuple[
     dict[str, list[list[str]]],
     dict[str, dict[str, object]],
@@ -274,6 +276,15 @@ def arbitrate(
     - `view_drops`: per-group, per-view-prefix count of instances dropped
       by the view-constraint re-validation; the caller folds this into
       its `side_counts["dropped"]` bucket.
+
+    `enforce_view_constraints` (default True) — at save_match / scan-all
+    time, an arbitrated instance whose new class is view-constrained
+    and whose `view_prefix` doesn't satisfy the constraint is dropped
+    ("strict mode"). At preprocess time, view rects aren't drawn yet
+    so every instance has `view_prefix=None`; the prematch caller
+    passes False to keep the cross-fire resolution without throwing
+    out every constrained-class match. `view_drops` stays empty when
+    False.
     """
     new_out: dict[str, list[list[str]]] = dict(out)  # shallow copy
     group_counts: dict[str, dict[str, object]] = {}
@@ -361,7 +372,9 @@ def arbitrate(
         for inst, new_cls in zip(instances, targets):
             if new_cls != inst.original_class:
                 gc.reassigned_from_match += 1
-            if not is_allowed_view(new_cls, inst.view_prefix):
+            if enforce_view_constraints and not is_allowed_view(
+                new_cls, inst.view_prefix,
+            ):
                 gc.dropped_by_view += 1
                 view_drops.setdefault(label, {})
                 view_drops[label][inst.view_prefix] = (
