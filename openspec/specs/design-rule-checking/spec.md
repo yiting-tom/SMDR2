@@ -17,7 +17,7 @@ Each sub-rule SHALL be a dict with these keys:
 | `part` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` | The role whose viewer should render this annotation. |
 | `file_id` | `str` \| `null` | Full id of the DXF the sub-rule's geometry lives in. |
 | `from` | `handleID` \| `null` | Single source DXF handle, raw / unprefixed. |
-| `to` | `handleID` \| `null` | Single target DXF handle, raw / unprefixed. |
+| `to` | `handleID` \| `list[handleID]` \| `null` | Target DXF handle(s), raw / unprefixed. A single string is a one-target sub-rule; a non-empty list is a fan from `from` to each element. |
 | `text` | `str` | Per-sub-rule message. |
 | `tol` | `handleID` \| `null` | Annotation-only entity to highlight. Independent of `from` / `to` — may be set alone or in combination with them. |
 | `tol_text` | `str` \| `null` | Label to render adjacent to `tol`. Only meaningful when `tol` is set. |
@@ -35,16 +35,27 @@ The shape SHALL satisfy these invariants:
   with both `from` and `tol` null carries no entity to highlight and
   is rejected by the adapter (see "External rule function contract").
 - `to` MAY only be set when `from` is also set. A sub-rule with
-  `to` set but `from` null is rejected by the adapter.
+  `to` set but `from` null is rejected by the adapter, whether `to`
+  is a string or a list.
+- When `to` is a list, it SHALL be non-empty and every element SHALL
+  be a non-empty string handle. `to: []` is rejected by the adapter;
+  emitters that mean "no `to`" SHALL send `null`. Mixed-type lists
+  and lists containing non-string / empty-string entries are
+  rejected.
 - `tol_text` MAY only be set when `tol` is also set.
 
 The viewer SHALL render each sub-rule per these display rules:
 
-- **`from` + `to` both set**: draw a dashed line between the two
+- **`from` + scalar `to` set**: draw a dashed line between the two
   entities along the shortest segment across their geometries
   (vertex-vs-edge perpendicular-foot search, so the line pins to the
   closest actual edges rather than bbox centres); render `text` at
   the midpoint of that segment.
+- **`from` + list `to` set**: for each element `to_i` in the list,
+  draw a dashed segment from `from` to `to_i` using the same
+  shortest-path search as the scalar form. The sub-rule's `text`
+  SHALL render at the midpoint of the **first** segment in the list
+  (i.e. between `from` and `to[0]`), to avoid overlapping labels.
 - **`from` only (no `to`)**: highlight the `from` entity; render
   `text` adjacent to it.
 - **`tol` set**: highlight the `tol` entity. When `tol_text` is also
@@ -71,8 +82,40 @@ The viewer SHALL render each sub-rule per these display rules:
 - **WHEN** a sub-rule has all of `from`, `tol` set to `null`
 - **THEN** the adapter rejects the rule-check result rather than persisting it
 
-#### Scenario: `to` without `from` is invalid
-- **WHEN** a sub-rule sets `to` but leaves `from` null
+#### Scenario: `to` without `from` is invalid (scalar form)
+- **WHEN** a sub-rule sets `to: "AB12"` but leaves `from` null
+- **THEN** the adapter rejects the rule-check result
+
+#### Scenario: `to` list without `from` is invalid
+- **WHEN** a sub-rule sets `to: ["AB12", "CD34"]` but leaves `from` null
+- **THEN** the adapter rejects the rule-check result
+
+#### Scenario: `to` accepts a single string for one-target rules
+- **WHEN** a sub-rule emits `to: "AB12"` with `from: "AA00"`
+- **THEN** the envelope is valid
+- **AND** the viewer renders one dashed segment from `from` to `to`
+  with `text` at its midpoint
+
+#### Scenario: `to` accepts a non-empty list of strings for fan-target rules
+- **WHEN** a sub-rule emits `to: ["AB12", "CD34", "EF56"]` with `from: "AA00"`
+- **THEN** the envelope is valid
+- **AND** the viewer renders three dashed segments — `from`→`AB12`,
+  `from`→`CD34`, `from`→`EF56` — each using the shortest
+  vertex-vs-edge path
+- **AND** the sub-rule's `text` is rendered at the midpoint of the
+  first segment (`from`→`AB12`) only
+
+#### Scenario: Empty list `to: []` is rejected
+- **WHEN** a sub-rule emits `to: []`
+- **THEN** the adapter rejects the rule-check result
+- **AND** the emitter is expected to send `to: null` to mean "no `to`"
+
+#### Scenario: List `to` with a non-string element is rejected
+- **WHEN** a sub-rule emits `to: ["AB12", 42]` (non-string entry)
+- **THEN** the adapter rejects the rule-check result
+
+#### Scenario: List `to` with an empty-string element is rejected
+- **WHEN** a sub-rule emits `to: ["AB12", ""]`
 - **THEN** the adapter rejects the rule-check result
 
 #### Scenario: LID is a valid sub-rule part value
@@ -391,14 +434,19 @@ and SHALL raise on any of:
   `file_id`.
 - A sub-rule that has both `from` and `tol` null (nothing to
   highlight).
-- A sub-rule that sets `to` without `from`.
+- A sub-rule that sets `to` (string or list) without `from`.
+- A sub-rule whose `to` is an empty list `[]`, a list containing a
+  non-string element, or a list containing an empty string.
 - A sub-rule with a non-empty `rules` list missing `text`.
 
 Validation failures SHALL be surfaced as exceptions that propagate
 out of `check_rules` (the worker maps them to job-level errors via
 the existing `error` field on `GET /api/jobs/{job_id}`). The
 adapter SHALL NOT mutate, normalise, or pad the external function's
-output — pass through verbatim once validation succeeds.
+output — pass through verbatim once validation succeeds. In
+particular, the adapter SHALL NOT auto-promote a scalar `to` to a
+one-element list or auto-collapse a one-element list to a scalar:
+the on-the-wire form is preserved.
 
 The adapter SHALL NOT pre-merge per-role Match JSONs, apply
 `<file_id[:8]>:` prefixes, or otherwise transform the bundle before
@@ -425,6 +473,28 @@ boundary; everything the external function needs lives inside it.
 #### Scenario: Adapter rejects `to` without `from`
 - **WHEN** the external function returns a sub-rule with `to: "AB12"` but `from: null`
 - **THEN** `check_rules` raises an exception
+
+#### Scenario: Adapter rejects list `to` without `from`
+- **WHEN** the external function returns a sub-rule with `to: ["AB12", "CD34"]` but `from: null`
+- **THEN** `check_rules` raises an exception
+
+#### Scenario: Adapter rejects empty list `to`
+- **WHEN** the external function returns a sub-rule with `to: []`
+- **THEN** `check_rules` raises an exception
+- **AND** the adapter does NOT silently normalise the empty list to
+  `null`
+
+#### Scenario: Adapter rejects list `to` with a non-string element
+- **WHEN** the external function returns a sub-rule with
+  `to: ["AB12", 42]`
+- **THEN** `check_rules` raises an exception
+
+#### Scenario: Adapter preserves scalar vs list form verbatim
+- **WHEN** the external function returns a sub-rule with `to: "AB12"`
+- **THEN** the persisted `rule_check.json` carries `to: "AB12"`
+  (string), not `to: ["AB12"]` (list)
+- **AND** when the external function returns `to: ["AB12"]`
+  the persisted JSON carries the same one-element list verbatim
 
 #### Scenario: Adapter does not normalise external output
 - **WHEN** the external function returns a valid result

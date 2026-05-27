@@ -22,9 +22,9 @@
 
 ## 4. Manual verification
 
-- [ ] 4.1 With dev mode off (default), open the dashboard and confirm the upload zone shows no "Skip layer picker" checkbox.
-- [ ] 4.2 Enable dev mode via the existing toggle; confirm the checkbox appears, default state matches `localStorage` (unchecked on first run). Tick it, reload the page, confirm it stays ticked.
-- [ ] 4.3 With the checkbox ticked + dev mode on, drag a DXF onto the upload zone. Confirm: DevTools Network shows `skip_layer_pick=true` in the multipart body; the file row never shows `scanning layers` / `pick layers`; the file goes straight to `preprocessing` then `ready_to_match`.
-- [ ] 4.4 With the checkbox unticked + dev mode on, upload the same DXF. Confirm: the form field is NOT in the body; the file goes through the normal Phase 1 / `awaiting_layers` flow.
-- [ ] 4.5 Turn dev mode off while the checkbox was previously ticked; upload a file. Confirm: no `skip_layer_pick` in the request body; flow is the normal one. Turn dev mode back on; confirm the checkbox renders re-ticked.
-- [ ] 4.6 Multi-file batch: drop 5 DXFs at once with the checkbox ticked + dev mode on. Confirm all 5 go straight to preprocessing without any of them ever hitting `awaiting_layers`.
+- [x] 4.1 With dev mode off (default), open the dashboard and confirm the upload zone shows no "Skip layer picker" checkbox.
+- [x] 4.2 Enable dev mode via the existing toggle; confirm the checkbox appears, default state matches `localStorage` (unchecked on first run). Tick it, reload the page, confirm it stays ticked.
+- [x] 4.3 With the checkbox ticked + dev mode on, drag a DXF onto the upload zone. Confirm: DevTools Network shows `skip_layer_pick=true` in the multipart body; the file row never shows `scanning layers` / `pick layers`; the file goes straight to `preprocessing` then `ready_to_match`.
+- [x] 4.4 With the checkbox unticked + dev mode on, upload the same DXF. Confirm: the form field is NOT in the body; the file goes through the normal Phase 1 / `awaiting_layers` flow.
+- [x] 4.5 Turn dev mode off while the checkbox was previously ticked; upload a file. Confirm: no `skip_layer_pick` in the request body; flow is the normal one. Turn dev mode back on; confirm the checkbox renders re-ticked.
+- [x] 4.6 Multi-file batch: drop 5 DXFs at once with the checkbox ticked + dev mode on. Confirm all 5 go straight to preprocessing without any of them ever hitting `awaiting_layers`.

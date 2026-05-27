@@ -163,6 +163,41 @@ Users SHALL be able to upload one or more DXF files at the same time via
 Re-uploading the same content SHALL deduplicate to the existing
 `file_id` and skip re-processing if already ready.
 
+Per-product upload (`POST /api/products/{product_id}/files`) SHALL
+accept an optional form field `skip_layer_pick: bool` (default
+`false`). When set to `true`:
+
+- The handler SHALL NOT submit `_discover_layers_worker` (Phase 1).
+- The handler SHALL submit `_preprocess_worker` (Phase 2) directly
+  with `selected_layers=None`, which the worker already treats as
+  "no layer filter — keep every primitive".
+- The handler SHALL register the new file row with
+  `initial_status = PREPROCESSING`.
+- The file SHALL never enter the `discovering_layers` or
+  `awaiting_layers` lifecycle states for this upload — those
+  states are skipped entirely.
+- Layer-manifest JSON (`data/layer_preview/{file_id}/layers.json`)
+  and per-layer SVG thumbnails SHALL NOT be written for this
+  upload. (If a prior non-skip upload of the same `file_id`
+  already wrote them, they are left on disk untouched but unused.)
+
+When `skip_layer_pick` is absent or `false`, the upload behaves
+exactly as before: Phase 1 is submitted, the file lands at
+`awaiting_layers`, and the operator picks layers via the existing
+`POST /api/files/{file_id}/layers` endpoint.
+
+For the dedup-rebind branch (re-upload of bytes-identical content
+to a different product slot), the `skip_layer_pick` flag SHALL be
+honoured the same way: the existing row's `status` is set to
+`PREPROCESSING`, `selected_layers` is reset to `NULL`, and Phase 2
+is submitted directly. The dedup case without the flag continues
+to set `status = DISCOVERING_LAYERS` and re-run Phase 1.
+
+The server SHALL NOT validate dev-mode origin of the flag. The
+flag is honoured unconditionally on any incoming request; gating
+the affordance is a UI responsibility (see the `viewer-ui`
+capability's `Skip layer picker dev affordance` requirement).
+
 #### Scenario: New DXF upload kicks off background processing
 - **WHEN** a user uploads a previously-unseen `.dxf` file
 - **THEN** the response contains a `file_id`, `status: "preprocessing"`, and a `job_id`
@@ -178,13 +213,70 @@ Re-uploading the same content SHALL deduplicate to the existing
 - **THEN** the per-file response carries a `skipped` field with the reason
 - **AND** no record is registered
 
+#### Scenario: skip_layer_pick=true bypasses Phase 1 entirely
+- **WHEN** a user uploads a previously-unseen `.dxf` to
+  `POST /api/products/{pid}/files` with form field
+  `skip_layer_pick=true`
+- **THEN** the response carries `status: "preprocessing"` and a `job_id`
+- **AND** the job submitted is `_preprocess_worker`, not
+  `_discover_layers_worker`
+- **AND** `selected_layers` on the registered row is `NULL`
+- **AND** the file never transitions through `discovering_layers`
+  or `awaiting_layers`
+- **AND** `data/layer_preview/{file_id}/layers.json` is not written
+
+#### Scenario: skip_layer_pick=false (or absent) keeps the existing Phase 1 path
+- **WHEN** a user uploads a `.dxf` to
+  `POST /api/products/{pid}/files` with `skip_layer_pick=false`
+  or with the field omitted
+- **THEN** the response carries `status: "discovering_layers"`
+- **AND** the job submitted is `_discover_layers_worker`
+- **AND** the layer manifest is rendered as today
+
+#### Scenario: skip_layer_pick=true on dedup-rebind reuses the row through Phase 2
+- **WHEN** a user re-uploads bytes-identical content to a different
+  product slot with `skip_layer_pick=true`
+- **AND** the existing row is in `awaiting_layers` or any other
+  pre-`ready_to_match` state
+- **THEN** the row's `status` is set to `preprocessing` and
+  `selected_layers` is reset to `NULL`
+- **AND** `_preprocess_worker` is submitted with
+  `selected_layers=None`
+- **AND** Phase 1 is not re-run
+
 ### Requirement: File lifecycle status
 
 Each uploaded file SHALL track exactly one status value at any time
-from: `preprocessing`, `ready_to_match`, `checking_rules`, `report`,
-`error`. Initial state SHALL be `preprocessing`; successful preprocess
-SHALL transition to `ready_to_match`; preprocess failure SHALL
-transition to `error` with the captured exception in `error`.
+from: `discovering_layers`, `awaiting_layers`, `preprocessing`,
+`ready_to_match`, `checking_rules`, `report`, `error`.
+
+The default upload path takes a file through
+`discovering_layers` (during Phase 1) → `awaiting_layers` (after
+Phase 1, waiting for the operator's layer pick) → `preprocessing`
+(Phase 2) → `ready_to_match` on success, or `error` on any
+worker failure.
+
+The dev-mode skip path (see the `Multi-file upload with
+deterministic file IDs` requirement's `skip_layer_pick` field)
+takes a file through `preprocessing` → `ready_to_match`
+directly, skipping `discovering_layers` and `awaiting_layers`
+entirely.
+
+In both paths, preprocess failure SHALL transition the file to
+`error` with the captured exception in `error`.
+
+The `error` field SHALL capture either:
+- a single exception message and traceback (the historical case,
+  e.g. an OS error or a downstream pipeline failure), **or**
+- a combined strict + recover exception string when both DXF parse
+  paths failed (see `DXF parsing uses strict-first with recover
+  fallback`).
+
+The `dxf_recover_notes` field SHALL be populated independently of
+the lifecycle status: a file may reach `ready_to_match` with
+non-null `dxf_recover_notes` (the recover path succeeded), or
+`error` with null `dxf_recover_notes` (recover did not save it, or
+the failure was not DXF-parse related).
 
 #### Scenario: Successful preprocess
 - **WHEN** the preprocess worker returns successfully for a file
@@ -195,6 +287,95 @@ transition to `error` with the captured exception in `error`.
 - **WHEN** the preprocess worker raises an exception
 - **THEN** the file's status becomes `error`
 - **AND** the `error` field captures the exception message and traceback
+
+#### Scenario: Ready file may carry recover notes
+- **WHEN** a file's preprocess succeeds via the recover fallback
+- **THEN** the file's status is `ready_to_match`
+- **AND** `FileRecord.dxf_recover_notes` is a non-null dict carrying
+  the audit summary
+
+#### Scenario: Skip-layer-pick path bypasses layer-related statuses
+- **WHEN** a file is uploaded with `skip_layer_pick=true`
+- **THEN** the file's status transitions are
+  `preprocessing` → `ready_to_match` (or `error`)
+- **AND** the status never reads `discovering_layers` or
+  `awaiting_layers` for this file's upload
+
+### Requirement: DXF parsing uses strict-first with recover fallback
+
+The system SHALL open user-uploaded DXF files by first calling
+`ezdxf.readfile` (strict). When that call succeeds the parser
+SHALL proceed exactly as before — there is no change to the
+downstream flatten / circle-detection / bbox path. When the strict
+call raises any of ezdxf's parser exception classes
+(`ezdxf.DXFStructureError`, `ezdxf.DXFTagError`, or any subclass of
+`ezdxf.DXFError` raised inside `readfile`), the parser SHALL fall
+back to `ezdxf.recover.readfile` and continue with the recovered
+`(doc, auditor)`. Non-parser exceptions (`FileNotFoundError`,
+`PermissionError`, OS-level IO errors) SHALL NOT trigger the
+fallback and SHALL propagate unchanged.
+
+When the recover path is taken, the parser SHALL:
+- Emit a `WARNING`-level server log carrying the file id (or path
+  when no id is available yet), the strict-mode exception class
+  name and message, and an Auditor summary
+  (`n_fixed`, `n_unrecoverable`, and the first ≤ 5 audit
+  messages).
+- Persist that summary as a JSON-serialisable dict on the
+  `FileRecord.dxf_recover_notes` field. The dict's shape SHALL be:
+  `{"strict_error": "<ExceptionClassName>: <msg>",
+    "n_fixed": <int>, "n_unrecoverable": <int>,
+    "audit_messages": ["<msg>", …]}`.
+  Files that succeed via strict SHALL leave the field `null`.
+
+When both strict and recover raise, the parser SHALL re-raise an
+exception whose message includes the strict exception (class +
+message) and the recover exception (class + message) separated by
+a marker (`" | recover: "` or equivalent), and the worker's
+exception handler SHALL log it at `ERROR` level. The file SHALL
+transition to the `error` lifecycle status with that combined
+message captured in `FileRecord.error`.
+
+Numerical output for files that succeed via strict SHALL be
+byte-identical to the prior behaviour. Files that succeed via
+recover SHALL produce the geometric output ezdxf's recover yields;
+the system makes no claim that recovered geometry matches what a
+hypothetical strict parse would have produced — by definition the
+strict parse did not produce one.
+
+#### Scenario: Strict-OK file leaves recover notes null
+- **WHEN** an uploaded DXF parses successfully via `ezdxf.readfile`
+- **THEN** the resulting `FileRecord.dxf_recover_notes` is `null`
+- **AND** no `WARNING` log line is emitted for the upload
+
+#### Scenario: Recover-OK file populates recover notes and logs WARNING
+- **WHEN** an uploaded DXF raises `DXFStructureError` from
+  `ezdxf.readfile` and is then parsed successfully via
+  `ezdxf.recover.readfile`
+- **THEN** the file's status reaches `ready_to_match` as normal
+- **AND** `FileRecord.dxf_recover_notes` is a dict containing
+  `strict_error`, `n_fixed`, `n_unrecoverable`, and
+  `audit_messages` (≤ 5 entries)
+- **AND** the server log contains a single `WARNING` line
+  identifying the file and quoting the strict exception + audit
+  counts
+
+#### Scenario: Both-fail file reaches error status with combined detail
+- **WHEN** an uploaded DXF raises `DXFStructureError` from
+  `ezdxf.readfile` and `ezdxf.recover.readfile` also raises
+- **THEN** the file's status becomes `error`
+- **AND** `FileRecord.error` contains both exception class names
+  and messages (strict and recover) in a single string
+- **AND** the server log contains an `ERROR` line covering both
+  exceptions
+- **AND** `FileRecord.dxf_recover_notes` is `null`
+
+#### Scenario: Non-parser exception is not recovered
+- **WHEN** opening an uploaded DXF raises `FileNotFoundError` (the
+  file was deleted between upload registration and worker start)
+- **THEN** the parser SHALL NOT call `ezdxf.recover.readfile`
+- **AND** the file's status becomes `error` with the original
+  exception captured in `FileRecord.error`
 
 ### Requirement: Background pre-processing with pre-match
 

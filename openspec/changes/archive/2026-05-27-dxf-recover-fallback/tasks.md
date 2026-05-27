@@ -31,6 +31,6 @@
 
 ## 6. Manual verification
 
-- [ ] 6.1 Upload a known-good DXF; confirm dashboard shows no recover pill and server log shows no WARNING.
-- [ ] 6.2 Upload one of the operator's currently-failing DXFs (the ones AutoCAD opens but SMDR2 today errors on). Confirm: file reaches `ready_to_match`, dashboard shows the recover pill with counts, server log carries one WARNING line, hover on the pill shows the original strict exception.
-- [ ] 6.3 Upload a truly broken file (e.g. a renamed `.txt` or a zero-byte `.dxf`). Confirm: file status becomes `error`, dashboard shows the existing error indicator (not the recover pill), and the server log carries an ERROR line containing both `strict:` and `recover:` segments.
+- [x] 6.1 Upload a known-good DXF; confirm dashboard shows no recover pill and server log shows no WARNING.
+- [x] 6.2 Upload one of the operator's currently-failing DXFs (the ones AutoCAD opens but SMDR2 today errors on). Confirm: file reaches `ready_to_match`, dashboard shows the recover pill with counts, server log carries one WARNING line, hover on the pill shows the original strict exception.
+- [x] 6.3 Upload a truly broken file (e.g. a renamed `.txt` or a zero-byte `.dxf`). Confirm: file status becomes `error`, dashboard shows the existing error indicator (not the recover pill), and the server log carries an ERROR line containing both `strict:` and `recover:` segments.

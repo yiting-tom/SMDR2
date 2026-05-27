@@ -15,11 +15,11 @@
 
 ## 3. Manual verification
 
-- [ ] 3.1 Synthesise three rules in a local rule-check result to exercise every branch:
+- [x] 3.1 Synthesise three rules in a local rule-check result to exercise every branch:
   - Rule A: 3 sub-rules, each with non-null `from` — expect three `🎯` rows with clickable links and chip `🎯 3 · ℹ 0`.
   - Rule B: 2 sub-rules, all handle fields null (manually-edited test payload) — expect two `ℹ` rows, dimmed, no link, chip `🎯 0 · ℹ 2`.
   - Rule C: 1 locatable + 1 text-only sub-rule — expect mixed icons, chip `🎯 1 · ℹ 1`.
   - Rule D: `rules: []` — expect the existing "No sub-rules emitted" row plus chip `ℹ no locator`.
-- [ ] 3.2 Click each `🎯` row and confirm the viewer opens with the correct highlight (no regression in the existing `?rule=&idx=` flow).
-- [ ] 3.3 Hover the header chip and confirm the long-form title text appears (`"<N> locatable · <M> text-only sub-rule(s)"` or `"no sub-rules emitted"`).
-- [ ] 3.4 With a real rule-check result on a production product (all sub-rules locatable in well-formed data), confirm the modal looks unchanged in the common case aside from the `🎯` prefix and the chip — no layout shift, no link regression.
+- [x] 3.2 Click each `🎯` row and confirm the viewer opens with the correct highlight (no regression in the existing `?rule=&idx=` flow).
+- [x] 3.3 Hover the header chip and confirm the long-form title text appears (`"<N> locatable · <M> text-only sub-rule(s)"` or `"no sub-rules emitted"`).
+- [x] 3.4 With a real rule-check result on a production product (all sub-rules locatable in well-formed data), confirm the modal looks unchanged in the common case aside from the `🎯` prefix and the chip — no layout shift, no link regression.

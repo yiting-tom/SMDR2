@@ -33,7 +33,7 @@
 
 ## 6. Manual verification
 
-- [ ] 6.1 With a synthetic rule emitting `to: ["h1", "h2", "h3"]` and `from: "h0"`, open the viewer with `?rule=…&idx=…` and confirm: three dashed segments are drawn from `h0` to each of `h1`/`h2`/`h3`, all four entities are highlighted in the focus colour, and the sub-rule's `text` appears at the midpoint of the `h0→h1` segment only.
-- [ ] 6.2 Re-open the same product with a scalar-form sub-rule (`to: "h1"`) and confirm the legacy single-segment render is unchanged.
-- [ ] 6.3 Emit a sub-rule with `to: []` (manually-edited test payload) and confirm the rule-check job fails with an `error` mentioning the empty-list rejection.
-- [ ] 6.4 Dashboard: confirm a sub-rule with `to: [...]` is counted as 🎯 (locatable) in the affordance chip from `rule-check-affordance`, not as ℹ.
+- [x] 6.1 With a synthetic rule emitting `to: ["h1", "h2", "h3"]` and `from: "h0"`, open the viewer with `?rule=…&idx=…` and confirm: three dashed segments are drawn from `h0` to each of `h1`/`h2`/`h3`, all four entities are highlighted in the focus colour, and the sub-rule's `text` appears at the midpoint of the `h0→h1` segment only.
+- [x] 6.2 Re-open the same product with a scalar-form sub-rule (`to: "h1"`) and confirm the legacy single-segment render is unchanged.
+- [x] 6.3 Emit a sub-rule with `to: []` (manually-edited test payload) and confirm the rule-check job fails with an `error` mentioning the empty-list rejection.
+- [x] 6.4 Dashboard: confirm a sub-rule with `to: [...]` is counted as 🎯 (locatable) in the affordance chip from `rule-check-affordance`, not as ℹ.
