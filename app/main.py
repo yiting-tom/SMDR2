@@ -382,6 +382,7 @@ async def upload_product_file(
     file: UploadFile = File(...),
     dxf_role: str = Form(...),
     replace_file_id: str | None = Form(None),
+    skip_layer_pick: bool = Form(False),
 ) -> dict:
     """Upload a DXF into a product role.
 
@@ -392,6 +393,14 @@ async def upload_product_file(
     View coverage (top/bottom/side) is determined by the per-file
     region rects set later via the side-regions endpoint; the upload
     itself does not assign a view.
+
+    `skip_layer_pick` is a dev-mode shortcut: when true the file
+    bypasses Phase 1 entirely (no layer manifest, no per-layer SVG
+    thumbnails, no `awaiting_layers` wait) and goes straight to
+    Phase 2 with `selected_layers=None` (keep every layer). The flag
+    is honoured unconditionally on the server — gating it as
+    "dev only" is the dashboard's responsibility, consistent with
+    the rest of the dev-overrides surface.
     """
     product = PRODUCT_STORE.get(product_id)
     if product is None:
@@ -432,32 +441,42 @@ async def upload_product_file(
     dst = upload_path(fid)
     if not dst.exists():
         dst.write_bytes(content)
+    initial_status = PREPROCESSING if skip_layer_pick else DISCOVERING_LAYERS
     existing = FILE_STORE.get(fid)
     if existing is None:
         FILE_STORE.register(
             fid, file.filename, len(content),
             library_id=product.library_id,
             product_id=product_id, dxf_role=dxf_role, dxf_view="multi",
-            initial_status=DISCOVERING_LAYERS,
+            initial_status=initial_status,
         )
     else:
         # Same content hash → reuse the row, rebinding it to this product
-        # slot. Wiping selected_layers forces Phase 1 to re-run.
+        # slot. Wiping selected_layers forces Phase 1 (or, on the skip
+        # path, Phase 2) to re-run with a fresh layer set.
         with FILE_STORE.lock, FILE_STORE.conn:
             FILE_STORE.conn.execute(
                 "UPDATE files SET product_id = ?, dxf_role = ?, dxf_view = 'multi', "
                 "library_id = ?, status = ?, match_saved = 0, "
                 "selected_layers = NULL WHERE id = ?",
                 (product_id, dxf_role, product.library_id,
-                 DISCOVERING_LAYERS, fid),
+                 initial_status, fid),
             )
-    job_id = jobs.submit_discover_layers(fid)
+    if skip_layer_pick:
+        # Dev path: no manifest rendering, no `awaiting_layers` wait.
+        # `selected_layers=None` is the worker's existing "keep every
+        # primitive" signal — no new code path inside the worker.
+        job_id = jobs.submit_preprocess(
+            fid, library_id=product.library_id, selected_layers=None,
+        )
+    else:
+        job_id = jobs.submit_discover_layers(fid)
     return {
         "file_id": fid,
         "product_id": product_id,
         "dxf_role": dxf_role,
         "library_id": product.library_id,
-        "status": DISCOVERING_LAYERS,
+        "status": initial_status,
         "job_id": job_id,
     }
 

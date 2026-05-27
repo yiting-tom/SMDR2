@@ -72,6 +72,20 @@ function setDevMode(on) {
   else    localStorage.removeItem(DEV_MODE_KEY);
 }
 
+// Skip-layer-pick dev preference: sticky across reloads + across dev
+// mode being toggled off and back on. Persistence is independent of
+// dev-mode state so a dev who flips the box on stays in skip mode
+// without re-ticking after every session. The flag is only honoured
+// at upload time when BOTH dev mode is on AND this preference is on.
+const SKIP_LAYER_PICK_KEY = "smdr2.dashboard.skipLayerPick";
+function getSkipLayerPick() {
+  return localStorage.getItem(SKIP_LAYER_PICK_KEY) === "1";
+}
+function setSkipLayerPick(on) {
+  if (on) localStorage.setItem(SKIP_LAYER_PICK_KEY, "1");
+  else    localStorage.removeItem(SKIP_LAYER_PICK_KEY);
+}
+
 // Generic browser-side download: wraps a Blob in a transient <a download>,
 // clicks it, and revokes the object URL. Used by both the per-file Match
 // JSON download and the per-product DRC bundle download so the filename
@@ -785,6 +799,13 @@ async function uploadFile(productId, role, file, replaceFileId = null) {
   fd.append("file", file);
   fd.append("dxf_role", role);
   if (replaceFileId) fd.append("replace_file_id", replaceFileId);
+  // Dev shortcut: bypass Phase 1 entirely. The flag is honoured by
+  // the server unconditionally, but we only send it when BOTH dev
+  // mode is on AND the dev preference is on, so production users
+  // (who never see the checkbox) never trigger it.
+  if (getDevMode() && getSkipLayerPick()) {
+    fd.append("skip_layer_pick", "true");
+  }
   $status.textContent = `uploading ${file.name} → ${role}…`;
   const res = await fetch(`/api/products/${productId}/files`, { method: "POST", body: fd });
   if (!res.ok) {
@@ -1077,12 +1098,24 @@ function startPollingIfBusy() {
 }
 
 // ---- developer mode wiring ----------------------------------------------
+const $skipLayerPickWrap = document.getElementById("skip-layer-pick-wrap");
+const $skipLayerPick = document.getElementById("skip-layer-pick");
+
 function syncDevModeButton() {
   const on = getDevMode();
   $devModeToggle.setAttribute("aria-pressed", on ? "true" : "false");
   $devModeToggle.textContent = on ? "Developer Mode: ON" : "Developer Mode";
   devParams.syncToggleVisibility();
+  // Skip-layer-pick checkbox is only present in the DOM when dev mode
+  // is on. Persisted state is restored every time it becomes visible
+  // so a dev who turned the box on, toggled dev mode off, then back
+  // on, sees the box re-checked.
+  $skipLayerPickWrap.hidden = !on;
+  if (on) $skipLayerPick.checked = getSkipLayerPick();
 }
+$skipLayerPick.addEventListener("change", (e) => {
+  setSkipLayerPick(e.target.checked);
+});
 $devModeToggle.addEventListener("click", () => {
   setDevMode(!getDevMode());
   syncDevModeButton();
