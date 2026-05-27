@@ -519,14 +519,30 @@ serialisation" requirement for the exact ordering).
 
 #### Scenario: JS drift guard mirrors the Python registry
 - **WHEN** any UI affordance under `app/static/canvas.js` is added
-  that consumes the arbitration registry
+  that consumes the arbitration registry (the full group structure,
+  or a derived view such as the flat set of arbitration member
+  class names)
 - **THEN** the JS literal SHALL be wrapped in
-  `// CLASS_ARBITRATION_GROUPS_BEGIN ... // CLASS_ARBITRATION_GROUPS_END`
-  sentinel comments
+  `// <NAME>_BEGIN ... // <NAME>_END` sentinel comments where
+  `<NAME>` matches the JS constant's identifier (for example
+  `CLASS_ARBITRATION_GROUPS_BEGIN/_END` for a full-structure mirror,
+  or `CLASS_ARBITRATION_MEMBERS_BEGIN/_END` for the
+  members-only derived view used by
+  `commitCurrentTemplate`'s incremental-overlay fallback)
 - **AND** a test under `tests/test_canvas_constants.py` SHALL parse
   the JS literal and assert structural equality with the Python
-  registry, failing the build on drift
+  registry's relevant subset, failing the build on drift
 - **AND** the JS may be a strict subset of the Python registry's
   fields (e.g., omit fields the UI does not need); the equality SHALL
   be checked over the fields the JS chooses to expose
+
+#### Scenario: Members-only JS mirror is allowed
+- **WHEN** the viewer needs only the flat set of arbitration member
+  class names (not the rules / pitch / default-class details)
+- **THEN** a constant `CLASS_ARBITRATION_MEMBERS` SHALL be wrapped in
+  `// CLASS_ARBITRATION_MEMBERS_BEGIN ... // CLASS_ARBITRATION_MEMBERS_END`
+  sentinels in `app/static/canvas.js`
+- **AND** the drift-guard test SHALL build the same flat union from
+  `CLASS_ARBITRATION_GROUPS[*].members` on the Python side and
+  assert equality with the JS array
 

@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from app.library import CLASS_VIEW_CONSTRAINTS
+from app.library import CLASS_ARBITRATION_GROUPS, CLASS_VIEW_CONSTRAINTS
 
 
 CANVAS_JS = Path(__file__).resolve().parent.parent / "app" / "static" / "canvas.js"
@@ -63,5 +63,28 @@ def test_class_view_constraints_js_mirror_matches_python():
         f"canvas.js CLASS_VIEW_CONSTRAINTS drift detected:\n"
         f"  python: {py_normalised}\n"
         f"  js:     {js_normalised}\n"
+        f"Update either file so the two match."
+    )
+
+
+def test_class_arbitration_members_js_mirror_matches_python():
+    """The JS literal `CLASS_ARBITRATION_MEMBERS` is the flat union of
+    every Python `ArbitrationGroup.members` set. The frontend uses it
+    purely to decide whether a class participates in arbitration (and
+    so should trigger a full scan-all re-run on commit instead of an
+    incremental overlay merge)."""
+    src = CANVAS_JS.read_text()
+    js_block = _extract_js_literal(src, "CLASS_ARBITRATION_MEMBERS")
+    js_arr = _js_object_to_dict(js_block)
+
+    py_members = set()
+    for g in CLASS_ARBITRATION_GROUPS:
+        py_members |= set(g.members)
+
+    js_members = set(js_arr)
+    assert py_members == js_members, (
+        f"canvas.js CLASS_ARBITRATION_MEMBERS drift detected:\n"
+        f"  python: {sorted(py_members)}\n"
+        f"  js:     {sorted(js_members)}\n"
         f"Update either file so the two match."
     )

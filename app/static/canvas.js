@@ -542,6 +542,24 @@ function isAllowedView(className, view) {
   return view !== null && allowed.includes(view);
 }
 
+// Membership-only mirror of app/library.CLASS_ARBITRATION_GROUPS — the
+// flat union of every group's `members` set. The frontend uses this
+// purely to decide *whether* a class participates in arbitration; the
+// rules / pitch / default-class details live server-side only. Today's
+// single group covers BGABall vs. FiducialCircle (same-radius circles
+// that need neighbour-density tiebreaking).
+//
+// MUST stay in sync with app/library.py — tests/test_canvas_constants.py
+// parses the literal between the BEGIN/END sentinel comments and asserts
+// equality with the Python source.
+// CLASS_ARBITRATION_MEMBERS_BEGIN
+const CLASS_ARBITRATION_MEMBERS = ["BGABall", "FiducialCircle"];
+// CLASS_ARBITRATION_MEMBERS_END
+
+function isArbitrationMember(className) {
+  return CLASS_ARBITRATION_MEMBERS.includes(className);
+}
+
 // Classify a world-space point against the file's view rectangles
 // using the same top_view > bottom_view > side_view priority as
 // app.side_regions.side_prefix_for. Returns the matched view name
@@ -2518,7 +2536,50 @@ async function commitCurrentTemplate() {
     // Refresh class counts.
     const cls = classes.find(c => c.name === data.class_name);
     if (cls) cls.count = data.count;
-    setBaseStatus(`saved ${data.class_name} template (#${data.count})`);
+
+    // If scan-all is active, fold this template's just-matched handles
+    // into the overlay so the new class lights up immediately. We use
+    // the live-preview matchSet that the S-key scan populated — it
+    // already holds every handle that matched the same pattern we
+    // just committed, so there's no need to round-trip scan-all again
+    // (which would re-run all 17 classes' templates server-side).
+    //
+    // Exception: if the committed class is an arbitration member (today
+    // BGABall / FiducialCircle), the incremental merge would naively
+    // override handles that were correctly tagged by the prior
+    // arbitration pass. Front-end can't reproduce arbitration
+    // (neighbour-density math lives server-side), so we fall back to
+    // a full scan-all re-run — pricier but correct.
+    //
+    // Other re-applied constraint: view constraints (handled by
+    // applyViewConstraintsToScanAll below).
+    const newClass = data.class_name;
+    let mergedStatus = "";
+    let needsFullRescan = false;
+    if (scanAllByHandle) {
+      if (isArbitrationMember(newClass)) {
+        needsFullRescan = true;
+      } else {
+        // Source pattern (user's selection) is an identity match of
+        // the just-committed template. The server-side find_matches
+        // skips the seed via template_handle_set, so matchSet covers
+        // only the OTHER instances. Merge both to cover the full set
+        // of handles the new template is responsible for.
+        for (const h of selection) scanAllByHandle.set(h, newClass);
+        for (const h of matchSet) scanAllByHandle.set(h, newClass);
+        const byClass = {};
+        for (const [, c] of scanAllByHandle) {
+          byClass[c] = (byClass[c] || 0) + 1;
+        }
+        applyViewConstraintsToScanAll(scanAllByHandle, byClass);
+        scanAllSummary = { byClass, total: scanAllByHandle.size };
+        mergedStatus = ` · overlay +${byClass[newClass] ?? 0} ${newClass}`;
+      }
+    }
+
+    setBaseStatus(
+      `saved ${data.class_name} template (#${data.count})${mergedStatus}`,
+    );
     selection.clear();
     matchSet.clear();
     nearMissSet.clear();
@@ -2527,6 +2588,12 @@ async function commitCurrentTemplate() {
     renderClassToolbar();
     updateStatus();
     render();
+
+    // Trigger after the local UI settles so the user sees the "saved"
+    // status before the scan-all running state takes over.
+    if (needsFullRescan) {
+      runScanAll();
+    }
   } catch (e) {
     console.error(e);
     setBaseStatus(`commit error: ${e.message}`);
