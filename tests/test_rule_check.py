@@ -35,15 +35,29 @@ def _check_envelope(result):
         for sub in payload["rules"]:
             assert sub["part"] in _VALID_PARTS
             assert isinstance(sub["text"], str) and sub["text"]
-            for key in ("from", "to", "tol"):
+            for key in ("from", "tol"):
                 assert sub.get(key) is None or isinstance(sub[key], str)
+            # `to` is str | list[str] | None; non-empty list elements
+            # must be non-empty strings.
+            to_val = sub.get("to")
+            if to_val is not None:
+                if isinstance(to_val, list):
+                    assert to_val, "empty list `to` is illegal"
+                    for el in to_val:
+                        assert isinstance(el, str) and el
+                else:
+                    assert isinstance(to_val, str)
             tt = sub.get("tol_text")
             assert tt is None or isinstance(tt, str)
-            has_handle = any(sub.get(k) is not None for k in ("from", "to", "tol"))
+            has_handle = (
+                sub.get("from") is not None
+                or to_val is not None
+                or sub.get("tol") is not None
+            )
             if has_handle:
                 assert sub["file_id"] is not None
             assert sub.get("from") is not None or sub.get("tol") is not None
-            if sub.get("to") is not None:
+            if to_val is not None:
                 assert sub.get("from") is not None
             if sub.get("tol_text") is not None:
                 assert sub.get("tol") is not None
@@ -492,3 +506,126 @@ def test_dev_mock_handles_view_prefixed_keys(monkeypatch, tmp_path):
     # rules is non-empty for the BD role.
     assert len(result["MockDistance"]["rules"]) == 1
     assert result["MockDistance"]["rules"][0]["part"] == "BD"
+
+
+# ---- multi-`to` support (list of handles) ------------------------------
+# Backward-compatible extension: scalar `to` keeps working, list-form
+# `to` is the new fan shape. The adapter preserves the on-the-wire
+# form verbatim (no scalar↔list normalisation).
+
+def test_validate_accepts_scalar_to_string(monkeypatch):
+    """Baseline: the existing scalar-`to` form still validates after the
+    multi-`to` change is in."""
+    result = _ok_result()
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    out = check_rules("p", "/tmp/b")
+    # Scalar form preserved verbatim — adapter does NOT auto-promote.
+    assert out["Rule1"]["rules"][0]["to"] == "A1"
+
+
+def test_validate_accepts_non_empty_list_to(monkeypatch):
+    """List-form `to` validates and is returned verbatim."""
+    result = {
+        "FanRule": {
+            "pass": False, "text": "min spacing violations",
+            "rules": [
+                {
+                    "part": "BD", "file_id": "abc123",
+                    "from": "S1",
+                    "to": ["A1", "A2", "A3"],
+                    "text": "S1 too close to A1/A2/A3",
+                    "tol": None, "tol_text": None,
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    out = check_rules("p", "/tmp/b")
+    # List form preserved verbatim — adapter does NOT auto-collapse to scalar.
+    assert out["FanRule"]["rules"][0]["to"] == ["A1", "A2", "A3"]
+
+
+def test_validate_rejects_empty_list_to(monkeypatch):
+    """`to: []` is rejected — emitter must send `null` to mean no-to."""
+    result = {
+        "BadRule": {
+            "pass": False, "text": "fail",
+            "rules": [
+                {
+                    "part": "BD", "file_id": "abc123",
+                    "from": "S1", "to": [],
+                    "text": "msg",
+                    "tol": None, "tol_text": None,
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    with pytest.raises(RuleCheckOutputError, match="empty"):
+        check_rules("p", "/tmp/b")
+
+
+def test_validate_rejects_list_to_with_non_string_element(monkeypatch):
+    """`to: ["A1", 42]` is rejected; the message names the bad index."""
+    result = {
+        "BadRule": {
+            "pass": False, "text": "fail",
+            "rules": [
+                {
+                    "part": "BD", "file_id": "abc123",
+                    "from": "S1", "to": ["A1", 42],
+                    "text": "msg",
+                    "tol": None, "tol_text": None,
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    with pytest.raises(RuleCheckOutputError, match=r"element #1"):
+        check_rules("p", "/tmp/b")
+
+
+def test_validate_rejects_list_to_with_empty_string(monkeypatch):
+    """`to: ["A1", ""]` is rejected — every element must be non-empty."""
+    result = {
+        "BadRule": {
+            "pass": False, "text": "fail",
+            "rules": [
+                {
+                    "part": "BD", "file_id": "abc123",
+                    "from": "S1", "to": ["A1", ""],
+                    "text": "msg",
+                    "tol": None, "tol_text": None,
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    with pytest.raises(RuleCheckOutputError, match="empty string"):
+        check_rules("p", "/tmp/b")
+
+
+def test_validate_rejects_list_to_without_from(monkeypatch):
+    """`to: [...]` requires `from` non-null, mirrors the scalar rule."""
+    result = {
+        "BadRule": {
+            "pass": False, "text": "fail",
+            "rules": [
+                {
+                    "part": "BD", "file_id": "abc123",
+                    "from": None, "to": ["A1", "A2"],
+                    "text": "msg",
+                    "tol": "T1", "tol_text": None,
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr("app.rule_check._external_check_rules",
+                        lambda *_: result)
+    with pytest.raises(RuleCheckOutputError, match="`to`"):
+        check_rules("p", "/tmp/b")

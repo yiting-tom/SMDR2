@@ -1131,21 +1131,30 @@ function primitiveCenter(handle) {
 function drawFocusedSubRule(hairline) {
   const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
   const hw = hairline * (HIGHLIGHT_WIDTH_MULT + 1.5);
+  // `to` is `str | list[str] | null` on the wire — normalise once at
+  // the top so the rest of this function (and `drawFocusedLabel`)
+  // works against a single canonical iteration target.
+  const toList = Array.isArray(focusedSubRule.to)
+    ? focusedSubRule.to
+    : (focusedSubRule.to ? [focusedSubRule.to] : []);
   const handles = new Set();
   if (focusedSubRule.from) handles.add(focusedSubRule.from);
-  if (focusedSubRule.to)   handles.add(focusedSubRule.to);
+  for (const t of toList) handles.add(t);
   if (focusedSubRule.tol)  handles.add(focusedSubRule.tol);
   for (const p of primitives) {
     if (handles.has(p.handle)) {
       drawPrimitive(p, { stroke: FOCUS_COLOR, fill: FOCUS_COLOR, lineWidth: hw });
     }
   }
-  if (focusedSubRule.from && focusedSubRule.to) {
-    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
-    if (segment) {
+  if (focusedSubRule.from && toList.length) {
+    // Fan: one dashed segment from `from` to each `to_i` (shortest
+    // vertex-vs-edge path per pair, same as the scalar form).
+    ctx.strokeStyle = FOCUS_COLOR;
+    ctx.lineWidth = hairline * 2.2;
+    for (const t of toList) {
+      const segment = shortestSegmentBetween(focusedSubRule.from, t);
+      if (!segment) continue;
       const [fc, tc] = segment;
-      ctx.strokeStyle = FOCUS_COLOR;
-      ctx.lineWidth = hairline * 2.2;
       ctx.setLineDash([8 * hairline, 5 * hairline]);
       ctx.beginPath();
       ctx.moveTo(fc[0], fc[1]);
@@ -1198,14 +1207,21 @@ function drawLabelBox(text, screenX, screenY, color) {
 
 function drawFocusedLabel() {
   const FOCUS_COLOR = focusedSubRule.rulePass ? "#69f0ae" : "#ff5252";
+  // Same normaliser as `drawFocusedSubRule` — `to` can be string,
+  // non-empty list, or null. The label anchors to the FIRST segment
+  // when `to` is a list, so fan rules don't stack labels on top of
+  // each other.
+  const toList = Array.isArray(focusedSubRule.to)
+    ? focusedSubRule.to
+    : (focusedSubRule.to ? [focusedSubRule.to] : []);
 
-  // from + to: text at the midpoint of the shortest segment between the
-  // two entities (so the label lands on the same line the user sees).
+  // from + to: text at the midpoint of the (first) segment so the
+  // label lands on the same line the user sees.
   // from only: text adjacent to `from`'s bbox centre.
   // tol + tol_text: rendered independently next to `tol` (may coexist
   // with the from/to label when both groups are populated).
-  if (focusedSubRule.from && focusedSubRule.to) {
-    const segment = shortestSegmentBetween(focusedSubRule.from, focusedSubRule.to);
+  if (focusedSubRule.from && toList.length) {
+    const segment = shortestSegmentBetween(focusedSubRule.from, toList[0]);
     if (segment) {
       const [fc, tc] = segment;
       const [mx, my] = worldToScreen((fc[0] + tc[0]) / 2, (fc[1] + tc[1]) / 2);

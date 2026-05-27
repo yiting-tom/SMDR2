@@ -459,7 +459,7 @@ SMDR2 會以 `from app.external_rule_check import check_rules` 直接 import
 | `rules[].part` | enum | `"SBT"` / `"BD"` / `"POD"` / `"RING"` / `"LID"` — 對應的 role |
 | `rules[].file_id` | str \| null | 該 sub-rule 幾何所在的 DXF id；只要 from/to/tol 任一非 null 就必須有值 |
 | `rules[].from` | str \| null | 單一 source handle（不再是 list） |
-| `rules[].to` | str \| null | 單一 target handle；只在 `from` 也有值時可以設定 |
+| `rules[].to` | str \| list[str] \| null | Target handle(s)。單字串 = 一個 target（原本的形式）；非空 list = fan，from 連到每個 to_i。空 list 不合法（請 emit null）；list 元素必須是非空 string。只在 `from` 也有值時可以設定（不論 scalar 或 list）。 |
 | `rules[].text` | str | sub-rule 訊息；rules 非空時必填 |
 | `rules[].tol` | str \| null | 獨立高亮 entity（跟 from/to 距離無關的標註） |
 | `rules[].tol_text` | str \| null | 顯示在 `tol` 旁的文字；只在 `tol` 有值時可以設定 |
@@ -468,7 +468,8 @@ SMDR2 會以 `from app.external_rule_check import check_rules` 直接 import
 
 | 你 emit | Viewer 行為 |
 |---|---|
-| `from` + `to` | 兩 entity 間畫虛線，`text` 顯示在中點 |
+| `from` + 單字串 `to` | 兩 entity 間畫虛線，`text` 顯示在中點 |
+| `from` + list `to` | 對每個 to_i 從 from 各畫一條虛線（fan）；`text` 只顯示在第一條（to[0]）的中點，避免多個 label 重疊 |
 | 只有 `from` | 高亮 `from`，`text` 顯示在 `from` 旁 |
 | `tol`（可同時有 from/to） | 高亮 `tol` entity |
 | `tol` + `tol_text` | 高亮 `tol`，`tol_text` 顯示在 `tol` 旁 |
@@ -483,7 +484,8 @@ SMDR2 會以 `from app.external_rule_check import check_rules` 直接 import
 - `rules` 可以是空 list；非空時每個 sub-rule 必須有非空 `text`
 - 任一 handle 欄位（`from` / `to` / `tol`）非 null 時，`file_id` 也必須非 null
 - 每個 sub-rule 至少要有 `from` 或 `tol` 其中一個（不能全空）
-- `to` 只能在 `from` 也有設的情況下出現
+- `to` 只能在 `from` 也有設的情況下出現（不論 `to` 是 scalar 還是 list）
+- `to` 是 list 時必須非空；list 元素必須是非空 string。`to: []` 不合法，請 emit `null` 表達「沒有 to」
 - `tol_text` 只能在 `tol` 也有設的情況下出現
 
 ---

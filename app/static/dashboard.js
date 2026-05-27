@@ -908,13 +908,23 @@ $ruleResultsModal.addEventListener("click", (e) => {
   if (e.target.matches("[data-close]")) $ruleResultsModal.hidden = true;
 });
 
+// `to` may arrive as string, non-empty list of strings, or null. A
+// non-empty list is locatable; an empty list (illegal upstream per
+// the DRC integration contract, but we stay defensive) is treated
+// as no-`to`.
+function hasToValue(to) {
+  if (!to) return false;
+  if (Array.isArray(to)) return to.length > 0;
+  return true;
+}
+
 // A sub-rule is "locatable" iff it carries at least one handle field
 // the viewer can highlight (from / to / tol). Per the DRC integration
 // contract every well-formed sub-rule SHOULD be locatable, but the
 // dashboard stays defensive against malformed emits so a click on a
 // no-handles row doesn't open the viewer to an empty highlight.
 function isLocatable(sub) {
-  return Boolean(sub && (sub.from || sub.to || sub.tol));
+  return Boolean(sub && (sub.from || hasToValue(sub.to) || sub.tol));
 }
 
 function showRuleResults(product, data) {

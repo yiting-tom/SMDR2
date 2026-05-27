@@ -20,11 +20,11 @@ RuleChecking JSON shape::
                 {
                     "part":     "SBT" | "BD" | "POD" | "RING" | "LID",
                     "file_id":  str | None,
-                    "from":     handleID | None,   # single source entity
-                    "to":       handleID | None,   # single target entity
-                    "text":     str,               # per-sub-rule message
-                    "tol":      handleID | None,   # annotation-only entity
-                    "tol_text": str | None,        # label next to `tol`
+                    "from":     handleID | None,           # single source entity
+                    "to":       handleID | list[handleID] | None,  # single or fan
+                    "text":     str,                        # per-sub-rule message
+                    "tol":      handleID | None,            # annotation-only entity
+                    "tol_text": str | None,                 # label next to `tol`
                 },
                 ...
             ]
@@ -39,7 +39,11 @@ Invariants (enforced by :func:`_validate_envelope`):
 - A sub-rule MAY have all of ``from`` / ``to`` / ``tol`` / ``tol_text``
   null — such "text-only" sub-rules are accepted as informational
   entries (sidebar shows the message; canvas has nothing to highlight).
-- ``to`` MAY only be set when ``from`` is also set.
+- ``to`` MAY only be set when ``from`` is also set; that holds for
+  both the scalar and list forms.
+- When ``to`` is a list it MUST be non-empty and every element MUST
+  be a non-empty string handle. Empty list ``[]`` is rejected — the
+  emitter SHALL send ``None`` instead to mean "no ``to``".
 - Any sub-rule with a non-null ``from`` / ``to`` / ``tol`` MUST also
   carry a non-null ``file_id``.
 - ``tol_text`` MAY only be set when ``tol`` is also set.
@@ -153,7 +157,7 @@ def _validate_sub_rule(rule_name: str, idx: int, sub: object) -> None:
         )
 
     frm = _typed_handle(sub, "from", label)
-    to = _typed_handle(sub, "to", label)
+    to = _typed_to(sub, label)
     tol = _typed_handle(sub, "tol", label)
     tol_text = sub.get("tol_text")
     if tol_text is not None and not isinstance(tol_text, str):
@@ -161,7 +165,7 @@ def _validate_sub_rule(rule_name: str, idx: int, sub: object) -> None:
             f"{label}: `tol_text` must be str or None"
         )
 
-    if to is not None and frm is None:
+    if _has_to_value(to) and frm is None:
         raise RuleCheckOutputError(
             f"{label}: `to` set but `from` is null"
         )
@@ -169,7 +173,7 @@ def _validate_sub_rule(rule_name: str, idx: int, sub: object) -> None:
         raise RuleCheckOutputError(
             f"{label}: `tol_text` set but `tol` is null"
         )
-    if (frm is not None or to is not None or tol is not None) and file_id is None:
+    if (frm is not None or _has_to_value(to) or tol is not None) and file_id is None:
         raise RuleCheckOutputError(
             f"{label}: sub-rule references a handle but `file_id` is null"
         )
@@ -185,3 +189,45 @@ def _typed_handle(sub: dict, key: str, label: str) -> str | None:
             f"{label}: `{key}` must be str or None, got {type(val).__name__}"
         )
     return val
+
+
+def _typed_to(sub: dict, label: str) -> str | list[str] | None:
+    """Read ``sub["to"]`` and ensure it's a string handle, a non-empty
+    list of string handles, or None. Empty list `[]` is explicitly
+    rejected — emitters that mean "no ``to``" SHALL send ``None``."""
+    val = sub.get("to")
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    if isinstance(val, list):
+        if not val:
+            raise RuleCheckOutputError(
+                f"{label}: `to` is an empty list; emit null instead"
+            )
+        for i, elem in enumerate(val):
+            if not isinstance(elem, str):
+                raise RuleCheckOutputError(
+                    f"{label}: `to` list element #{i} must be a "
+                    f"non-empty string, got {type(elem).__name__}"
+                )
+            if not elem:
+                raise RuleCheckOutputError(
+                    f"{label}: `to` list element #{i} is an empty string"
+                )
+        return val
+    raise RuleCheckOutputError(
+        f"{label}: `to` must be str, list of str, or None, got "
+        f"{type(val).__name__}"
+    )
+
+
+def _has_to_value(to: object) -> bool:
+    """Return True iff ``to`` carries a target handle in any form
+    (non-empty string or non-empty list). Validation is done by
+    ``_typed_to`` upstream; this is a pure existence check."""
+    if to is None:
+        return False
+    if isinstance(to, list):
+        return len(to) > 0
+    return True
