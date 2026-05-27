@@ -26,7 +26,7 @@ import ezdxf.recover
 import numpy as np
 from ezdxf.addons.drawing import Frontend, RenderContext
 from ezdxf.addons.drawing.backend import BackendInterface
-from ezdxf.addons.drawing.config import Configuration
+from ezdxf.addons.drawing.config import Configuration, TextPolicy
 from ezdxf.addons.drawing.properties import BackendProperties
 from ezdxf.math import Vec2
 from ezdxf.npshapes import NumpyPath2d, NumpyPoints2d
@@ -580,7 +580,18 @@ def flatten_for_render(
         )
     ctx = RenderContext(doc)
     backend = JSONBackend(flatten_tolerance=tol)
-    Frontend(ctx, backend).draw_layout(msp, finalize=True)
+    # SMDR2's pattern matching never consumes TEXT/MTEXT geometry — the
+    # template library is pure shape (lines, circles, polygons), so the
+    # rendered glyphs would just add noise. We disable text rendering
+    # entirely, which also bypasses font loading; this dodges fontTools
+    # assertions / warnings on broken system fonts
+    # (e.g. fontTools/ttLib/tables/_g_l_y_f.py "At least two cubic
+    # off-curve points required" crashes seen on CJK fonts with
+    # malformed cubic-Bézier glyph data).
+    Frontend(
+        ctx, backend,
+        config=Configuration(text_policy=TextPolicy.IGNORE),
+    ).draw_layout(msp, finalize=True)
     render = RenderOutput(
         primitives=backend.primitives,
         bbox=backend.bbox,

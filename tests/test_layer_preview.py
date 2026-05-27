@@ -93,6 +93,15 @@ def _build_synth_dxf(tmp_path: Path) -> Path:
     )
     for i in range(4):
         msp.add_circle((2 + i * 2, 5), 0.5, dxfattribs={"layer": "SMD"})
+    # SILK needs at least one non-text entity so layer discovery picks
+    # it up: SMDR2 renders with `TextPolicy.IGNORE`, so a TEXT-only
+    # layer produces zero primitives and gets dropped from the manifest.
+    # A real silk-screen layer in production DXFs has both — line / arc
+    # geometry plus annotation TEXT — so this matches actual file shape.
+    msp.add_lwpolyline(
+        [(0.5, 0.5), (1.5, 0.5)],
+        dxfattribs={"layer": "SILK"},
+    )
     msp.add_text("LABEL", dxfattribs={
         "insert": (1, 1), "height": 0.5, "layer": "SILK"
     })
