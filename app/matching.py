@@ -112,7 +112,13 @@ class EntityShape:
         # Drop a trailing duplicate of the first point — common in
         # flattened closed polylines. Without this, the centroid and PCA
         # are pulled toward the duplicate, ruining mirror/rotation alignment.
-        if arr.shape[0] >= 2 and np.allclose(arr[0], arr[-1]):
+        # Use absolute tolerance only — `np.allclose`'s default `rtol=1e-5`
+        # scales with coordinate magnitude, so at 10⁵-mm world coords any
+        # two points within ~1 mm get flagged as duplicates. For a real
+        # circle template that drops the last vertex, shifts the centroid,
+        # and inflates the recomputed radius — the user-reported scan-all
+        # bug at far-from-origin DXFs.
+        if arr.shape[0] >= 2 and np.allclose(arr[0], arr[-1], rtol=0, atol=1e-9):
             arr = arr[:-1]
         centroid = arr.mean(axis=0)
         d = arr - centroid

@@ -43,6 +43,7 @@ from app.library import (
 from app.matching import (
     EntityShape,
     _radius_bucket_cache,
+    _radius_bucket_key,
     build_entity_shapes,
     find_matches,
     find_matches_from_pointsets,
@@ -194,11 +195,16 @@ def test_parity_sweep_across_radii_at_large_coords():
 
 
 # ---- shape radius identity (the deepest invariant) -----------------------
-def test_shape_radius_identity_basic():
-    """The radius `build_entity_shapes` produces for a single-CIRCLE
-    handle MUST equal the radius `from_points` produces on the same
-    handle's stored template points. This is the algebraic invariant
-    that 9d66024 broke."""
+def test_shape_radius_bucket_within_one_basic():
+    """The radius bucket key `build_entity_shapes` produces for a
+    single-CIRCLE handle MUST agree with the bucket key `from_points`
+    produces on the same handle's stored template points to within ±1
+    bucket. Bit-identical radii are too strict (analytical r vs
+    numerical max-norm always differ by ULPs), and so are exact bucket
+    keys (banker's-rounding fence-posts can flip on ULP drift). The
+    ±1 window is the contract `_match_single_circle`'s neighbour-bucket
+    lookup actually relies on — any wider drift is the
+    user-visible-bug regime."""
     prims = [_circle_primitive("H", 0.0, 0.0, 0.5)]
     hi = build_handle_index(prims)
     drawing_shape = build_entity_shapes(prims, hi)["H"]
@@ -207,11 +213,17 @@ def test_shape_radius_identity_basic():
     template_kind = collect_entity_kinds(prims, hi, "H")
     reloaded_shape = EntityShape.from_points("_t", template_pts, kind=template_kind)
 
-    assert drawing_shape.radius == reloaded_shape.radius
+    assert abs(
+        _radius_bucket_key(drawing_shape.radius)
+        - _radius_bucket_key(reloaded_shape.radius)
+    ) <= 1
 
 
-def test_shape_radius_identity_at_large_coords():
-    """Same identity, with the coord regime that bit the affected DXF."""
+def test_shape_radius_bucket_within_one_at_large_coords():
+    """Same ±1 bucket bound, with the coord regime that bit the affected
+    DXF. Pre-`np.allclose` fix, `from_points` at large coords dropped
+    its last vertex and inflated radius by 3–4 % (~30+ buckets); this
+    test would fail by tens of buckets, well outside the ±1 window."""
     cx, cy = 36639.0, 41311.0
     for r in [0.01, 0.0375, 0.04125, 0.225, 0.22858, 0.4]:
         prims = [_circle_primitive("H", cx, cy, r)]
@@ -220,9 +232,15 @@ def test_shape_radius_identity_at_large_coords():
         template_pts = collect_entity_points(prims, hi, "H")
         template_kind = collect_entity_kinds(prims, hi, "H")
         reloaded_shape = EntityShape.from_points("_t", template_pts, kind=template_kind)
-        assert drawing_shape.radius == reloaded_shape.radius, (
-            f"radius drift at (cx={cx}, cy={cy}, r={r}): "
-            f"drawing={drawing_shape.radius!r}, reloaded={reloaded_shape.radius!r}"
+        delta = abs(
+            _radius_bucket_key(drawing_shape.radius)
+            - _radius_bucket_key(reloaded_shape.radius)
+        )
+        assert delta <= 1, (
+            f"bucket key drift at (cx={cx}, cy={cy}, r={r}): "
+            f"drawing={drawing_shape.radius!r}(key={_radius_bucket_key(drawing_shape.radius)}), "
+            f"reloaded={reloaded_shape.radius!r}(key={_radius_bucket_key(reloaded_shape.radius)}), "
+            f"delta={delta} (must be ≤ 1)"
         )
 
 
