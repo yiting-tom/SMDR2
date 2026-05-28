@@ -940,6 +940,79 @@ def warm_shapes(file_id: str) -> dict:
     return {"entity_count": len(shapes)}
 
 
+@app.get("/api/files/{file_id}/debug-radius-buckets")
+async def debug_radius_buckets(file_id: str) -> dict:
+    """Diagnostic dump for the single-CIRCLE radius-bucket fast path.
+
+    Compares each library/product template's recomputed-via-from_points
+    radius with the drawing's analytical-radius bucket distribution.
+    Used to chase scan-all-misses-everything bugs that don't reproduce
+    on small fixtures."""
+    from app.matching import (
+        _get_radius_buckets,
+        _radius_bucket_key,
+        EntityShape,
+    )
+    rec = _resolve_file(file_id)
+    _, shapes = _shapes_for(file_id)
+    buckets = _get_radius_buckets(shapes)
+
+    drawing_circle_count = sum(1 for s in shapes.values() if s.kind == "circle")
+    other_kind_counts: dict[str, int] = {}
+    sample_drawing_circles: list[dict] = []
+    for h, s in shapes.items():
+        if s.kind != "circle":
+            other_kind_counts[s.kind or "_None"] = (
+                other_kind_counts.get(s.kind or "_None", 0) + 1
+            )
+        elif len(sample_drawing_circles) < 5:
+            sample_drawing_circles.append({
+                "handle": h,
+                "radius": float(s.radius),
+                "bucket_key": _radius_bucket_key(s.radius),
+            })
+
+    classes, _, templates_by_class = LIBRARIES.store.load_library(
+        rec.library_id, product_id=rec.product_id,
+    )
+
+    per_class: list[dict] = []
+    for cls in classes:
+        tmpls = templates_by_class.get(cls, [])
+        if not tmpls:
+            continue
+        entry: dict = {"class": cls, "template_count": len(tmpls), "templates": []}
+        for tmpl in tmpls[:3]:
+            pts = tmpl.entity_point_sets[0] if tmpl.entity_point_sets else []
+            kind = (tmpl.entity_kinds or [None])[0]
+            tpl = EntityShape.from_points("_t", pts, kind=kind)
+            key = _radius_bucket_key(tpl.radius)
+            entry["templates"].append({
+                "kind": tpl.kind,
+                "radius": float(tpl.radius),
+                "bucket_key": key,
+                "neighbor_hits": {
+                    str(k): len(buckets.get(k, []))
+                    for k in range(key - 3, key + 4)
+                },
+                "point_count": len(pts),
+                "first_point": list(pts[0]) if pts else None,
+            })
+        if entry["templates"]:
+            per_class.append(entry)
+
+    return {
+        "file_id": file_id,
+        "library_id": rec.library_id,
+        "product_id": rec.product_id,
+        "drawing_circle_count": drawing_circle_count,
+        "drawing_non_circle_counts": other_kind_counts,
+        "drawing_bucket_count": len(buckets),
+        "sample_drawing_circles": sample_drawing_circles,
+        "per_class": per_class,
+    }
+
+
 class MatchRequest(BaseModel):
     handles: list[str]
     # Optional class hint for add-mode preview: the viewer sends the active
