@@ -309,9 +309,11 @@ def test_circle_fast_path_is_fast():
     for i in range(5000):
         prims.append(_circle_primitive(f"S{i}", float(i), 0.0, 1.0))
     for i in range(2500):
-        # Start offset at 1 so the first noise circle isn't bit-identical
-        # to the template radius.
-        prims.append(_circle_primitive(f"N{i}", float(i), 1.0, 1.0 + (i + 1) * 1e-4))
+        # Noise spacing 1e-3 mm = 10 buckets per step under
+        # CIRCLE_RADIUS_KEY_DIGITS=4. Stays clear of the ±1 lookup window
+        # (which intentionally absorbs sub-bucket FP drift; see
+        # `test_circle_fast_path_absorbs_bucket_edge_drift`).
+        prims.append(_circle_primitive(f"N{i}", float(i), 1.0, 1.0 + (i + 1) * 1e-3))
     shapes = _build_shapes(prims)
 
     t0 = time.perf_counter()
@@ -381,6 +383,62 @@ def test_legacy_template_loads_with_null_kinds(tmp_db):
     reloaded = lib.templates_of("FiducialCircle")
     assert len(reloaded) == 1
     assert reloaded[0].entity_kinds == [None]
+
+
+# ---- bucket-edge drift (banker's rounding fence-post) --------------------
+def test_circle_fast_path_absorbs_bucket_edge_drift():
+    """Template's recomputed radius lands one bucket away from the drawing's
+    analytical radius (the banker's-rounding fence-post failure mode `9d66024`
+    introduced). The ±1 neighbour lookup MUST still find the drawing circle;
+    a single-bucket lookup would miss entirely."""
+    # r·10^4 = 412.5 exactly — banker's rounds to 412 (even). The drawing
+    # primitive lands in bucket 412 via from_circle's analytical r.
+    r_drawing = 0.04125
+    prims = [_circle_primitive("D", 0.0, 0.0, r_drawing)]
+    shapes = _build_shapes(prims)
+    drawing_bucket = _radius_bucket_key(shapes["D"].radius)
+    assert drawing_bucket == 412  # sanity: confirm banker's-rounding choice
+
+    # Simulate the boundary-drift failure: the stored template's
+    # from_points-recomputed radius lands above the .5 fence-post and
+    # rounds to 413. Direct field mutation on the dataclass mirrors the
+    # post-from_points state without needing to reproduce the FP-precision
+    # path that produces it (which is data-dependent on world coords).
+    template = _virtual_circle_shape("_tpl", r_drawing)
+    template.radius = r_drawing + 1e-7  # > 0.5/1e4 above the fence-post
+    template_bucket = _radius_bucket_key(template.radius)
+    assert template_bucket == 413
+    assert abs(template_bucket - drawing_bucket) == 1  # adjacent buckets
+
+    # Regression check: a single-bucket lookup at the template's key returns
+    # empty — proves this test exercises the pre-fix failure mode.
+    from app.matching import _get_radius_buckets
+    single_bucket_hits = _get_radius_buckets(shapes).get(template_bucket, [])
+    assert single_bucket_hits == []
+
+    # With ±1 window: matches MUST include "D".
+    out = _match_single_circle(template, shapes, skip=set())
+    assert {m.handles[0] for m in out.matches} == {"D"}
+    assert out.matches[0].score == 0.0
+    assert out.matches[0].scale == 1.0
+    assert out.near_misses == []
+
+
+def test_circle_fast_path_pm1_window_does_not_reach_real_design_steps():
+    """The ±1 lookup window MUST NOT pull in circles whose radius is far
+    enough away to represent a real design distinction (≥ 1 µm = 10 buckets
+    under CIRCLE_RADIUS_KEY_DIGITS = 4)."""
+    r0 = 0.4
+    prims = [
+        _circle_primitive("T",   0.0, 0.0, r0),          # template, excluded by skip
+        _circle_primitive("SAME", 1.0, 0.0, r0),         # same radius → match
+        _circle_primitive("FAR",  2.0, 0.0, r0 + 1e-3),  # 1 µm bigger = 10 buckets away
+    ]
+    shapes = _build_shapes(prims)
+    out = find_matches(["T"], shapes)
+    matched = {m.handles[0] for m in out.matches}
+    assert matched == {"SAME"}
+    assert "FAR" not in matched
 
 
 # ---- helper to clear shared module cache between tests ------------------

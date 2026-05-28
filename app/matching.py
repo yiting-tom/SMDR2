@@ -852,7 +852,14 @@ def _match_single_circle(
     per off-bucket entity was the dominant cost in the prior generic path.
     """
     key = _radius_bucket_key(template.radius)
-    hits = _get_radius_buckets(drawing).get(key, [])
+    buckets = _get_radius_buckets(drawing)
+    # ±1 neighbour lookup absorbs banker's-rounding fence-post drift: the
+    # drawing side uses `from_circle`'s analytical r; library-stored templates
+    # reload through `from_points` which recomputes r numerically. When r·10⁴
+    # lands on a .5 boundary, ULP-scale drift flips the bucket.
+    hits: list[str] = []
+    for k in (key - 1, key, key + 1):
+        hits.extend(buckets.get(k, []))
     matches = [
         MatchResult(handles=[h], score=0.0, scale=1.0)
         for h in hits if h not in skip
