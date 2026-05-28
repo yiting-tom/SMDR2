@@ -1629,10 +1629,29 @@ function resolveSubRuleFile(sub) {
   return currentProductInfo?.files_by_role?.[sub.part] ?? null;
 }
 
+function subRuleHasHandles(sub) {
+  if (sub.from) return true;
+  if (sub.tol) return true;
+  if (Array.isArray(sub.to)) return sub.to.length > 0;
+  return !!sub.to;
+}
+
 function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
   const li = document.createElement("li");
   li.dataset.ruleName = ruleName;
   li.dataset.idx = String(idx);
+
+  // No from/to/tol → nothing on the canvas can be highlighted, so render
+  // as plain text without nav hint or click.
+  if (!subRuleHasHandles(sub)) {
+    li.classList.add("text-only");
+    li.innerHTML =
+      `<span class="part">${escapeHtml(sub.part)}</span>` +
+      `<span class="sub-text">${escapeHtml(sub.text || "")}</span>` +
+      `<span></span>`;
+    return li;
+  }
+
   const targetFile = resolveSubRuleFile(sub);
   // "Local focus" only when the sub-rule's geometry is on THIS DXF.
   // For multi-DXF roles `sub.part === currentRole` isn't enough — two
