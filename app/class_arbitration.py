@@ -326,7 +326,14 @@ def arbitrate(
         for t in raw_targets:
             if t in per_class_pre:
                 per_class_pre[t] += 1
-        fallback_triggered = any(
+        # Precondition: the safe direction (default_class) is only a valid
+        # fallback target when its templates actually produced at least one
+        # match in this pool. Otherwise the fallback would invent labels
+        # under a class key backed by no library template.
+        default_in_pool = any(
+            inst.original_class == group.default_class for inst in instances
+        )
+        fallback_triggered = default_in_pool and any(
             per_class_pre[m] < group.min_population
             for m in group.members if m != group.default_class
         )

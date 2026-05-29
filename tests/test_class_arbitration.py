@@ -357,41 +357,45 @@ def test_arbitrate_reassigned_instance_keyed_under_zero():
     template position in the SOURCE class and carries no meaning in
     the NEW class's template list.
 
-    Setup: 4 corner instances cross-fired to BGABall.1 (a hypothetical
-    second BGA template) AND FiducialCircle.0. Population fallback
-    forces them to FiducialCircle. Output MUST be
-    `top_view.fiducial_circle.0`, not `.1`.
+    Setup: 4 corner instances initially keyed under
+    `bottom_view.bga_ball.1` (a hypothetical second BGA template). One
+    additional anchor instance is keyed under
+    `top_view.fiducial_circle.0` — its sole purpose is to satisfy the
+    `default_in_pool` precondition so population fallback fires (without
+    it, `default_class=FiducialCircle` would have zero instances in the
+    pool and the fallback would correctly be suppressed). The 4 corner
+    BGABalls are then reassigned to FiducialCircle; their output key
+    MUST use `.0`, not the source `.1`.
     """
     coords = {
         "f0": (-5.0, -5.0),
         "f1": (-5.0, 10.0),
         "f2": (10.0, -5.0),
         "f3": (10.0, 10.0),
+        "anchor": (50.0, 50.0),  # geometrically distant — won't be a neighbour
     }
     shapes = _shapes_from_coords(coords)
-    # Source: every instance appears under TWO keys (cross-fire). The
-    # BGABall side uses template index 1 — which would be meaningless
-    # if re-emitted under FiducialCircle. Note BGABall keys must use
-    # bottom_view (top_view is disallowed) for the input to be valid.
     out = {
-        "top_view.fiducial_circle.0":   [["f0"], ["f1"], ["f2"], ["f3"]],
+        # The reassignment subject: 4 BGABall instances under template
+        # index 1. Note BGABall keys must use bottom_view (top_view is
+        # disallowed for BGABall) for the input to be matcher-realistic.
         "bottom_view.bga_ball.1":       [["f0"], ["f1"], ["f2"], ["f3"]],
+        # FiducialCircle anchor so default_in_pool=True. Isolated → its
+        # own classification doesn't disturb the BGA count rule.
+        "top_view.fiducial_circle.0":   [["anchor"]],
     }
     new_out, _counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
 
-    fid_keys = [k for k in new_out if "fiducial_circle" in k]
-    # `pool_instances` dedupes by handle set and keeps the lex-first
-    # source key's (view, class, idx) as the instance's `original_*`
-    # fields. `bottom_view.bga_ball.1` sorts before
-    # `top_view.fiducial_circle.0`, so each instance enters arbitration
-    # carrying view=bottom_view, original_class=BGABall, original_idx=1.
-    # Population fallback then reassigns BGABall → FiducialCircle. The
-    # invariant we're locking in: the output `.idx` SHALL be 0 (the new
-    # class's template index), NOT the original_idx (1, which was a
-    # BGABall template position and is meaningless under FiducialCircle).
-    assert fid_keys == ["bottom_view.fiducial_circle.0"], (
+    # The 4 corners came from `bottom_view.bga_ball.1` → population
+    # fallback reassigns them to FiducialCircle → MUST land under
+    # `bottom_view.fiducial_circle.0` (the new class's template index 0,
+    # NOT the original .1 which was a BGABall template position).
+    bottom_fid_keys = [
+        k for k in new_out if k.startswith("bottom_view.fiducial_circle.")
+    ]
+    assert bottom_fid_keys == ["bottom_view.fiducial_circle.0"], (
         f"reassigned instances must land under .0 of the new class, "
-        f"not the original .1 from the source key. Got {fid_keys}"
+        f"not the original .1 from the source key. Got {bottom_fid_keys}"
     )
 
 
@@ -417,6 +421,61 @@ def test_arbitrate_is_deterministic_under_shuffle():
         b_handles = sorted(tuple(hl) for hl in new_b[k])
         assert a_handles == b_handles, f"mismatch at {k!r}"
     assert counts_a == counts_b
+
+
+def test_fallback_skipped_when_default_class_has_no_pool_evidence():
+    """Library has ONLY BGABall templates (no FiducialCircle template).
+    Pool contains 4 BGABall match instances, all from `bga_ball.0`.
+    `default_class = FiducialCircle` is absent from the pool — no
+    library template fired under it. Per-class population check would
+    have triggered fallback (4 < 8), but the new `default_in_pool`
+    precondition suppresses it. Every instance MUST stay BGABall,
+    no phantom `fiducial_circle.*` key is emitted.
+
+    Regression for the user-reported bug where deleting all
+    FiducialCircle templates from the library still produced
+    FiducialCircle labels in scan-all and the toolbar chip.
+    """
+    # Tight 2×2 grid in bottom_view (BGABall is allowed there). Each
+    # cell has 2-3 neighbours within the derived pitch — `classify()`
+    # labels them BGABall (≥2 neighbours). Without the precondition,
+    # 4 < min_population=8 would trigger fallback → all FiducialCircle.
+    pitch = 0.5
+    coords = {
+        f"g{i}_{j}": (i * pitch, j * pitch)
+        for i in range(2) for j in range(2)
+    }
+    shapes = _shapes_from_coords(coords)
+    out = {
+        "bottom_view.bga_ball.0": [
+            [f"g{i}_{j}"] for i in range(2) for j in range(2)
+        ],
+    }
+    new_out, counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
+
+    label = "BGABall|FiducialCircle"
+    gc = counts[label]
+    # Precondition: default_class absent from pool → no fallback.
+    assert gc["population_fallback_triggered"] is False
+    # Per-instance classify() labels would have to win on their own —
+    # in this tight grid every instance has ≥ 2 neighbours within
+    # 1.5 × derived pitch, so all 4 classify as BGABall.
+    assert gc["assigned"].get("BGABall", 0) == 4
+    assert gc["assigned"].get("FiducialCircle", 0) == 0
+
+    # No `fiducial_circle.*` keys may be emitted — that was the bug.
+    assert all("fiducial_circle" not in k for k in new_out), (
+        f"phantom FiducialCircle key in {list(new_out)} — fallback "
+        f"reassigned BGABall matches under a class with no template"
+    )
+
+    # All 4 handles end up under a bga_ball key.
+    bga_keys = [k for k in new_out if "bga_ball" in k]
+    bga_handles: set[str] = set()
+    for k in bga_keys:
+        for hl in new_out[k]:
+            bga_handles.update(hl)
+    assert bga_handles == {f"g{i}_{j}" for i in range(2) for j in range(2)}
 
 
 def test_arbitrate_noop_when_no_member_classes_present():
