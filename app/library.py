@@ -17,6 +17,7 @@ Persistence:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sqlite3
 import threading
@@ -25,6 +26,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+
+logger = logging.getLogger(__name__)
 
 
 # Canonical class list. Auto-seeded into every newly-created library.
@@ -156,6 +160,60 @@ if _unknown_product_scoped:
         f"{sorted(_unknown_product_scoped)!r}"
     )
 del _unknown_product_scoped
+
+
+# ---- Template dedup signature -------------------------------------------
+# Coordinates are bucketed at 0.1 µm (10^-4 mm). Parallel to
+# _radius_bucket_key's grid in app/matching.py — same FP-noise tolerance,
+# same physical safety margin (real packaging classes differ by ≥ 1 µm =
+# 10 buckets, so dedup never collapses genuinely distinct shapes).
+TEMPLATE_DEDUP_BUCKET = 10**4
+
+
+def template_signature(
+    entity_point_sets: list[list[tuple[float, float]]],
+) -> tuple:
+    """Canonical, hashable dedup key for a template's entity point sets.
+
+    Invariants:
+    - translation YES (centroid-subtracted)
+    - entity-order YES (outer sort)
+    - vertex-order YES (inner sort)
+
+    Non-invariants:
+    - rotation NO  (90° copy gets a different key)
+    - scale NO     (2× copy gets a different key)
+    - reflection NO
+
+    Bucket precision is `TEMPLATE_DEDUP_BUCKET` (0.1 µm), parallel to
+    `_radius_bucket_key` in `app/matching.py`. Pure function — same
+    input always returns the same tuple.
+    """
+    all_pts = [p for ent in entity_point_sets for p in ent]
+    if not all_pts:
+        return ()
+    gx = sum(p[0] for p in all_pts) / len(all_pts)
+    gy = sum(p[1] for p in all_pts) / len(all_pts)
+    entity_keys: list[tuple[tuple[int, int], ...]] = []
+    for pts in entity_point_sets:
+        bucketed = tuple(sorted(
+            (
+                round((p[0] - gx) * TEMPLATE_DEDUP_BUCKET),
+                round((p[1] - gy) * TEMPLATE_DEDUP_BUCKET),
+            )
+            for p in pts
+        ))
+        entity_keys.append(bucketed)
+    return tuple(sorted(entity_keys))
+
+
+def _template_signature_cached(t: "Template") -> tuple:
+    sig = getattr(t, "_signature", None)
+    if sig is not None:
+        return sig
+    sig = template_signature(t.entity_point_sets)
+    object.__setattr__(t, "_signature", sig)
+    return sig
 
 
 # ---- Neighbour-count arbitration registry -------------------------------
@@ -736,6 +794,32 @@ class Library:
         for c in defaults:
             if c not in self._templates:
                 self.add_class(c)
+        self._warn_on_duplicate_signatures()
+
+    def _warn_on_duplicate_signatures(self) -> None:
+        """Surface pre-dedup duplicate rows at startup.
+
+        Groups loaded templates by (class_name, canonical signature) and
+        logs one WARNING per group with count > 1. The duplicates stay
+        in place — the dedup invariant in `add_template_for_file` applies
+        only to new commits. The operator can clean up via the existing
+        delete-template UI if desired.
+        """
+        for class_name, templates in self._templates.items():
+            if len(templates) < 2:
+                continue
+            sig_counts: dict[tuple, int] = {}
+            for t in templates:
+                sig = _template_signature_cached(t)
+                sig_counts[sig] = sig_counts.get(sig, 0) + 1
+            for sig, n in sig_counts.items():
+                if n > 1:
+                    logger.warning(
+                        "library %s: class %s has %d templates with "
+                        "identical canonical signature — pre-dedup data, "
+                        "scan-all will iterate redundantly",
+                        self.library_id, class_name, n,
+                    )
 
     @property
     def classes(self) -> list[str]:
@@ -777,31 +861,57 @@ class Library:
         )
         return True
 
-    def add_template(self, template: Template) -> None:
+    def add_template(self, template: Template) -> tuple[Template, bool]:
         """Library-scoped insert. Routes to add_template_for_file with
         product_id=None — preserved for tests/fixtures and any caller
-        with no file context."""
-        self.add_template_for_file(template, product_id=None)
+        with no file context. Returns (template, already_existed)."""
+        return self.add_template_for_file(template, product_id=None)
 
     def add_template_for_file(
         self,
         template: Template,
         *,
         product_id: str | None,
-    ) -> None:
+    ) -> tuple[Template, bool]:
         """Persist a template with its scope derived from the class.
         Product-scoped classes (PRODUCT_SCOPED_CLASSES) land with
         product_id set to the file's product; library-scoped classes
-        land with product_id IS NULL. The in-memory cache mirrors the
-        write so the Library instance reflects what was just persisted
-        (within this product context when applicable)."""
+        land with product_id IS NULL.
+
+        Deduplicates by canonical signature within the
+        (library_id, class_name, effective_product_id) scope. Returns
+        (existing_template, True) on hit (no append, no store insert);
+        otherwise appends + inserts and returns (template, False)."""
         if template.class_name not in self._templates:
             self.add_class(template.class_name)
-        self._templates[template.class_name].append(template)
         scope_pid = product_id if is_product_scoped(template.class_name) else None
+        new_sig = template_signature(template.entity_point_sets)
+
+        # Library-scoped class → the in-memory cache is canonical at
+        # library scope (every row has product_id IS NULL). Scan it.
+        # Product-scoped class → the cache mixes rows across products
+        # (it's hydrated library-scope-only and then appended to by
+        # any file's commit, regardless of product). Reload the
+        # per-product view from the store so we only compare against
+        # rows in the same effective product scope.
+        if scope_pid is None:
+            candidates = self._templates.get(template.class_name, [])
+        else:
+            _, _, scoped_templates = self.store.load_library(
+                self.library_id, product_id=scope_pid
+            )
+            candidates = scoped_templates.get(template.class_name, [])
+
+        for existing in candidates:
+            if _template_signature_cached(existing) == new_sig:
+                return existing, True
+
+        object.__setattr__(template, "_signature", new_sig)
+        self._templates[template.class_name].append(template)
         self.store.insert_template(
             self.library_id, template, product_id=scope_pid
         )
+        return template, False
 
     def templates_of(self, class_name: str) -> list[Template]:
         return list(self._templates.get(class_name, []))

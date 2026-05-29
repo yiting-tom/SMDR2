@@ -2575,7 +2575,10 @@ async function commitCurrentTemplate() {
     const newClass = data.class_name;
     let mergedStatus = "";
     let needsFullRescan = false;
-    if (scanAllByHandle) {
+    // On dedup hit the server discarded the new template; the existing
+    // row's handle set is already in the overlay, so any merge here
+    // would be a no-op-with-render. Skip the whole block.
+    if (!data.already_existed && scanAllByHandle) {
       if (isArbitrationMember(newClass)) {
         needsFullRescan = true;
       } else {
@@ -2597,7 +2600,9 @@ async function commitCurrentTemplate() {
     }
 
     setBaseStatus(
-      `saved ${data.class_name} template (#${data.count})${mergedStatus}`,
+      data.already_existed
+        ? `template already in library (#${data.count})`
+        : `saved ${data.class_name} template (#${data.count})${mergedStatus}`,
     );
     selection.clear();
     matchSet.clear();

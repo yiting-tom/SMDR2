@@ -1123,12 +1123,13 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
         collect_entity_kinds(data["primitives"], handle_index, h) for h in req.handles
     ]
     tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
-    lib.add_template_for_file(tmpl, product_id=rec.product_id)
+    stored, already_existed = lib.add_template_for_file(tmpl, product_id=rec.product_id)
     return {
-        "template_id": tmpl.id,
-        "class_name": tmpl.class_name,
+        "template_id": stored.id,
+        "class_name": stored.class_name,
         "library_id": rec.library_id,
-        "count": lib.count(tmpl.class_name),
+        "count": lib.count(stored.class_name),
+        "already_existed": already_existed,
     }
 
 

@@ -188,7 +188,13 @@ def test_migration_adds_strategy_columns(tmp_db):
 def test_all_templates_returns_indexed_tuples(tmp_db):
     lib = _default_lib(tmp_db)
     t1 = _make_template("SMD-2T")
-    t2 = _make_template("SMD-2T")
+    # Distinct geometry: 4-point triangle instead of the 5-point unit square
+    # that `_make_template` returns by default. Necessary because dedup on
+    # commit collapses translation-equivalent shapes within the same class.
+    t2 = Template.from_entities(
+        "SMD-2T",
+        [[(0.0, 0.0), (2.0, 0.0), (1.0, 1.732), (0.0, 0.0)]],
+    )
     # FiducialCircle is library-scoped like SMD-2T; both survive an
     # `add_template` (no product) round-trip.
     t3 = _make_template("FiducialCircle")
