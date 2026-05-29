@@ -295,6 +295,33 @@ def arbitrate(
         label = _group_label(group)
         gc = GroupCounts(pool_size=len(instances))
 
+        # Single-class short-circuit: only one group member contributed
+        # keys to `out` (e.g. library has templates for one class only).
+        # `pool_instances` dedupes by handle set and would surface only
+        # the lex-first source key's class, which would make a true
+        # cross-fire (matcher fires N templates on the same handles)
+        # indistinguishable from a single-template library. So check
+        # the RAW key set here, not the deduped instances list.
+        member_snakes = {m: CLASS_JSON_KEY.get(m, m) for m in group.members}
+        snake_to_display = {v: k for k, v in member_snakes.items()}
+        classes_with_keys: set[str] = set()
+        for key in new_out:
+            parsed = _parse_key(key)
+            if parsed is None:
+                continue
+            _prefix, cls_snake, _idx = parsed
+            display = snake_to_display.get(cls_snake)
+            if display is not None:
+                classes_with_keys.add(display)
+        if len(classes_with_keys) == 1 and instances:
+            sole_class = next(iter(classes_with_keys))
+            # No cross-class competition possible in the source keys —
+            # classify() could only mis-label individual instances by
+            # neighbour density. Leave source keys in `new_out` untouched.
+            gc.assigned = {sole_class: len(instances)}
+            group_counts[label] = gc.to_dict()
+            continue
+
         if len(instances) < 2:
             # Spec: empty / singleton pool → arbitration is a no-op.
             if instances:

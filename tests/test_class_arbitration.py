@@ -251,12 +251,14 @@ def test_arbitrate_bga_grid_plus_corner_fiducials():
     assert view_drops == {}
 
 
-def test_arbitrate_only_corner_fiducials_triggers_population_fallback():
-    """A file with ONLY 4 corner fiducials and no BGA grid: median NN
-    pitch becomes the diagonal-ish distance between corners, and the
-    corners technically have ≥2 neighbours within 1.5× that pitch.
-    Without the fallback they'd all classify as BGA. With min_population=8,
-    they collapse to FiducialCircle."""
+def test_arbitrate_only_corner_fiducials_short_circuits_via_single_class_guard():
+    """A file with ONLY 4 corner fiducials and no BGA grid. The library
+    only has FiducialCircle templates → every pool instance has
+    `original_class=FiducialCircle` → the single-class guard short-circuits
+    arbitration before classify/fallback runs. End result (all 4 stay
+    FiducialCircle) is identical to the historical "classify mis-labels
+    as BGA → population fallback collapses back to FiducialCircle" path,
+    but the diagnostic now records short-circuit instead of fallback."""
     coords = {
         "f0": (-5.0, -5.0),
         "f1": (-5.0, 10.0),
@@ -269,8 +271,11 @@ def test_arbitrate_only_corner_fiducials_triggers_population_fallback():
     }
     new_out, counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
     label = "BGABall|FiducialCircle"
-    assert counts[label]["population_fallback_triggered"] is True
-    # All 4 land under fiducial keys.
+    # Short-circuit path: fallback never ran, pitch never derived.
+    assert counts[label]["population_fallback_triggered"] is False
+    assert counts[label]["derived_pitch"] is None
+    assert counts[label]["assigned"] == {"FiducialCircle": 4}
+    # All 4 land under fiducial keys (source keys, unmodified).
     fid_keys = [k for k in new_out if "fiducial_circle" in k]
     fid_total = sum(len(new_out[k]) for k in fid_keys)
     assert fid_total == 4
@@ -279,17 +284,29 @@ def test_arbitrate_only_corner_fiducials_triggers_population_fallback():
 
 def test_arbitrate_view_conflict_drops_instance():
     """When arbitration reassigns FiducialCircle → BGABall but the
-    instance sits in top_view (disallowed for BGA), it is dropped."""
-    # 3×3 grid in top_view, all originally keyed under FiducialCircle
-    # (matcher cross-fire). With min_population=1 the fallback won't
-    # rescue them; every grid point has ≥ 2 neighbours → classifies as
-    # BGABall → top_view is disallowed → all 9 dropped.
+    instance sits in top_view (disallowed for BGA), it is dropped.
+
+    Setup: 3×3 grid in top_view originally keyed under FiducialCircle
+    (matcher cross-fire) → classify reassigns to BGABall (≥2 neighbours)
+    → BGABall not allowed in top_view → 9 dropped. A geometrically
+    distant BGABall anchor in bottom_view ensures the pool is multi-class
+    (BGABall + FiducialCircle both in `original_class` set), so the
+    single-class short-circuit doesn't fire and the classify-then-reemit
+    path runs. The anchor itself has no neighbours within radius so it
+    classifies as FiducialCircle and survives in bottom_view (FiducialCircle
+    is unconstrained)."""
     coords = {f"p{i}_{j}": (i, j) for i in range(3) for j in range(3)}
+    # Far anchor: in bottom_view so its source-key view is valid for
+    # BGABall (otherwise it would be dropped by split_matches_by_side
+    # upstream of arbitrate); isolated so its classify outcome is
+    # FiducialCircle (0 neighbours within any sensible radius).
+    coords["anchor"] = (1000.0, 1000.0)
     shapes = _shapes_from_coords(coords)
     out = {
         "top_view.fiducial_circle.0": [
             [f"p{i}_{j}"] for i in range(3) for j in range(3)
         ],
+        "bottom_view.bga_ball.0": [["anchor"]],
     }
     group = ArbitrationGroup(
         members=frozenset({"BGABall", "FiducialCircle"}),
@@ -303,10 +320,12 @@ def test_arbitrate_view_conflict_drops_instance():
     )
     new_out, counts, view_drops = arbitrate(out, shapes, [group])
     label = "BGABall|FiducialCircle"
+    # 9 grid points reassigned to BGABall → all dropped by top_view conflict.
     assert counts[label]["dropped_by_view"] == 9
     assert view_drops[label]["top_view"] == 9
-    # No surviving keys — every instance was dropped.
-    assert new_out == {}
+    # Anchor survives as FiducialCircle in bottom_view (unconstrained).
+    fid_keys = [k for k in new_out if "fiducial_circle" in k]
+    assert fid_keys == ["bottom_view.fiducial_circle.0"]
 
 
 def test_arbitrate_collapses_to_template_index_not_instance_index():
@@ -421,6 +440,69 @@ def test_arbitrate_is_deterministic_under_shuffle():
         b_handles = sorted(tuple(hl) for hl in new_b[k])
         assert a_handles == b_handles, f"mismatch at {k!r}"
     assert counts_a == counts_b
+
+
+def test_arbitrate_skips_classify_when_pool_is_single_class():
+    """User-reported regression: 17483 BGABall matches at pitch 0.9 mm,
+    library has only BGABall templates. The matcher's BGABall template
+    happens to cross-fire on a handful of isolated same-radius circles
+    (vias / drill holes / decorative dots) in addition to the main BGA
+    grid. Those isolated circles have 0 neighbours within `1.5 × pitch`
+    → classify (if it ran) would label them FiducialCircle via
+    `MaxNeighbors(1)` → they'd re-emit as `fiducial_circle.0` keys with
+    no backing FiducialCircle template.
+
+    With the single-class short-circuit, the pool's uniform
+    `original_class=BGABall` triggers the early-return before classify
+    runs at all. Every instance stays BGABall, no phantom
+    fiducial_circle keys are produced.
+
+    This test simulates the asymmetric-density case with a 4-corner
+    spread + 2 far outliers — without the short-circuit, every instance
+    has 0-1 neighbours within `1.5 × derived_pitch` → all classify as
+    FiducialCircle → fallback precondition (no FiducialCircle in pool)
+    correctly suppresses the collapse → but classify's per-instance
+    FiducialCircle labels would still drive the re-emit → phantom keys.
+    """
+    coords = {
+        "g0": (-5.0, -5.0),
+        "g1": (-5.0, 10.0),
+        "g2": (10.0, -5.0),
+        "g3": (10.0, 10.0),
+        # Two far outliers — guaranteed to have 0 neighbours within
+        # any reasonable radius derived from the 4-corner cluster.
+        "g4": (200.0, 200.0),
+        "g5": (-200.0, -200.0),
+    }
+    shapes = _shapes_from_coords(coords)
+    out = {
+        "bottom_view.bga_ball.0": [
+            ["g0"], ["g1"], ["g2"], ["g3"], ["g4"], ["g5"],
+        ],
+    }
+    new_out, counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
+
+    label = "BGABall|FiducialCircle"
+    gc = counts[label]
+    # Short-circuit fired before classify/pitch derivation.
+    assert gc["population_fallback_triggered"] is False
+    assert gc["derived_pitch"] is None
+    assert gc["assigned"] == {"BGABall": 6}
+    assert gc["reassigned_from_match"] == 0
+
+    # No phantom FiducialCircle keys — the bug case.
+    assert all("fiducial_circle" not in k for k in new_out), (
+        f"phantom FiducialCircle key in {list(new_out)} — single-class "
+        f"guard should have short-circuited"
+    )
+
+    # All 6 handles end up under the source bga_ball key (unchanged).
+    bga_handles: set[str] = set()
+    for k in new_out:
+        if "bga_ball" in k:
+            for hl in new_out[k]:
+                bga_handles.update(hl)
+    assert bga_handles == {f"g{i}" for i in range(6)}
 
 
 def test_fallback_skipped_when_default_class_has_no_pool_evidence():
