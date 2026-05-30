@@ -279,7 +279,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | 變數 | 預設 | 用途 |
 |---|---|---|
-| `SMDR2_N_JOBS` | `1` | 比對引擎的 worker 數，見 `matching.py:65` |
+| `SMDR2_N_JOBS` | `1` | 比對引擎的 worker 數，見 `matching.py:75` |
 | `SMDR2_DEV_MOCK_DRC` | unset | `"1"` → `app/external_rule_check/_stub.py` dispatch 到 `_dev_mock.py`，回傳 3 條 mock 規則（涵蓋 viewer 全部三種顯示模式）給開發 smoke 用；正式部署留空 |
 
 其他 host / port 等請傳給 `uvicorn` CLI。
