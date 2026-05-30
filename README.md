@@ -52,17 +52,17 @@ tests/                pytest 套件
 
 | 常數 | 預設 | 行：file | 作用 | 何時調 |
 |---|---|---|---|---|
-| `SCALE_MIN` / `SCALE_MAX` | `0.95` / `1.05` | 32–33 | 允許的縮放區間。樣板尺寸可以 ±5% 浮動 | 圖紙來源縮放不穩 → 放寬；要避免誤報 → 收緊 |
-| `TOLERANCE_ABS` | `0.05` | 34 | Chamfer 距離容差，世界座標（mm）| 圖紙噪訊大 → 放寬；要更嚴格 → 收緊 |
-| `VERTEX_COUNT_RATIO` | `0.25` | 35 | 候選頂點數差 ±25% 內才比 | 樣板頂點數變動大 → 放寬 |
-| `PATH_LENGTH_RATIO` | `0.20` | 36 | 候選 path length 差 ±20% 內才比 | 縮放區間放寬時要同步放寬 |
-| `RADIUS_RATIO` | `0.20` | 37 | 旋轉不變式：離 centroid 最大半徑 ±20% | rotation-invariant 預篩 gate |
-| `SIGMA_RATIO_TOL` | `0.15` | 38 | 主軸 σ₂/σ₁ aspect 差容差 | 形狀寬高比預篩 gate |
-| `CIRCLE_RADIUS_KEY_DIGITS` | `6` | 51 | 純 CIRCLE 比對的半徑 hash 精度 | 一般不動 |
-| `RESAMPLE_N` | `64` | 59 | Polyline 沿弧長重採樣的點數 | 樣板太長 → 加；太細長碎邊 → 減 |
-| `BRUTE_FORCE_CUTOFF` | `50` | 254 | 候選數小於此就 brute force（不建空間索引）| 一般不動 |
-| `N_JOBS`（環境變數）| `1` | 65 | Worker process 數，讀 `SMDR2_N_JOBS` | 大圖時設為 CPU 核心數 |
-| `_MIN_ITEMS_PER_WORKER` | `200` | 66 | 低於此 worker pool 太貴改 single-thread | 一般不動 |
+| `SCALE_MIN` / `SCALE_MAX` | `0.99` / `1.01` | 36–37 | 允許的縮放區間。樣板尺寸可以 ±1% 浮動 | 圖紙來源縮放不穩 → 放寬；要避免誤報 → 收緊 |
+| `TOLERANCE_ABS` | `0.2` | 38 | Chamfer 距離容差，世界座標（mm）| 圖紙噪訊大 → 放寬；要更嚴格 → 收緊 |
+| `VERTEX_COUNT_RATIO` | `0.3` | 39 | 候選頂點數差 ±30% 內才比 | 樣板頂點數變動大 → 放寬 |
+| `PATH_LENGTH_RATIO` | `0.20` | 40 | 候選 path length 差 ±20% 內才比 | 縮放區間放寬時要同步放寬 |
+| `RADIUS_RATIO` | `0.20` | 41 | 旋轉不變式：離 centroid 最大半徑 ±20% | rotation-invariant 預篩 gate |
+| `SIGMA_RATIO_TOL` | `0.15` | 42 | 主軸 σ₂/σ₁ aspect 差容差 | 形狀寬高比預篩 gate |
+| `CIRCLE_RADIUS_KEY_DIGITS` | `4` | 61 | 純 CIRCLE 比對的半徑 hash 精度 | 一般不動 |
+| `RESAMPLE_N` | `64` | 69 | Polyline 沿弧長重採樣的點數 | 樣板太長 → 加；太細長碎邊 → 減 |
+| `BRUTE_FORCE_CUTOFF` | `50` | 332 | 候選數小於此就 brute force（不建空間索引）| 一般不動 |
+| `N_JOBS`（環境變數）| `1` | 75 | Worker process 數，讀 `SMDR2_N_JOBS` | 大圖時設為 CPU 核心數 |
+| `_MIN_ITEMS_PER_WORKER` | `200` | 76 | 低於此 worker pool 太貴改 single-thread | 一般不動 |
 
 #### 不同狀況怎麼調 matching 門檻
 
@@ -91,13 +91,13 @@ tests/                pytest 套件
 
 | 常數 | 預設 | 行 | 作用 |
 |---|---|---|---|
-| `BASE_TOLERANCE` | `0.01` | 40 | ezdxf flatten 曲線時的弦差 |
-| `SCALE_FACTOR` | `1e-5` | 44 | 大半徑曲線的 base tolerance scale |
-| `CIRCLE_MIN_VERTS` | `8` | 58 | 把多邊形「升等」為 CIRCLE primitive 的最小頂點數（含曲線轉出的）|
-| `CIRCLE_MIN_VERTS_NOCURVE` | `11` | 59 | 同上，但純由直線 LINE 組成的多邊形要 11 個以上才算 |
-| `CIRCLE_RADIAL_TOL` | `0.02` | 60 | 半徑相對誤差容差（判斷夠不夠圓）|
-| `MAX_PRIMS_PER_THUMB` | `600` | 471 | layer 縮圖的 primitive 上限 |
-| `MAX_VERTICES_PER_POLYLINE` | `24` | 472 | layer 縮圖中 polyline 的頂點上限 |
+| `BASE_TOLERANCE` | `0.01` | 42 | ezdxf flatten 曲線時的弦差 |
+| `SCALE_FACTOR` | `1e-5` | 46 | 大半徑曲線的 base tolerance scale |
+| `CIRCLE_MIN_VERTS` | `8` | 60 | 把多邊形「升等」為 CIRCLE primitive 的最小頂點數（含曲線轉出的）|
+| `CIRCLE_MIN_VERTS_NOCURVE` | `11` | 61 | 同上，但純由直線 LINE 組成的多邊形要 11 個以上才算 |
+| `CIRCLE_RADIAL_TOL` | `0.002` | 62 | 半徑相對誤差容差（判斷夠不夠圓）。與 client-side `measure_core.js::detectCircle` 保持一致 |
+| `MAX_PRIMS_PER_THUMB` | `600` | 783 | layer 縮圖的 primitive 上限 |
+| `MAX_VERTICES_PER_POLYLINE` | `24` | 784 | layer 縮圖中 polyline 的頂點上限 |
 
 調整這些會影響「圓被識別為 circle 還是 polyline」、layer 縮圖細緻度。
 
@@ -198,9 +198,26 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | 常數 | 預設 | 行 | 作用 |
 |---|---|---|---|
-| `MAX_WORKERS` | `2` | 39 | preprocess 同時跑幾支 worker process |
+| `MAX_WORKERS` | `2`（env `SMDR2_MAX_WORKERS`）| 58 | preprocess / save_match / rule_check 同時跑幾支 worker process，讀 `SMDR2_MAX_WORKERS` 環境變數 |
 
 大量併發上傳時調高；單機 dev 用 1–2 就好。
+
+> ⚠️ **Worker store-access 不變式**：所有背景 worker（`_preprocess_worker` /
+> `_save_match_worker` / `_rule_check_worker` / `_discover_layers_worker`）讀
+> library / template 狀態時**必須**用 `Store.load_library(...)` 重新讀，**不可**
+> 讀 process-level 的 `LIBRARIES` 快取。`LIBRARIES` 只在 parent FastAPI process
+> 內由 `add_template` 更新；worker pool 重用 process，第一個 job 之後快取就是過時
+> 快照，會把新 commit 的 template **無聲地漏掉**。這條規則寫在 `app/jobs.py` module
+> docstring，並有一條 AST regression test 守著（任何 worker 出現 `LIBRARIES.get` 就
+> fail）。
+
+### 5.5) 上傳限制 — `app/main.py`
+
+| 常數 | 預設 | 行 | 作用 |
+|---|---|---|---|
+| `MAX_UPLOAD_BYTES` | `300 MB`（env `SMDR2_MAX_UPLOAD_MB`）| 86 | 單檔 DXF 上傳大小上限，超過 `upload_product_file` 回 HTTP 413。讀 `SMDR2_MAX_UPLOAD_MB`（MB 單位）|
+
+防的是誤傳超大檔 / 壞檔凍結 server，不是擋惡意攻擊（內網工具）。
 
 ### 6) 預設類別 / 函式庫 — `app/library.py`
 
@@ -277,17 +294,25 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | Layer 篩選 | `app/dxf.py` + `main.py` | `static/layer_modal.js` | `openspec/specs/dxf-pipeline/spec.md` |
 | Template library | `app/library.py` | `viewer.html` 框選介面 | `openspec/specs/template-library/spec.md` |
 | Pattern matching | `app/matching.py` + `jobs.py` | `static/canvas.js` | `openspec/specs/pattern-matching/spec.md` |
+| Class arbitration（同尺寸圓 BGABall ↔ FiducialCircle 分流）| `app/class_arbitration.py` | — | `openspec/specs/class-arbitration/spec.md` |
 | Product / 多 DXF per role | `app/products.py` + `files.py` | `static/dashboard.js` | `openspec/specs/product-files/spec.md` |
+| Product view 覆蓋（role ↔ view 對應）| `app/product_views.py` | — | （併入 `openspec/specs/product-files/spec.md`）|
 | Side regions (top/bottom/side view rect) | `app/side_regions.py` | viewer 框選 | `openspec/specs/viewer-ui/spec.md` |
 | Viewer UI | — | `static/canvas.js` | `openspec/specs/viewer-ui/spec.md` |
+| Dev 參數覆寫（matching 門檻即時調）| `app/dev_overrides.py` + `main.py` | dashboard dev panel | `openspec/specs/dev-parameter-overrides/spec.md` |
 | Design Rule Check (adapter → 量測組 module) | `app/rule_check.py` + `app/external_rule_check/` | dashboard rule modal + viewer rule sidebar | `openspec/specs/design-rule-checking/spec.md` |
 | DRC handoff bundle (handoff zip + 內部 bundle dir) | `app/drc_bundle.py` + `main.py` | dashboard dev-mode 按鈕 | 同上 + `INTEGRATION.md` |
 | DRC dry-run CLI | `app/tools/drc_dry_run.py` | — | （給量測組自測，不入 spec） |
-| Dashboard developer mode | — | `static/dashboard.js` | `openspec/specs/dashboard-ui/spec.md`（archive 後生效）|
+| Dashboard developer mode | — | `static/dashboard.js` | （`dashboard-ui` spec 尚未 archive 進 `openspec/specs/`；行為見 in-flight change）|
 
 ## HTTP API 速查
 
-完整清單看 `app/main.py`。重點：
+`app/main.py` 共約 45 條路由，下表只列日常會碰的重點；**完整清單以
+`app/main.py` 的 `@app.*` decorator 為準**（含 layer 篩選、template CRUD、
+side-regions、scan-all、prematch、dev 端點等）。
+
+錯誤碼慣例：`404` 找不到資源、`400` 輸入錯誤 / 持久化檔損毀（帶檔案路徑
+context）、`413` 上傳超過 `SMDR2_MAX_UPLOAD_MB`、`425` 檔案尚未 ready。
 
 | Method · Path | 用途 |
 |---|---|
@@ -326,8 +351,40 @@ uv run pytest -k "drc_bundle"          # 關鍵字
 UI 變動需要手動 smoke：開 dashboard、跑流程，目前沒有 browser
 test harness。
 
+## 偵錯：背景 job 與日誌
+
+所有背景 job（discover / preprocess / save_match / rule_check）都走
+`app/jobs.py` 的 ProcessPool，並透過 module logger（`logging.getLogger`）
+發結構化日誌——**成功 INFO 里程碑、失敗 WARNING/ERROR 帶 exception 型別與
+detail**。job 卡住或結果不對時，這是第一手線索。
+
+| 階段 | 成功訊號（INFO）| 失敗訊號（WARNING/ERROR）|
+|---|---|---|
+| Preprocess | `preprocess_done file_id=… primitive_count=…` | `preprocess_failed` / `preprocess_callback_failed` |
+| Save Match | `save_match_done file_id=…` | `save_match_failed` / `save_match_callback_failed` |
+| Rule Check | `rule_check_done product_id=… pass_count=…` | `rule_check_failed` |
+
+`*_callback_failed` 特別重要：它代表 worker 本身成功、但**收尾的
+`FILE_STORE` 更新出錯**。這條 path 以前會被靜默吞掉（job 假裝 `done`）；
+現在一律記 ERROR 並把 job 翻成 `error`，不會再無聲失敗。
+
+除錯流程：
+
+1. `GET /api/jobs/{job_id}` 看 `status`（queued / running / done / error）
+   與 `error` 欄位。
+2. 在 server stderr（uvicorn 預設輸出）grep `job_id=<id>` 找對應日誌行。
+3. 持久化檔（`data/parsed|prematch|match|rule_check/*.json`）若損毀，讀取
+   端點會回 **HTTP 400 並帶檔案路徑**（不是無資訊的 500）——直接照路徑去
+   看那個檔。
+
+> 不另外配置 logging handler（不呼叫 `basicConfig`），讓 uvicorn / CLI
+> 決定輸出去向。callback 跑在 **parent process**，所以日誌不會隨 worker
+> 退出而消失。
+
 ## 文件
 
+- 架構與維護指南（新人先讀）：`ARCHITECTURE.md` — pipeline 資料流、worker
+  併發模型、快取陷阱、怎麼加 job / route / capability、OpenSpec 工作流
 - 正式契約：`openspec/specs/<capability>/spec.md`（每個 capability 一份）
 - 變更提案歷史：`openspec/changes/`
 - 外部 DRC 串接：`openspec/specs/design-rule-checking/INTEGRATION.md`
