@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import shutil
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -79,6 +80,32 @@ from app.storage import (
 TEST_DXF = DATA_DIR / "test.dxf"
 
 
+# Max upload size for a single DXF (env-overridable, mirrors SMDR2_N_JOBS /
+# SMDR2_MAX_WORKERS). 300 MB is generous for packaging DXFs and catches the
+# "wrong file / corrupted export" mistake without web-scale machinery.
+MAX_UPLOAD_BYTES = int(os.environ.get("SMDR2_MAX_UPLOAD_MB", "300")) * 1024 * 1024
+
+
+def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
+    """Read a persisted pipeline-artifact JSON file, turning corruption into
+    a clean HTTP 400 (with the artifact kind + path in the detail) instead of
+    an uncaught JSONDecodeError → opaque 500. Matches the 400 convention used
+    by `upload_product_rule_check`.
+
+    MUST be called at the route-handler level, NOT inside an `@lru_cache`-wrapped
+    helper: `lru_cache` memoizes raised exceptions, so caching the raise would
+    re-raise the stale error on later cache hits with the same key.
+    """
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{kind} file is unreadable/corrupt: {path}: {exc}",
+        )
+
+
 # ---- Cached parsed-JSON + shape index ------------------------------------
 @lru_cache(maxsize=4)
 def _cached_parsed(path: str, mtime_ns: int) -> dict:  # noqa: ARG001
@@ -114,7 +141,15 @@ def _parsed_for(file_id: str) -> dict:
     pp = parsed_path(file_id)
     if not pp.exists():
         raise HTTPException(status_code=500, detail="parsed file missing on disk")
-    return _cached_parsed(str(pp), pp.stat().st_mtime_ns)
+    # Guard at the wrapper level (outside `_cached_parsed`'s lru_cache) so a
+    # corrupt file yields a contextual 400, not an opaque 500.
+    try:
+        return _cached_parsed(str(pp), pp.stat().st_mtime_ns)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"parsed file is unreadable/corrupt: {pp}: {exc}",
+        )
 
 
 # ---- Startup / shutdown --------------------------------------------------
@@ -414,6 +449,19 @@ async def upload_product_file(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty upload")
+    # Per-file size guard on the buffered body. In multipart/form-data the
+    # request Content-Length covers the whole body (fields + boundaries), not
+    # the single file part, and FastAPI has already buffered the part by the
+    # time we get here — so len(content) is the authoritative per-file check.
+    # Bounds accidental huge uploads (wrong/corrupt export); env-tunable.
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"upload exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit "
+                f"(SMDR2_MAX_UPLOAD_MB); got {len(content) // (1024 * 1024)} MB"
+            ),
+        )
 
     # Optional targeted eviction of a specific file in this product+role.
     if replace_file_id:
@@ -1242,8 +1290,7 @@ async def prematch(file_id: str) -> dict:
     if not pp.exists():
         # The worker didn't get to this step (older DB row) — return empty.
         return {"by_class": {}, "total": 0, "stale": True}
-    with open(pp) as f:
-        return json.load(f)
+    return _load_json_or_http(pp, kind="prematch")
 
 
 # ---- Match JSON ----------------------------------------------------------
@@ -1284,8 +1331,7 @@ async def get_match_json(file_id: str) -> dict:
     mp = match_path(file_id)
     if not mp.exists():
         raise HTTPException(status_code=404, detail="match JSON not yet generated")
-    with open(mp) as f:
-        return json.load(f)
+    return _load_json_or_http(mp, kind="match")
 
 
 # ---- Rule checking (product-scoped, cross-DXF) --------------------------
@@ -1342,8 +1388,18 @@ async def get_product_rule_check(product_id: str) -> dict:
     rp = rule_check_path(product_id)
     if not rp.exists():
         raise HTTPException(status_code=404, detail="rule check not yet run")
-    with open(rp) as fp:
-        result = json.load(fp)
+    result = _load_json_or_http(rp, kind="rule-check")
+    # Re-validate the persisted payload against the envelope contract so a
+    # structurally-corrupt-but-parseable file surfaces loudly (400) instead of
+    # producing silent wrong pass/fail counts. Mirrors upload_product_rule_check.
+    from app.rule_check import RuleCheckOutputError, _validate_envelope
+    try:
+        _validate_envelope(result)
+    except RuleCheckOutputError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"rule-check JSON failed envelope validation: {exc}",
+        )
     n_pass = sum(1 for v in result.values() if v.get("pass"))
     return {
         "product_id": product_id,

@@ -12,11 +12,25 @@ Two job kinds, both running on the same worker pool:
   chosen layer subset. Outputs (as before):
       data/parsed/{file_id}.json
       data/prematch/{file_id}.json
+
+WORKER STORE-ACCESS INVARIANT
+-----------------------------
+Worker functions (`_preprocess_worker`, `_save_match_worker`,
+`_rule_check_worker`, `_discover_layers_worker`) MUST load library/template
+state with a fresh ``Store.load_library(...)`` read. They MUST NOT read the
+process-level ``LIBRARIES`` cache: that singleton is seeded only by in-process
+``add_template`` mutations, which never happen inside a reused worker process,
+so ``LIBRARIES.get`` returns a stale snapshot on every job after the first one
+handled by that worker — silently dropping newly-committed templates from the
+Match JSON. (A regression test guards against ``LIBRARIES.get`` appearing in
+worker code; see tests.) The long-form rationale lives in `_save_match_worker`.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 import traceback
 import uuid
@@ -39,7 +53,9 @@ from app.storage import (
 )
 
 
-MAX_WORKERS = 2
+logger = logging.getLogger(__name__)
+
+MAX_WORKERS = int(os.environ.get("SMDR2_MAX_WORKERS", "2"))
 
 _executor: ProcessPoolExecutor | None = None
 _jobs: dict[str, dict[str, Any]] = {}
@@ -405,23 +421,46 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
             job["error"] = str(e)
             job["completed_at"] = time.time()
         FILE_STORE.update_status(file_id, "error", error=f"{e}\n{tb}")
+        logger.warning(
+            "preprocess_failed job_id=%s file_id=%s %s: %s",
+            job_id, file_id, type(e).__name__, e,
+        )
+        return
+    # Post-result work (FILE_STORE mutations) runs inside the guard so an
+    # exception here is logged and flips the job to `error` instead of being
+    # silently swallowed after a premature `done`.
+    try:
+        factor_changed = FILE_STORE.update_parsed(
+            file_id,
+            primitive_count=result["primitive_count"],
+            bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
+            background=result["background"],
+            insunits=result.get("insunits"),
+            applied_scale=float(result.get("applied_scale", 1.0)),
+        )
+        FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
+        if factor_changed:
+            _invalidate_match_after_rescale(file_id)
+        _maybe_clear_redundant_unit_override(file_id, result)
+    except Exception as e:
+        tb = traceback.format_exc()
+        with _lock:
+            job["status"] = "error"
+            job["error"] = f"{e}\n{tb}"
+            job["completed_at"] = time.time()
+        logger.error(
+            "preprocess_callback_failed job_id=%s file_id=%s %s: %s",
+            job_id, file_id, type(e).__name__, e, exc_info=True,
+        )
         return
     with _lock:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
-    factor_changed = FILE_STORE.update_parsed(
-        file_id,
-        primitive_count=result["primitive_count"],
-        bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
-        background=result["background"],
-        insunits=result.get("insunits"),
-        applied_scale=float(result.get("applied_scale", 1.0)),
+    logger.info(
+        "preprocess_done job_id=%s file_id=%s primitive_count=%s",
+        job_id, file_id, result.get("primitive_count"),
     )
-    FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
-    if factor_changed:
-        _invalidate_match_after_rescale(file_id)
-    _maybe_clear_redundant_unit_override(file_id, result)
 
 
 def _invalidate_match_after_rescale(file_id: str) -> None:
@@ -678,6 +717,7 @@ def _on_rule_check_done(job_id: str, fut: Future) -> None:
         job = _jobs.get(job_id)
     if job is None:
         return
+    product_id = job.get("product_id")
     try:
         result = fut.result()
     except Exception as e:
@@ -686,11 +726,19 @@ def _on_rule_check_done(job_id: str, fut: Future) -> None:
             job["status"] = "error"
             job["error"] = f"{e}\n{tb}"
             job["completed_at"] = time.time()
+        logger.warning(
+            "rule_check_failed job_id=%s product_id=%s %s: %s",
+            job_id, product_id, type(e).__name__, e,
+        )
         return
     with _lock:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
+    logger.info(
+        "rule_check_done job_id=%s product_id=%s pass_count=%s",
+        job_id, product_id, result.get("pass_count"),
+    )
 
 
 # ---- Save Match worker --------------------------------------------------
@@ -862,15 +910,34 @@ def _on_save_match_done(job_id: str, fut: Future) -> None:
             job["status"] = "error"
             job["error"] = f"{e}\n{tb}"
             job["completed_at"] = time.time()
+        logger.warning(
+            "save_match_failed job_id=%s file_id=%s %s: %s",
+            job_id, file_id, type(e).__name__, e,
+        )
+        return
+    # Flag the file ready for product-level rule checking. Only after
+    # the JSON is on disk — on worker error this stays untouched so the
+    # rule-check submit gate keeps rejecting the role. Run inside the guard
+    # so a mutation failure flips the job to `error` rather than being
+    # swallowed after a premature `done`.
+    try:
+        FILE_STORE.set_match_saved(file_id, True)
+    except Exception as e:
+        tb = traceback.format_exc()
+        with _lock:
+            job["status"] = "error"
+            job["error"] = f"{e}\n{tb}"
+            job["completed_at"] = time.time()
+        logger.error(
+            "save_match_callback_failed job_id=%s file_id=%s %s: %s",
+            job_id, file_id, type(e).__name__, e, exc_info=True,
+        )
         return
     with _lock:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
-    # Flag the file ready for product-level rule checking. Only after
-    # the JSON is on disk — on worker error this stays untouched so the
-    # rule-check submit gate keeps rejecting the role.
-    FILE_STORE.set_match_saved(file_id, True)
+    logger.info("save_match_done job_id=%s file_id=%s", job_id, file_id)
 
 
 # ---- Re-process-all (dev mode) -------------------------------------------
