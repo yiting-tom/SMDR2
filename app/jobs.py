@@ -169,7 +169,7 @@ def _preprocess_worker(
     # numbers (e.g. FiducialCircle ×17486 when the post-arbitration
     # save-match output has only 3). Mirrors the same arbitration the
     # scan-all and save-match-json endpoints already apply.
-    from app.class_arbitration import _parse_key, arbitrate
+    from app.class_arbitration import _parse_key, arbitrate_for_prematch
     from app.library import (
         CLASS_ARBITRATION_GROUPS,
         CLASS_JSON_KEY,
@@ -204,19 +204,18 @@ def _preprocess_worker(
             for m in result.matches:
                 out.setdefault(base_key, []).append(list(m.handles))
 
-    # Apply the same cross-fire resolution save_match_json runs, but
-    # WITHOUT view-constraint enforcement: side regions aren't drawn
-    # yet at preprocess time (no rects on the file record), so every
-    # instance's `view_prefix` is None — and an arbitrate() with
-    # `enforce_view_constraints=True` would drop every match of a
-    # view-constrained class (BGABall, C4Ball). The pre-arbitration
-    # cross-fire (e.g. BGABall+FiducialCircle on a shared circle
-    # radius) is still resolved; once the operator draws side regions
-    # and runs scan-all / save-match, those flows re-arbitrate WITH
-    # view enforcement and produce the strict outcome.
-    out, _arbitration_counts, _view_drops = arbitrate(
+    # Apply the same cross-fire resolution save_match_json runs, but via
+    # the prematch entry point so view constraints are NOT enforced: side
+    # regions aren't drawn yet at preprocess time (no rects on the file
+    # record), so every instance's `view_prefix` is None — and the strict
+    # `arbitrate_for_match` would drop every match of a view-constrained
+    # class (BGABall, C4Ball). The pre-arbitration cross-fire (e.g.
+    # BGABall+FiducialCircle on a shared circle radius) is still resolved;
+    # once the operator draws side regions and runs scan-all / save-match,
+    # those flows re-arbitrate WITH view enforcement and produce the strict
+    # outcome.
+    out, _arbitration_counts, _view_drops = arbitrate_for_prematch(
         out, shapes, CLASS_ARBITRATION_GROUPS,
-        enforce_view_constraints=False,
     )
 
     # Collapse arbitrated `out` (keys like `bga_ball.0`) back to the
@@ -716,7 +715,7 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     #   - later saves → match.json is missing newly-added classes
     # The `_preprocess_worker` already follows this fresh-load pattern;
     # we mirror it here.
-    from app.class_arbitration import arbitrate
+    from app.class_arbitration import arbitrate_for_match
     from app.files import FILE_STORE
     from app.library import (
         CLASS_ARBITRATION_GROUPS,
@@ -787,7 +786,7 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
                 side_counts[k] += n
             total_matches += len(result.matches)
 
-    out, arbitration_counts, view_drops = arbitrate(
+    out, arbitration_counts, view_drops = arbitrate_for_match(
         out, shapes, CLASS_ARBITRATION_GROUPS,
     )
     for _label, by_prefix in view_drops.items():

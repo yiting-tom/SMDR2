@@ -42,7 +42,7 @@ from app.files import (
     PREPROCESSING,
     READY,
 )
-from app.class_arbitration import _parse_key, arbitrate
+from app.class_arbitration import _parse_key, arbitrate_for_match
 from app.library import (
     CLASS_ARBITRATION_GROUPS,
     CLASS_JSON_KEY,
@@ -1207,7 +1207,7 @@ async def scan_all(file_id: str) -> dict:
 
     # Resolve cross-fire across arbitration-group members (e.g.
     # BGABall vs FiducialCircle on same-radius circles).
-    out, _arbitration_counts, _view_drops = arbitrate(
+    out, _arbitration_counts, _view_drops = arbitrate_for_match(
         out, shapes, CLASS_ARBITRATION_GROUPS,
     )
 

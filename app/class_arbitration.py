@@ -285,6 +285,11 @@ def arbitrate(
     passes False to keep the cross-fire resolution without throwing
     out every constrained-class match. `view_drops` stays empty when
     False.
+
+    Production callers should use the stage-specific entry points
+    `arbitrate_for_prematch` / `arbitrate_for_match` rather than passing
+    `enforce_view_constraints` directly; this low-level form stays for
+    unit tests and explicit-mode control. See the `class-arbitration` spec.
     """
     new_out: dict[str, list[list[str]]] = dict(out)  # shallow copy
     group_counts: dict[str, dict[str, object]] = {}
@@ -431,3 +436,45 @@ def arbitrate(
         group_counts[label] = gc.to_dict()
 
     return new_out, group_counts, view_drops
+
+
+def arbitrate_for_prematch(
+    out: dict[str, list[list[str]]],
+    shapes: Mapping[str, object],
+    groups: Iterable[ArbitrationGroup],
+) -> tuple[
+    dict[str, list[list[str]]],
+    dict[str, dict[str, object]],
+    dict[str, dict[str | None, int]],
+]:
+    """Arbitration entry point for the preprocess / prematch stage.
+
+    Side-region rects aren't drawn yet, so every instance has
+    `view_prefix=None`; enforcing view constraints here would drop every
+    match of a view-constrained class (BGABall, C4Ball, ...). This entry
+    point resolves matcher cross-fire WITHOUT view-constraint dropping, so
+    the returned `view_drops` is always empty. Once the operator draws side
+    regions and runs scan-all / save-match, `arbitrate_for_match`
+    re-arbitrates with strict view enforcement. See the `class-arbitration`
+    spec.
+    """
+    return arbitrate(out, shapes, groups, enforce_view_constraints=False)
+
+
+def arbitrate_for_match(
+    out: dict[str, list[list[str]]],
+    shapes: Mapping[str, object],
+    groups: Iterable[ArbitrationGroup],
+) -> tuple[
+    dict[str, list[list[str]]],
+    dict[str, dict[str, object]],
+    dict[str, dict[str | None, int]],
+]:
+    """Arbitration entry point for the save-match and scan-all stages.
+
+    Side regions are drawn, so each reassigned instance's new class is
+    re-validated against its view prefix; instances whose new class
+    disallows that view are dropped into `dropped_by_view` / `view_drops`
+    (strict mode). See the `class-arbitration` spec.
+    """
+    return arbitrate(out, shapes, groups, enforce_view_constraints=True)

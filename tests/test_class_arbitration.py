@@ -19,6 +19,8 @@ import pytest
 from app.class_arbitration import (
     apply_population_fallback,
     arbitrate,
+    arbitrate_for_match,
+    arbitrate_for_prematch,
     classify,
     count_neighbors,
     derive_pitch,
@@ -326,6 +328,102 @@ def test_arbitrate_view_conflict_drops_instance():
     # Anchor survives as FiducialCircle in bottom_view (unconstrained).
     fid_keys = [k for k in new_out if "fiducial_circle" in k]
     assert fid_keys == ["bottom_view.fiducial_circle.0"]
+
+
+# ---- Context-specific entry points (prematch vs. match) -------------------
+def _cross_fire_group_min1() -> ArbitrationGroup:
+    """BGA/Fiducial group with min_population=1 so the population fallback
+    does not fire and classify's raw neighbour-count targets stand."""
+    return ArbitrationGroup(
+        members=frozenset({"BGABall", "FiducialCircle"}),
+        rules={
+            "BGABall":        MinNeighbors(2),
+            "FiducialCircle": MaxNeighbors(1),
+        },
+        default_class="FiducialCircle",
+        min_population=1,
+        pitch_multiplier=1.5,
+    )
+
+
+def test_arbitrate_for_prematch_preserves_view_constrained_instances():
+    """At prematch, side regions aren't drawn so every key is unprefixed
+    (view_prefix=None). A 3×3 grid that classify reassigns to BGABall must
+    be KEPT — strict mode would drop all 9 because BGABall disallows a None
+    prefix. The isolated anchor classifies to FiducialCircle and survives."""
+    coords = {f"p{i}_{j}": (i, j) for i in range(3) for j in range(3)}
+    coords["anchor"] = (1000.0, 1000.0)
+    shapes = _shapes_from_coords(coords)
+    out = {
+        "fiducial_circle.0": [
+            [f"p{i}_{j}"] for i in range(3) for j in range(3)
+        ],
+        "bga_ball.0": [["anchor"]],
+    }
+    new_out, counts, view_drops = arbitrate_for_prematch(
+        out, shapes, [_cross_fire_group_min1()]
+    )
+    label = "BGABall|FiducialCircle"
+    # Nothing dropped: the prematch entry point never enforces view rules.
+    assert view_drops == {}
+    assert counts[label]["dropped_by_view"] == 0
+    # 9 grid points kept as BGABall under the unprefixed key; anchor stays
+    # FiducialCircle.
+    assert counts[label]["assigned"] == {"BGABall": 9, "FiducialCircle": 1}
+    assert len(new_out["bga_ball.0"]) == 9
+
+
+def test_arbitrate_for_match_drops_view_conflicting_instances():
+    """The match entry point enforces view constraints: a top_view grid
+    reassigned to BGABall (disallowed in top_view) is dropped, mirroring the
+    strict-mode contract but routed through the public wrapper."""
+    coords = {f"p{i}_{j}": (i, j) for i in range(3) for j in range(3)}
+    coords["anchor"] = (1000.0, 1000.0)
+    shapes = _shapes_from_coords(coords)
+    out = {
+        "top_view.fiducial_circle.0": [
+            [f"p{i}_{j}"] for i in range(3) for j in range(3)
+        ],
+        "bottom_view.bga_ball.0": [["anchor"]],
+    }
+    new_out, counts, view_drops = arbitrate_for_match(
+        out, shapes, [_cross_fire_group_min1()]
+    )
+    label = "BGABall|FiducialCircle"
+    assert counts[label]["dropped_by_view"] == 9
+    assert view_drops[label]["top_view"] == 9
+    assert [k for k in new_out if "fiducial_circle" in k] == [
+        "bottom_view.fiducial_circle.0"
+    ]
+
+
+def test_arbitrate_entry_points_agree_without_view_conflict():
+    """When no reassignment hits a view constraint, the prematch and match
+    entry points produce byte-identical output — the ONLY difference between
+    them is view-conflict handling. Here the grid sits in bottom_view, which
+    BGABall allows, so neither path drops anything."""
+    def _build_out() -> dict[str, list[list[str]]]:
+        return {
+            "bottom_view.fiducial_circle.0": [
+                [f"p{i}_{j}"] for i in range(3) for j in range(3)
+            ],
+            "bottom_view.bga_ball.0": [["anchor"]],
+        }
+
+    coords = {f"p{i}_{j}": (i, j) for i in range(3) for j in range(3)}
+    coords["anchor"] = (1000.0, 1000.0)
+    shapes = _shapes_from_coords(coords)
+    group = _cross_fire_group_min1()
+
+    pre_out, pre_counts, pre_drops = arbitrate_for_prematch(
+        _build_out(), shapes, [group]
+    )
+    mat_out, mat_counts, mat_drops = arbitrate_for_match(
+        _build_out(), shapes, [group]
+    )
+    assert pre_out == mat_out
+    assert pre_counts == mat_counts
+    assert pre_drops == mat_drops == {}
 
 
 def test_arbitrate_collapses_to_template_index_not_instance_index():
