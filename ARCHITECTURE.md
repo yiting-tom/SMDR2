@@ -262,3 +262,4 @@ stderr 的 `job_id=…`）。前端目前**沒有**自動化測試，UI 變動�
 - `openspec/specs/<capability>/spec.md` — 正式行為契約（8 個 capability）
 - `openspec/specs/design-rule-checking/INTEGRATION.md` — 給量測組的串接指南
 - `openspec/changes/` — 變更提案歷史（每次行為變更的 why + delta）
+- `docs/production-storage.md` — 上 production（TKS / MinIO / DB）的儲存與資料庫遷移規劃（討論中，尚未實作）
