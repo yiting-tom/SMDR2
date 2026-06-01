@@ -99,11 +99,17 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
 }
 
 
-# Per-class view constraints. Some IC-packaging classes are physically
-# restricted to a subset of views (C4 bumps face the chip's top side;
-# BGA balls face the package bottom or appear in cross-section). The
-# match-JSON serialiser and the viewer's Scan All overlay both consult
-# is_allowed_view() below to drop instances that violate this rule.
+# Per-class view constraints. Most IC-packaging classes are physically
+# restricted to a subset of views (C4 bumps face the chip's top side; BGA
+# balls face the package bottom). The match-JSON serialiser and the viewer's
+# Scan All overlay both consult is_allowed_view() below to drop instances that
+# violate this rule.
+#
+# These constraints also *disambiguate* same-geometry classes by physical
+# view instead of by neighbour density: BGABall (bottom-only) and
+# FiducialCircle (top-only) are mutually exclusive, so a circle is classified
+# by which view it sits in — this replaces the old density-based
+# class-arbitration for that pair (CLASS_ARBITRATION_GROUPS is now empty).
 #
 # Absent key = class is unconstrained (all views including "unassigned"
 # permitted). Present key = strict mode: only the listed views are
@@ -115,8 +121,15 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
 # test in tests/test_canvas_constants.py enforces consistency.
 # CLASS_VIEW_CONSTRAINTS_BEGIN
 CLASS_VIEW_CONSTRAINTS: dict[str, frozenset[str]] = {
-    "C4Ball":  frozenset({"top_view"}),
-    "BGABall": frozenset({"bottom_view", "side_view"}),
+    "C4Ball":         frozenset({"top_view"}),
+    "BGABall":        frozenset({"bottom_view"}),
+    "FiducialCircle": frozenset({"top_view"}),
+    "FiducialCross":  frozenset({"top_view", "bottom_view"}),
+    "FiducialSquare": frozenset({"top_view", "bottom_view"}),
+    "SMD-2T":         frozenset({"top_view", "bottom_view"}),
+    "SMD-3T":         frozenset({"top_view", "bottom_view"}),
+    "SMD-8T":         frozenset({"top_view", "bottom_view"}),
+    "SMD-14T":        frozenset({"top_view", "bottom_view"}),
 }
 # CLASS_VIEW_CONSTRAINTS_END
 
@@ -284,21 +297,20 @@ class ArbitrationGroup:
             )
 
 
-# Default registry. Add new groups here when a fresh same-size collision
-# appears (e.g., an SMD pad that coincidentally equals a different class's
-# diameter). Class-display-ID uniqueness is enforced below at import time.
-CLASS_ARBITRATION_GROUPS: tuple[ArbitrationGroup, ...] = (
-    ArbitrationGroup(
-        members=frozenset({"BGABall", "FiducialCircle"}),
-        rules={
-            "BGABall":        MinNeighbors(2),
-            "FiducialCircle": MaxNeighbors(1),
-        },
-        default_class="FiducialCircle",
-        min_population=8,
-        pitch_multiplier=1.5,
-    ),
-)
+# Default registry — EMPTY. The BGABall|FiducialCircle pair (same circle
+# geometry) used to be split here by neighbour density; that heuristic was
+# fragile (derived-pitch / population-floor edge cases could collapse a real
+# BGA grid to FiducialCircle), so it was retired in favour of mutually
+# exclusive view constraints — BGABall is bottom-only, FiducialCircle is
+# top-only (see CLASS_VIEW_CONSTRAINTS). A circle is now classified by which
+# view it sits in; same-view cross-fire is resolved by the view-constraint
+# drop in split_matches_by_side.
+#
+# The `arbitrate()` machinery is retained (it is a no-op over an empty
+# registry) so a future *same-view* same-geometry collision can be handled by
+# adding a group here. Class-display-ID uniqueness across groups is enforced
+# below at import time.
+CLASS_ARBITRATION_GROUPS: tuple[ArbitrationGroup, ...] = ()
 
 
 def _build_arbitration_index(

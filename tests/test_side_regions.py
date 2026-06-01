@@ -164,7 +164,7 @@ def test_split_matches_splits_instances_across_three_views():
     side = {"x0": 190, "y0": 190, "x1": 210, "y1": 210}
     matches = [_mr(["T1"]), _mr(["B1"]), _mr(["T2"]), _mr(["S1"])]
     out, counts = split_matches_by_side(
-        "smd.0", matches, shapes, top, bottom, side, class_name="SMD-2T",
+        "smd.0", matches, shapes, top, bottom, side, class_name="DieArea",
     )
     assert out == {
         "top_view.smd.0": [["T1"], ["T2"]],
@@ -182,7 +182,7 @@ def test_split_matches_only_side_view_set():
     shapes = {"S": _shape("S", [(5, 5)])}
     side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     out, counts = split_matches_by_side(
-        "smd.0", [_mr(["S"])], shapes, None, None, side, class_name="SMD-2T",
+        "smd.0", [_mr(["S"])], shapes, None, None, side, class_name="DieArea",
     )
     assert out == {"side_view.smd.0": [["S"]]}
     assert counts == {
@@ -195,7 +195,7 @@ def test_split_matches_keeps_unassigned_unprefixed():
     # No rectangles set → every instance falls under base_key, no prefix.
     shapes = {"H": _shape("H", [(5, 5)])}
     out, counts = split_matches_by_side(
-        "smd.0", [_mr(["H"])], shapes, None, None, None, class_name="SMD-2T",
+        "smd.0", [_mr(["H"])], shapes, None, None, None, class_name="DieArea",
     )
     assert out == {"smd.0": [["H"]]}
     assert counts == {
@@ -214,7 +214,7 @@ def test_split_matches_partial_outside_region_is_unassigned():
     side = {"x0": 70, "y0": 70, "x1": 80, "y1": 80}
     out, counts = split_matches_by_side(
         "smd.0", [_mr(["T"]), _mr(["Z"])], shapes, top, bottom, side,
-        class_name="SMD-2T",
+        class_name="DieArea",
     )
     assert out == {
         "top_view.smd.0": [["T"]],
@@ -234,7 +234,7 @@ def test_split_matches_all_three_overlap_resolves_to_top():
     side = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     matches = [_mr([f"H{i}"]) for i in range(3)]
     out, counts = split_matches_by_side(
-        "smd.0", matches, shapes, top, bottom, side, class_name="SMD-2T",
+        "smd.0", matches, shapes, top, bottom, side, class_name="DieArea",
     )
     assert out == {"top_view.smd.0": [["H0"], ["H1"], ["H2"]]}
     assert counts == {
@@ -250,7 +250,7 @@ def test_split_matches_preserves_instance_order_within_side():
     top = {"x0": -1, "y0": 0, "x1": 10, "y1": 2}
     matches = [_mr([f"H{i}"]) for i in range(5)]
     out, _ = split_matches_by_side(
-        "smd.0", matches, shapes, top, None, None, class_name="SMD-2T",
+        "smd.0", matches, shapes, top, None, None, class_name="DieArea",
     )
     assert out == {
         "top_view.smd.0": [["H0"], ["H1"], ["H2"], ["H3"], ["H4"]],
@@ -314,15 +314,17 @@ def test_bgaball_in_bottom_view_is_kept():
     assert counts["dropped"] == 0
 
 
-def test_bgaball_in_side_view_is_kept():
+def test_bgaball_in_side_view_is_dropped():
+    """BGABall is bottom-only now (side_view retired) → a side_view instance
+    is dropped under strict mode."""
     shapes = {"S": _shape("S", [(205, 205)])}
     side = {"x0": 200, "y0": 200, "x1": 210, "y1": 210}
     out, counts = split_matches_by_side(
         "bga_ball.0", [_mr(["S"])], shapes, None, None, side, class_name="BGABall",
     )
-    assert out == {"side_view.bga_ball.0": [["S"]]}
-    assert counts["side_view"] == 1
-    assert counts["dropped"] == 0
+    assert out == {}
+    assert counts["side_view"] == 0
+    assert counts["dropped"] == 1
 
 
 def test_bgaball_in_top_view_is_dropped():
@@ -346,7 +348,7 @@ def test_bgaball_unassigned_is_dropped():
 
 
 def test_unconstrained_class_unaffected_by_filter():
-    """SMD-2T has no entry in CLASS_VIEW_CONSTRAINTS — every position is
+    """DieArea has no entry in CLASS_VIEW_CONSTRAINTS — every position is
     valid, including unassigned. Verifies the absent-key fall-through."""
     shapes = {
         "T": _shape("T", [(5, 5)]),
@@ -355,7 +357,7 @@ def test_unconstrained_class_unaffected_by_filter():
     top = {"x0": 0, "y0": 0, "x1": 10, "y1": 10}
     out, counts = split_matches_by_side(
         "smd.0", [_mr(["T"]), _mr(["Z"])], shapes,
-        top, None, None, class_name="SMD-2T",
+        top, None, None, class_name="DieArea",
     )
     assert out == {
         "top_view.smd.0": [["T"]],

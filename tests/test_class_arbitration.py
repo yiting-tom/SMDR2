@@ -283,30 +283,24 @@ def test_arbitrate_only_corner_fiducials_short_circuits_via_single_class_guard()
 
 
 def test_arbitrate_view_conflict_drops_instance():
-    """When arbitration reassigns FiducialCircle → BGABall but the
-    instance sits in top_view (disallowed for BGA), it is dropped.
+    """When arbitration reassigns an instance to a class disallowed in its
+    view, it is dropped.
 
-    Setup: 3×3 grid in top_view originally keyed under FiducialCircle
-    (matcher cross-fire) → classify reassigns to BGABall (≥2 neighbours)
-    → BGABall not allowed in top_view → 9 dropped. A geometrically
-    distant BGABall anchor in bottom_view ensures the pool is multi-class
-    (BGABall + FiducialCircle both in `original_class` set), so the
-    single-class short-circuit doesn't fire and the classify-then-reemit
-    path runs. The anchor itself has no neighbours within radius so it
-    classifies as FiducialCircle and survives in bottom_view (FiducialCircle
-    is unconstrained)."""
-    coords = {f"p{i}_{j}": (i, j) for i in range(3) for j in range(3)}
-    # Far anchor: in bottom_view so its source-key view is valid for
-    # BGABall (otherwise it would be dropped by split_matches_by_side
-    # upstream of arbitrate); isolated so its classify outcome is
-    # FiducialCircle (0 neighbours within any sensible radius).
-    coords["anchor"] = (1000.0, 1000.0)
+    Under the mutually-exclusive view constraints (BGABall=bottom-only,
+    FiducialCircle=top-only): a 3×3 grid in top_view originally keyed under
+    FiducialCircle (matcher cross-fire) → classify reassigns to BGABall
+    (≥2 neighbours) → BGABall not allowed in top_view → 9 dropped. An isolated
+    anchor in top_view keyed under BGABall keeps the pool multi-class (so the
+    single-class short-circuit doesn't fire); it has 0 neighbours → classifies
+    as FiducialCircle → top_view IS allowed for FiducialCircle → survives."""
+    coords = {f"p{i}_{j}": (float(i), float(j)) for i in range(3) for j in range(3)}
+    coords["anchor"] = (50.0, 50.0)  # isolated → 0 neighbours → FiducialCircle
     shapes = _shapes_from_coords(coords)
     out = {
         "top_view.fiducial_circle.0": [
             [f"p{i}_{j}"] for i in range(3) for j in range(3)
         ],
-        "bottom_view.bga_ball.0": [["anchor"]],
+        "top_view.bga_ball.0": [["anchor"]],
     }
     group = ArbitrationGroup(
         members=frozenset({"BGABall", "FiducialCircle"}),
@@ -323,9 +317,9 @@ def test_arbitrate_view_conflict_drops_instance():
     # 9 grid points reassigned to BGABall → all dropped by top_view conflict.
     assert counts[label]["dropped_by_view"] == 9
     assert view_drops[label]["top_view"] == 9
-    # Anchor survives as FiducialCircle in bottom_view (unconstrained).
+    # Anchor reassigned to FiducialCircle survives in top_view (allowed).
     fid_keys = [k for k in new_out if "fiducial_circle" in k]
-    assert fid_keys == ["bottom_view.fiducial_circle.0"]
+    assert fid_keys == ["top_view.fiducial_circle.0"]
 
 
 def test_arbitrate_collapses_to_template_index_not_instance_index():
@@ -403,7 +397,12 @@ def test_arbitrate_reassigned_instance_keyed_under_zero():
         # own classification doesn't disturb the BGA count rule.
         "top_view.fiducial_circle.0":   [["anchor"]],
     }
-    new_out, _counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
+    # This test is about the template-index of the re-emit key, not view
+    # constraints — disable view enforcement so FiducialCircle (now top-only)
+    # isn't dropped when the bottom_view corners are reassigned to it.
+    new_out, _counts, _drops = arbitrate(
+        out, shapes, [_bga_fiducial_group()], enforce_view_constraints=False,
+    )
 
     # The 4 corners came from `bottom_view.bga_ball.1` → population
     # fallback reassigns them to FiducialCircle → MUST land under

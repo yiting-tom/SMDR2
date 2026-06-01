@@ -531,8 +531,15 @@ function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
 // parses the literal between the BEGIN/END sentinel comments to verify.
 // CLASS_VIEW_CONSTRAINTS_BEGIN
 const CLASS_VIEW_CONSTRAINTS = {
-  "C4Ball":  ["top_view"],
-  "BGABall": ["bottom_view", "side_view"],
+  "C4Ball":         ["top_view"],
+  "BGABall":        ["bottom_view"],
+  "FiducialCircle": ["top_view"],
+  "FiducialCross":  ["top_view", "bottom_view"],
+  "FiducialSquare": ["top_view", "bottom_view"],
+  "SMD-2T":         ["top_view", "bottom_view"],
+  "SMD-3T":         ["top_view", "bottom_view"],
+  "SMD-8T":         ["top_view", "bottom_view"],
+  "SMD-14T":        ["top_view", "bottom_view"],
 };
 // CLASS_VIEW_CONSTRAINTS_END
 
@@ -544,16 +551,17 @@ function isAllowedView(className, view) {
 
 // Membership-only mirror of app/library.CLASS_ARBITRATION_GROUPS — the
 // flat union of every group's `members` set. The frontend uses this
-// purely to decide *whether* a class participates in arbitration; the
-// rules / pitch / default-class details live server-side only. Today's
-// single group covers BGABall vs. FiducialCircle (same-radius circles
-// that need neighbour-density tiebreaking).
+// purely to decide *whether* a class participates in arbitration (and so
+// should trigger a full scan-all re-run on commit instead of an incremental
+// overlay merge). EMPTY today: the BGABall/FiducialCircle density arbitration
+// was retired in favour of mutually exclusive view constraints (BGABall
+// bottom-only, FiducialCircle top-only — see CLASS_VIEW_CONSTRAINTS).
 //
 // MUST stay in sync with app/library.py — tests/test_canvas_constants.py
 // parses the literal between the BEGIN/END sentinel comments and asserts
 // equality with the Python source.
 // CLASS_ARBITRATION_MEMBERS_BEGIN
-const CLASS_ARBITRATION_MEMBERS = ["BGABall", "FiducialCircle"];
+const CLASS_ARBITRATION_MEMBERS = [];
 // CLASS_ARBITRATION_MEMBERS_END
 
 function isArbitrationMember(className) {

@@ -411,14 +411,21 @@ def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
 # ---- Per-class view constraints -------------------------------------------
 def test_class_view_constraints_seed_entries():
     assert CLASS_VIEW_CONSTRAINTS["C4Ball"] == frozenset({"top_view"})
-    assert CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view", "side_view"})
+    # BGABall is bottom-only (disambiguated against top-only FiducialCircle).
+    assert CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialCircle"] == frozenset({"top_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialCross"] == frozenset({"top_view", "bottom_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialSquare"] == frozenset({"top_view", "bottom_view"})
+    for smd in ("SMD-2T", "SMD-3T", "SMD-8T", "SMD-14T"):
+        assert CLASS_VIEW_CONSTRAINTS[smd] == frozenset({"top_view", "bottom_view"})
 
 
 def test_is_allowed_view_unconstrained_class():
     """Classes absent from the registry admit every position including None."""
     for v in ("top_view", "bottom_view", "side_view", None):
+        # Substrate / DieArea have no view constraint.
         assert is_allowed_view("Substrate", v) is True
-        assert is_allowed_view("SMD-2T", v) is True
+        assert is_allowed_view("DieArea", v) is True
         # A made-up class name (custom user class) also passes through.
         assert is_allowed_view("MyMarker", v) is True
 
@@ -433,29 +440,31 @@ def test_is_allowed_view_c4ball():
 
 def test_is_allowed_view_bgaball():
     assert is_allowed_view("BGABall", "bottom_view") is True
-    assert is_allowed_view("BGABall", "side_view") is True
+    # side_view retired: BGABall is bottom-only now.
+    assert is_allowed_view("BGABall", "side_view") is False
     assert is_allowed_view("BGABall", "top_view") is False
     assert is_allowed_view("BGABall", None) is False
 
 
+def test_is_allowed_view_fiducial_circle_top_only():
+    assert is_allowed_view("FiducialCircle", "top_view") is True
+    assert is_allowed_view("FiducialCircle", "bottom_view") is False
+    assert is_allowed_view("FiducialCircle", "side_view") is False
+    assert is_allowed_view("FiducialCircle", None) is False
+
+
 # ---- Neighbour-count arbitration registry ---------------------------------
-def test_arbitration_groups_default_seed():
-    """Seeded BGABall/FiducialCircle group present with documented rules."""
-    matching = [
-        g for g in CLASS_ARBITRATION_GROUPS
-        if g.members == frozenset({"BGABall", "FiducialCircle"})
-    ]
-    assert len(matching) == 1, f"expected one BGA/Fiducial group, got {matching!r}"
-    g = matching[0]
-    assert g.rules["BGABall"] == MinNeighbors(2)
-    assert g.rules["FiducialCircle"] == MaxNeighbors(1)
-    assert g.default_class == "FiducialCircle"
+def test_arbitration_registry_is_empty():
+    """The density arbitration registry is retired: BGABall vs FiducialCircle
+    is now disambiguated by mutually exclusive view constraints (bottom-only
+    vs top-only), not by neighbour density. The arbitrate() machinery stays
+    for a future same-view collision but the default registry is empty."""
+    assert CLASS_ARBITRATION_GROUPS == ()
 
 
-def test_arbitration_group_for_returns_containing_group():
-    g = arbitration_group_for("BGABall")
-    assert g is not None
-    assert "FiducialCircle" in g.members
+def test_arbitration_group_for_returns_none_when_registry_empty():
+    assert arbitration_group_for("BGABall") is None
+    assert arbitration_group_for("FiducialCircle") is None
     assert arbitration_group_for("Substrate") is None
 
 

@@ -298,10 +298,11 @@ def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch, tmp_path):
     assert "bottom_view.bga_ball.0" in saved
 
 
-def test_save_match_json_emits_arbitration_counts(monkeypatch, tmp_path):
-    """End-to-end: worker return payload exposes arbitration_counts with
-    the documented per-group breakdown, and identical-handle cross-fire
-    between BGABall and FiducialCircle resolves to one class per handle."""
+def test_save_match_json_resolves_bga_fiducial_by_view(monkeypatch, tmp_path):
+    """End-to-end: BGABall/FiducialCircle cross-fire on identical circle
+    geometry resolves to one class per handle via mutually exclusive view
+    constraints (BGABall=bottom, FiducialCircle=top) — no density arbitration.
+    The worker reports an empty arbitration_counts (registry retired)."""
     from app.jobs import _save_match_worker
     from app.storage import match_path
 
@@ -339,21 +340,13 @@ def test_save_match_json_emits_arbitration_counts(monkeypatch, tmp_path):
 
     result = _save_match_worker(fid, str(match_path(fid)))
 
-    # Worker payload exposes arbitration_counts.
+    # Density arbitration is retired — the registry is empty, so the worker
+    # reports no arbitration_counts. The BGABall/FiducialCircle cross-fire is
+    # instead resolved by the mutually exclusive view constraints applied in
+    # split_matches_by_side: BGABall-on-fids (top) and FiducialCircle-on-grid
+    # (bottom) are both dropped, leaving grid→bga_ball, fids→fiducial_circle.
     assert "arbitration_counts" in result
-    ac = result["arbitration_counts"]
-    label = "BGABall|FiducialCircle"
-    assert label in ac
-    gc = ac[label]
-    # Pool dedupes cross-fired handles: 9 grid + 2 fids = 11 unique
-    # physical instances even though the matcher reported 22.
-    # NB: BGABall's matches in top_view get pre-filtered by
-    # split_matches_by_side (top is disallowed), so the 2 fid handles
-    # only reach the pool via the FiducialCircle key. Pool size therefore
-    # = 9 (grid, via both BGA + Fid) + 2 (fids, via Fid only) = 11.
-    assert gc["pool_size"] == 11
-    assert gc["assigned"]["BGABall"] == 9
-    assert gc["assigned"]["FiducialCircle"] == 2
+    assert result["arbitration_counts"] == {}
 
     saved = json.loads(match_path(fid).read_text())
     # Grid handles end up under bga_ball; fid handles end up under
@@ -765,13 +758,19 @@ def test_save_match_worker_does_not_use_libraries_cache(monkeypatch, tmp_path):
 # FiducialCircle. This test pins the fix: prematch JSON's by_class
 # counts match what `_save_match_worker` produces.
 
-def test_preprocess_prematch_uses_arbitration_like_save_match(
+def test_preprocess_prematch_clean_when_radii_differ(
     monkeypatch, tmp_path,
 ):
-    """`_preprocess_worker` SHALL run the same arbitration as
-    `_save_match_worker`, so the prematch JSON's by-class counts are
-    post-arbitration and match what the viewer's save-match flow
-    would later persist."""
+    """With BGABall and FiducialCircle templates of DIFFERENT radii there is
+    no matcher cross-fire (each template matches only its own circles), so the
+    prematch JSON's by-class counts are naturally clean — grid→BGABall,
+    fids→FiducialCircle — with no density arbitration needed.
+
+    (The density arbitration that used to resolve *same-radius* cross-fire at
+    prematch is retired in favour of view-based disambiguation, which applies
+    at save-match/scan-all once side regions are drawn. Same-radius cross-fire
+    at prematch — before any rect exists — is no longer auto-resolved; the
+    deployment relies on distinct radii or on the save-match view split.)"""
     import json as _json
     from app.jobs import _preprocess_worker, _save_match_worker
     from app.storage import match_path
@@ -800,10 +799,11 @@ def test_preprocess_prematch_uses_arbitration_like_save_match(
         shapes[h] = _shape(h, [(x, y)])
     for h, (x, y) in zip(fid_handles, fid_coords):
         shapes[h] = _shape(h, [(x, y)])
-    all_matches = [_mr([h]) for h in grid_handles + fid_handles]
+    # Distinct radii → no cross-fire: BGABall matches only the grid balls,
+    # FiducialCircle matches only the isolated fiducials.
     matches = {
-        "BGABall":        list(all_matches),
-        "FiducialCircle": list(all_matches),
+        "BGABall":        [_mr([h]) for h in grid_handles],
+        "FiducialCircle": [_mr([h]) for h in fid_handles],
     }
     call_log = _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
@@ -842,12 +842,9 @@ def test_preprocess_prematch_uses_arbitration_like_save_match(
     pm = _json.loads(prematch_dst.read_text())
     by_class = pm["by_class"]
 
-    # The arbitration outcome itself: the 9 grid balls go to BGABall
-    # (MinNeighbors(2) satisfied), the 2 isolated fiducials go to
-    # FiducialCircle (MaxNeighbors(1) satisfied). Pre-fix the prematch
-    # would have shown ALL 11 handles under EACH class (cross-fire),
-    # which is the symptom the user reported as
-    # "FiducialCircle 顯示有 17486 個".
+    # With distinct radii there is no cross-fire, so by_class is clean
+    # straight out of matching: the 9 grid balls under BGABall, the 2
+    # isolated fiducials under FiducialCircle — no shared handles.
     assert set(by_class.get("BGABall", [])) == set(grid_handles), (
         f"BGABall should hold the 9 grid handles after arbitration; "
         f"got {by_class.get('BGABall', [])}"
