@@ -6,6 +6,7 @@ import pytest
 
 from app.library import (
     CLASS_ARBITRATION_GROUPS,
+    CLASS_DEFAULT_MATCH_CONFIG,
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_CLASSES,
@@ -105,18 +106,42 @@ def test_template_from_entities_validates_nonempty():
 
 # ---- per-class match strategy + bbox_ratio -------------------------------
 def test_new_class_defaults_to_chamfer(tmp_db):
-    """Newly-seeded classes start at match_strategy='chamfer' / bbox_ratio=None
-    so existing matching behavior is unchanged after upgrade."""
+    """Newly-seeded classes default to chamfer / bbox_ratio=None, except the
+    large-outline classes in CLASS_DEFAULT_MATCH_CONFIG which seed as their
+    declared signature default."""
     lib = _default_lib(tmp_db)
-    for c in DEFAULT_CLASSES:
-        strategy, bbox_ratio = lib.strategy_of(c)
-        assert strategy == "chamfer"
-        assert bbox_ratio is None
-    # summary surfaces both fields on every entry
     by_name = {e["name"]: e for e in lib.summary()}
     for c in DEFAULT_CLASSES:
-        assert by_name[c]["match_strategy"] == "chamfer"
-        assert by_name[c]["bbox_ratio"] is None
+        expected = CLASS_DEFAULT_MATCH_CONFIG.get(c, ("chamfer", None))
+        assert lib.strategy_of(c) == expected
+        # summary surfaces both fields on every entry
+        assert by_name[c]["match_strategy"] == expected[0]
+        assert by_name[c]["bbox_ratio"] == expected[1]
+
+
+def test_large_outline_classes_default_to_signature(tmp_db):
+    """Substrate / LidOuter / LidInner seed as signature with bbox_ratio
+    0.0001 — their large sharp-cornered boundary is matched by size + aspect,
+    not chamfer (which is winding / start-vertex sensitive). Persists across a
+    store reload."""
+    lib = _default_lib(tmp_db)
+    for c in ("Substrate", "LidOuter", "LidInner"):
+        assert lib.strategy_of(c) == ("signature", 0.0001)
+    # Reload: the seeded default sticks (and is not re-clobbered by the boot
+    # migration, which only touches untouched chamfer/NULL rows).
+    lib2 = _default_lib(tmp_db)
+    for c in ("Substrate", "LidOuter", "LidInner"):
+        assert lib2.strategy_of(c) == ("signature", 0.0001)
+
+
+def test_signature_default_preserves_explicit_override(tmp_db):
+    """An explicit signature bbox_ratio (distinct from the declared 0.0001
+    default) survives a store reopen — the boot migration only converts rows
+    still in the pristine chamfer/NULL state, so it never overwrites an
+    explicit signature choice."""
+    lib = _default_lib(tmp_db)
+    assert lib.set_strategy("Substrate", "signature", 0.05)
+    assert _default_lib(tmp_db).strategy_of("Substrate") == ("signature", 0.05)
 
 
 def test_set_strategy_round_trips_signature(tmp_db):
@@ -135,8 +160,9 @@ def test_set_strategy_unknown_class_returns_false(tmp_db):
 
 def test_migration_adds_strategy_columns(tmp_db):
     """Pre-change DB (classes table without match_strategy / bbox_ratio
-    columns) gets both columns added on next Store() open. Existing rows
-    end up at chamfer / NULL."""
+    columns) gets both columns added on next Store() open. A pre-existing
+    Substrate row then converts to its declared signature default via the
+    boot migration; a plain class would stay chamfer / NULL."""
     import sqlite3
 
     conn = sqlite3.connect(str(tmp_db))
@@ -182,7 +208,9 @@ def test_migration_adds_strategy_columns(tmp_db):
     ]
     assert "match_strategy" in cols
     assert "bbox_ratio" in cols
-    assert lib.strategy_of("Substrate") == ("chamfer", None)
+    # Substrate is a declared signature-default class: the boot migration
+    # converts the pristine (chamfer/NULL) row it was inserted as.
+    assert lib.strategy_of("Substrate") == ("signature", 0.0001)
 
 
 def test_all_templates_returns_indexed_tuples(tmp_db):
