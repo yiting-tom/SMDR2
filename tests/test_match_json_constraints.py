@@ -686,12 +686,24 @@ def test_save_match_post_with_missing_parsed_file_returns_synchronous_error(
     # Deliberately do NOT install fakes — we want `parsed_path(fid)` to
     # point at a real non-existent file under DATA_DIR.
 
-    jobs_before = set(jobs._jobs)
+    def _save_match_jobs():
+        return {
+            j for j, v in jobs._jobs.items()
+            if v.get("kind") == "save_match"
+        }
+
     with TestClient(app) as client:
+        # Snapshot AFTER lifespan startup — `lifespan` runs
+        # `reprocess_all_files`, which enqueues discover/preprocess jobs from
+        # on-disk `data/`. Capturing inside the context (and filtering to
+        # save-match jobs) isolates the assertion to the POST's own effect.
+        save_match_before = _save_match_jobs()
         r = client.post(f"/api/files/{fid}/match-json")
+        save_match_after = _save_match_jobs()
     assert r.status_code >= 400 and r.status_code != 202, r.text
-    # No new entry registered in the in-memory job dict.
-    assert set(jobs._jobs) == jobs_before
+    # The pre-flight rejects (parsed file missing) before
+    # `submit_save_match`, so the POST must not register a save-match job.
+    assert save_match_after == save_match_before
 
 
 # ---- Regression: worker does NOT use LIBRARIES (stale cache bug) -------
