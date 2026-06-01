@@ -1500,6 +1500,53 @@ const $ruleSidebar = document.getElementById("rule-sidebar");
 const $ruleSidebarSummary = document.getElementById("rule-sidebar-summary");
 const $ruleSidebarBody = document.getElementById("rule-sidebar-body");
 const $ruleSidebarClose = document.getElementById("rule-sidebar-close");
+const $ruleSearch = document.getElementById("rule-search");
+const $ruleCategoryFilter = document.getElementById("rule-category-filter");
+const $ruleStatusFilter = document.getElementById("rule-status-filter");
+
+// Rule sidebar filter state — re-renders are driven through these.
+let ruleSearchQuery = "";
+let ruleCategoryFilter = "";   // "" = all categories
+let ruleStatusFilter = "all";  // "all" | "pass" | "fail"
+let currentRuleRole = null;    // last role passed to renderRuleSidebar, for filter re-renders
+
+// Rule names follow "<category>-<index>"; the category is everything before
+// the trailing -<number>. A name without that suffix is its own category.
+function ruleCategoryOf(name) {
+  const m = /^(.*)-\d+$/.exec(name);
+  return m ? m[1] : name;
+}
+
+// Lightweight case-insensitive subsequence fuzzy match (no extra deps):
+// every char of `query` must appear in `text` in order. Empty query matches.
+function fuzzyMatch(query, text) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  const t = (text || "").toLowerCase();
+  let i = 0;
+  for (let j = 0; j < t.length && i < q.length; j++) {
+    if (t[j] === q[i]) i++;
+  }
+  return i === q.length;
+}
+
+// Populate the category <select> from the current rule set, preserving the
+// active selection. Called when rule results load, not on every keystroke.
+function populateRuleCategoryFilter() {
+  const prev = ruleCategoryFilter;
+  const cats = new Set();
+  if (currentRuleResults?.results) {
+    for (const name of Object.keys(currentRuleResults.results)) {
+      cats.add(ruleCategoryOf(name));
+    }
+  }
+  const sorted = [...cats].sort();
+  $ruleCategoryFilter.innerHTML =
+    `<option value="">All categories</option>` +
+    sorted.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  ruleCategoryFilter = sorted.includes(prev) ? prev : "";
+  $ruleCategoryFilter.value = ruleCategoryFilter;
+}
 
 // Rule sidebar defaults every rule to folded; the user-opened rules
 // are remembered per session so re-render (e.g. focusing a sub-rule)
@@ -1533,6 +1580,7 @@ async function loadRuleSidebar(productId, role) {
     return;
   }
   currentRuleResults = await rRes.json();
+  populateRuleCategoryFilter();
   renderRuleSidebar(role);
 
   // Apply ?rule=&idx= focus if requested.
@@ -1547,6 +1595,7 @@ async function loadRuleSidebar(productId, role) {
 }
 
 function renderRuleSidebar(role) {
+  currentRuleRole = role;
   $ruleSidebarBody.innerHTML = "";
   if (!currentRuleResults) {
     $ruleSidebarSummary.textContent = "";
@@ -1556,16 +1605,33 @@ function renderRuleSidebar(role) {
     return;
   }
   const d = currentRuleResults;
-  $ruleSidebarSummary.textContent =
-    `${d.pass_count}/${d.rule_count} pass`;
 
   const opened = getOpenedRules();
   // Fail rules render first so the engineer sees what needs attention
   // without scrolling past the passes. Stable order within each group
   // preserves the external rule function's emission sequence.
-  const entries = Object.entries(d.results).sort(([, a], [, b]) =>
+  const allEntries = Object.entries(d.results).sort(([, a], [, b]) =>
     a.pass === b.pass ? 0 : a.pass ? 1 : -1
   );
+  // Apply the sidebar filters: status (all/pass/fail), category
+  // (<category>-<index> prefix), and a fuzzy search over name + description.
+  const entries = allEntries.filter(([name, rule]) => {
+    if (ruleStatusFilter === "pass" && !rule.pass) return false;
+    if (ruleStatusFilter === "fail" && rule.pass) return false;
+    if (ruleCategoryFilter && ruleCategoryOf(name) !== ruleCategoryFilter) return false;
+    if (ruleSearchQuery
+        && !fuzzyMatch(ruleSearchQuery, name)
+        && !fuzzyMatch(ruleSearchQuery, rule.text || "")) return false;
+    return true;
+  });
+  $ruleSidebarSummary.textContent = entries.length === allEntries.length
+    ? `${d.pass_count}/${d.rule_count} pass`
+    : `${d.pass_count}/${d.rule_count} pass · showing ${entries.length}`;
+  if (!entries.length) {
+    $ruleSidebarBody.innerHTML =
+      `<div class="empty-msg">No rules match the current filter.</div>`;
+    return;
+  }
   for (const [name, rule] of entries) {
     const details = document.createElement("details");
     details.dataset.ruleName = name;
@@ -1722,6 +1788,25 @@ $rulesBtn.addEventListener("click", () => {
 $ruleSidebarClose.addEventListener("click", () => {
   $ruleSidebar.hidden = true;
   $rulesBtn.classList.remove("active");
+});
+
+// ---- rule sidebar filters (fuzzy search + category + status) -------------
+$ruleSearch.addEventListener("input", () => {
+  ruleSearchQuery = $ruleSearch.value.trim();
+  renderRuleSidebar(currentRuleRole);
+});
+$ruleCategoryFilter.addEventListener("change", () => {
+  ruleCategoryFilter = $ruleCategoryFilter.value;
+  renderRuleSidebar(currentRuleRole);
+});
+$ruleStatusFilter.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-status]");
+  if (!btn) return;
+  ruleStatusFilter = btn.dataset.status;
+  for (const b of $ruleStatusFilter.querySelectorAll("button")) {
+    b.classList.toggle("active", b === btn);
+  }
+  renderRuleSidebar(currentRuleRole);
 });
 
 // ---- hit-tests -----------------------------------------------------------

@@ -414,6 +414,60 @@ main { flex: 1; position: relative; overflow: hidden; }
   line-height: 1;
 }
 #rule-sidebar #rule-sidebar-close:hover { color: #ff5252; }
+/* Filter controls: fuzzy search + category dropdown + pass/fail/all toggle.
+   Fixed between the header and the scrolling body. */
+#rule-sidebar-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid #2a3340;
+}
+#rule-sidebar #rule-search {
+  width: 100%;
+  background: #14181f;
+  color: #e8eef5;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+#rule-sidebar #rule-search:focus { outline: none; border-color: #4a6080; }
+#rule-sidebar #rule-search::placeholder { color: #5a6470; }
+#rule-sidebar .rule-filter-row { display: flex; align-items: center; gap: 0.4rem; }
+#rule-sidebar #rule-category-filter {
+  flex: 1;
+  min-width: 0;
+  background: #14181f;
+  color: #c0cad6;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+#rule-sidebar #rule-category-filter:hover { border-color: #4a6080; }
+#rule-sidebar .seg {
+  display: inline-flex;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  overflow: hidden;
+}
+#rule-sidebar .seg button {
+  background: transparent;
+  color: #9aa5b1;
+  border: none;
+  border-left: 1px solid #2a3340;
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+#rule-sidebar .seg button:first-child { border-left: none; }
+#rule-sidebar .seg button:hover { color: #e8eef5; }
+#rule-sidebar .seg button.active { background: #003e4d; color: #00ffff; }
 #rule-sidebar-body { overflow-y: auto; padding: 0.2rem 0 0.6rem 0; }
 
 #rule-sidebar details {
