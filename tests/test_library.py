@@ -5,22 +5,16 @@ from __future__ import annotations
 import pytest
 
 from app.library import (
-    CLASS_ARBITRATION_GROUPS,
     CLASS_DEFAULT_MATCH_CONFIG,
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_CLASSES,
     DEFAULT_LIBRARY_ID,
     PRODUCT_SCOPED_CLASSES,
-    ArbitrationGroup,
     Library,
     LibraryRegistry,
-    MaxNeighbors,
-    MinNeighbors,
     Store,
     Template,
-    _build_arbitration_index,
-    arbitration_group_for,
     is_allowed_view,
     is_product_scoped,
 )
@@ -439,14 +433,21 @@ def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
 # ---- Per-class view constraints -------------------------------------------
 def test_class_view_constraints_seed_entries():
     assert CLASS_VIEW_CONSTRAINTS["C4Ball"] == frozenset({"top_view"})
-    assert CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view", "side_view"})
+    # BGABall is bottom-only (disambiguated against top-only FiducialCircle).
+    assert CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialCircle"] == frozenset({"top_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialCross"] == frozenset({"top_view", "bottom_view"})
+    assert CLASS_VIEW_CONSTRAINTS["FiducialSquare"] == frozenset({"top_view", "bottom_view"})
+    for smd in ("SMD-2T", "SMD-3T", "SMD-8T", "SMD-14T"):
+        assert CLASS_VIEW_CONSTRAINTS[smd] == frozenset({"top_view", "bottom_view"})
 
 
 def test_is_allowed_view_unconstrained_class():
     """Classes absent from the registry admit every position including None."""
     for v in ("top_view", "bottom_view", "side_view", None):
+        # Substrate / DieArea have no view constraint.
         assert is_allowed_view("Substrate", v) is True
-        assert is_allowed_view("SMD-2T", v) is True
+        assert is_allowed_view("DieArea", v) is True
         # A made-up class name (custom user class) also passes through.
         assert is_allowed_view("MyMarker", v) is True
 
@@ -461,88 +462,17 @@ def test_is_allowed_view_c4ball():
 
 def test_is_allowed_view_bgaball():
     assert is_allowed_view("BGABall", "bottom_view") is True
-    assert is_allowed_view("BGABall", "side_view") is True
+    # side_view retired: BGABall is bottom-only now.
+    assert is_allowed_view("BGABall", "side_view") is False
     assert is_allowed_view("BGABall", "top_view") is False
     assert is_allowed_view("BGABall", None) is False
 
 
-# ---- Neighbour-count arbitration registry ---------------------------------
-def test_arbitration_groups_default_seed():
-    """Seeded BGABall/FiducialCircle group present with documented rules."""
-    matching = [
-        g for g in CLASS_ARBITRATION_GROUPS
-        if g.members == frozenset({"BGABall", "FiducialCircle"})
-    ]
-    assert len(matching) == 1, f"expected one BGA/Fiducial group, got {matching!r}"
-    g = matching[0]
-    assert g.rules["BGABall"] == MinNeighbors(2)
-    assert g.rules["FiducialCircle"] == MaxNeighbors(1)
-    assert g.default_class == "FiducialCircle"
-
-
-def test_arbitration_group_for_returns_containing_group():
-    g = arbitration_group_for("BGABall")
-    assert g is not None
-    assert "FiducialCircle" in g.members
-    assert arbitration_group_for("Substrate") is None
-
-
-def test_arbitration_group_requires_rule_per_member():
-    with pytest.raises(ValueError, match="missing rules for members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={"BGABall": MinNeighbors(2)},  # FiducialCircle rule missing
-            default_class="BGABall",
-        )
-
-
-def test_arbitration_group_default_class_must_be_member():
-    with pytest.raises(ValueError, match="not in members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={
-                "BGABall":        MinNeighbors(2),
-                "FiducialCircle": MaxNeighbors(1),
-            },
-            default_class="Substrate",  # not a member
-        )
-
-
-def test_arbitration_group_rejects_extra_rules():
-    with pytest.raises(ValueError, match="non-members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={
-                "BGABall":        MinNeighbors(2),
-                "FiducialCircle": MaxNeighbors(1),
-                "Substrate":      MinNeighbors(0),  # extra
-            },
-            default_class="FiducialCircle",
-        )
-
-
-def test_arbitration_group_rejects_singleton_members():
-    with pytest.raises(ValueError, match="needs ≥2 members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall"}),
-            rules={"BGABall": MinNeighbors(2)},
-            default_class="BGABall",
-        )
-
-
-def test_arbitration_index_rejects_class_in_two_groups():
-    g1 = ArbitrationGroup(
-        members=frozenset({"BGABall", "FiducialCircle"}),
-        rules={"BGABall": MinNeighbors(2), "FiducialCircle": MaxNeighbors(1)},
-        default_class="FiducialCircle",
-    )
-    g2 = ArbitrationGroup(
-        members=frozenset({"BGABall", "C4Ball"}),
-        rules={"BGABall": MinNeighbors(2), "C4Ball": MaxNeighbors(1)},
-        default_class="C4Ball",
-    )
-    with pytest.raises(ValueError, match="appears in two arbitration groups"):
-        _build_arbitration_index((g1, g2))
+def test_is_allowed_view_fiducial_circle_top_only():
+    assert is_allowed_view("FiducialCircle", "top_view") is True
+    assert is_allowed_view("FiducialCircle", "bottom_view") is False
+    assert is_allowed_view("FiducialCircle", "side_view") is False
+    assert is_allowed_view("FiducialCircle", None) is False
 
 
 # ---- Per-class storage scope (library vs. product) -----------------------

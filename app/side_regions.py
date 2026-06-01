@@ -18,6 +18,32 @@ from typing import Iterable, Mapping, Optional, TypedDict
 from app.library import is_allowed_view
 
 
+_VIEW_PREFIXES: frozenset[str] = frozenset(
+    {"top_view", "bottom_view", "side_view"}
+)
+
+
+def parse_match_key(key: str) -> tuple[str | None, str, int] | None:
+    """Split a match-JSON key into ``(view_prefix, class_snake, idx)``.
+
+    Inverse of the ``<prefix>.<base_key>`` keys ``split_matches_by_side``
+    emits. Accepts either ``<view>.<class>.<idx>`` or ``<class>.<idx>``; the
+    idx is anchored as the trailing integer so a class snake-key containing
+    no dot stays robust. Returns ``None`` if the key matches neither shape.
+    """
+    parts = key.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        idx = int(parts[-1])
+    except ValueError:
+        return None
+    head = parts[:-1]
+    if len(head) >= 2 and head[0] in _VIEW_PREFIXES:
+        return head[0], ".".join(head[1:]), idx
+    return None, ".".join(head), idx
+
+
 class Rect(TypedDict):
     x0: float
     y0: float

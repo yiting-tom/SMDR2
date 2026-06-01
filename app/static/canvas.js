@@ -531,8 +531,15 @@ function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
 // parses the literal between the BEGIN/END sentinel comments to verify.
 // CLASS_VIEW_CONSTRAINTS_BEGIN
 const CLASS_VIEW_CONSTRAINTS = {
-  "C4Ball":  ["top_view"],
-  "BGABall": ["bottom_view", "side_view"],
+  "C4Ball":         ["top_view"],
+  "BGABall":        ["bottom_view"],
+  "FiducialCircle": ["top_view"],
+  "FiducialCross":  ["top_view", "bottom_view"],
+  "FiducialSquare": ["top_view", "bottom_view"],
+  "SMD-2T":         ["top_view", "bottom_view"],
+  "SMD-3T":         ["top_view", "bottom_view"],
+  "SMD-8T":         ["top_view", "bottom_view"],
+  "SMD-14T":        ["top_view", "bottom_view"],
 };
 // CLASS_VIEW_CONSTRAINTS_END
 
@@ -540,24 +547,6 @@ function isAllowedView(className, view) {
   const allowed = CLASS_VIEW_CONSTRAINTS[className];
   if (!allowed) return true;
   return view !== null && allowed.includes(view);
-}
-
-// Membership-only mirror of app/library.CLASS_ARBITRATION_GROUPS — the
-// flat union of every group's `members` set. The frontend uses this
-// purely to decide *whether* a class participates in arbitration; the
-// rules / pitch / default-class details live server-side only. Today's
-// single group covers BGABall vs. FiducialCircle (same-radius circles
-// that need neighbour-density tiebreaking).
-//
-// MUST stay in sync with app/library.py — tests/test_canvas_constants.py
-// parses the literal between the BEGIN/END sentinel comments and asserts
-// equality with the Python source.
-// CLASS_ARBITRATION_MEMBERS_BEGIN
-const CLASS_ARBITRATION_MEMBERS = ["BGABall", "FiducialCircle"];
-// CLASS_ARBITRATION_MEMBERS_END
-
-function isArbitrationMember(className) {
-  return CLASS_ARBITRATION_MEMBERS.includes(className);
 }
 
 // Classify a world-space point against the file's view rectangles
@@ -2563,40 +2552,31 @@ async function commitCurrentTemplate() {
     // just committed, so there's no need to round-trip scan-all again
     // (which would re-run all 17 classes' templates server-side).
     //
-    // Exception: if the committed class is an arbitration member (today
-    // BGABall / FiducialCircle), the incremental merge would naively
-    // override handles that were correctly tagged by the prior
-    // arbitration pass. Front-end can't reproduce arbitration
-    // (neighbour-density math lives server-side), so we fall back to
-    // a full scan-all re-run — pricier but correct.
-    //
-    // Other re-applied constraint: view constraints (handled by
-    // applyViewConstraintsToScanAll below).
+    // Re-applied after the merge: view constraints (via
+    // applyViewConstraintsToScanAll below), which also disambiguate
+    // same-geometry classes (BGABall bottom-only vs FiducialCircle
+    // top-only). Those are reproducible client-side, so no full scan-all
+    // round-trip is needed on commit.
     const newClass = data.class_name;
     let mergedStatus = "";
-    let needsFullRescan = false;
     // On dedup hit the server discarded the new template; the existing
     // row's handle set is already in the overlay, so any merge here
     // would be a no-op-with-render. Skip the whole block.
     if (!data.already_existed && scanAllByHandle) {
-      if (isArbitrationMember(newClass)) {
-        needsFullRescan = true;
-      } else {
-        // Source pattern (user's selection) is an identity match of
-        // the just-committed template. The server-side find_matches
-        // skips the seed via template_handle_set, so matchSet covers
-        // only the OTHER instances. Merge both to cover the full set
-        // of handles the new template is responsible for.
-        for (const h of selection) scanAllByHandle.set(h, newClass);
-        for (const h of matchSet) scanAllByHandle.set(h, newClass);
-        const byClass = {};
-        for (const [, c] of scanAllByHandle) {
-          byClass[c] = (byClass[c] || 0) + 1;
-        }
-        applyViewConstraintsToScanAll(scanAllByHandle, byClass);
-        scanAllSummary = { byClass, total: scanAllByHandle.size };
-        mergedStatus = ` · overlay +${byClass[newClass] ?? 0} ${newClass}`;
+      // Source pattern (user's selection) is an identity match of
+      // the just-committed template. The server-side find_matches
+      // skips the seed via template_handle_set, so matchSet covers
+      // only the OTHER instances. Merge both to cover the full set
+      // of handles the new template is responsible for.
+      for (const h of selection) scanAllByHandle.set(h, newClass);
+      for (const h of matchSet) scanAllByHandle.set(h, newClass);
+      const byClass = {};
+      for (const [, c] of scanAllByHandle) {
+        byClass[c] = (byClass[c] || 0) + 1;
       }
+      applyViewConstraintsToScanAll(scanAllByHandle, byClass);
+      scanAllSummary = { byClass, total: scanAllByHandle.size };
+      mergedStatus = ` · overlay +${byClass[newClass] ?? 0} ${newClass}`;
     }
 
     setBaseStatus(
@@ -2612,12 +2592,6 @@ async function commitCurrentTemplate() {
     renderClassToolbar();
     updateStatus();
     render();
-
-    // Trigger after the local UI settles so the user sees the "saved"
-    // status before the scan-all running state takes over.
-    if (needsFullRescan) {
-      runScanAll();
-    }
   } catch (e) {
     console.error(e);
     setBaseStatus(`commit error: ${e.message}`);
