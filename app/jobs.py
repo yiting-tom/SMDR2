@@ -159,21 +159,16 @@ def _preprocess_worker(
     # Per-class (match_strategy, bbox_ratio) governs which matcher pipeline
     # runs for each class's templates.
     #
-    # We build the per-template `out` dict in the same prefixed-key shape
-    # `save_match_json` uses, then run `arbitrate(...)` over it, then
-    # collapse back to the flat `by_class: {display_name: [handle, ...]}`
-    # shape the prematch JSON contract expects. Without this collapse,
-    # cross-firing classes (e.g. BGABall + FiducialCircle on identical
-    # circle geometry) would each list every handle in their `by_class`
-    # bucket → the viewer's class-toolbar count chip reports inflated
-    # numbers (e.g. FiducialCircle ×17486 when the post-arbitration
-    # save-match output has only 3). Mirrors the same arbitration the
-    # scan-all and save-match-json endpoints already apply.
-    from app.class_arbitration import _parse_key, arbitrate
-    from app.library import (
-        CLASS_ARBITRATION_GROUPS,
-        CLASS_JSON_KEY,
-    )
+    # We build the per-template `out` dict keyed by snake-class, then collapse
+    # to the flat `by_class: {display_name: [handle, ...]}` shape the prematch
+    # JSON contract expects. NB: preprocess has no side rects yet, so view
+    # constraints aren't enforced here and same-radius cross-fire is not
+    # disambiguated at this stage — the class-toolbar chips can over-count
+    # until the operator draws side regions and runs scan-all / save-match
+    # (where the view split resolves it). With distinct BGA/fiducial radii
+    # there is no cross-fire and the counts are already clean.
+    from app.side_regions import parse_match_key
+    from app.library import CLASS_JSON_KEY
 
     store = Store(DB_PATH)
     classes, configs_by_class, templates_by_class = store.load_library(
@@ -199,34 +194,21 @@ def _preprocess_worker(
             base_key = f"{json_cls}.{idx}"
             # Each match instance is one handle-list. No side-view
             # prefix at preprocess time — side regions get drawn later,
-            # so we keep keys unprefixed and let arbitrate pool by
-            # snake-class alone (it doesn't require prefixes).
+            # so we keep keys unprefixed (snake-class only).
             for m in result.matches:
                 out.setdefault(base_key, []).append(list(m.handles))
 
-    # Apply the same cross-fire resolution save_match_json runs, but
-    # WITHOUT view-constraint enforcement: side regions aren't drawn
-    # yet at preprocess time (no rects on the file record), so every
-    # instance's `view_prefix` is None — and an arbitrate() with
-    # `enforce_view_constraints=True` would drop every match of a
-    # view-constrained class (BGABall, C4Ball). The pre-arbitration
-    # cross-fire (e.g. BGABall+FiducialCircle on a shared circle
-    # radius) is still resolved; once the operator draws side regions
-    # and runs scan-all / save-match, those flows re-arbitrate WITH
-    # view enforcement and produce the strict outcome.
-    out, _arbitration_counts, _view_drops = arbitrate(
-        out, shapes, CLASS_ARBITRATION_GROUPS,
-        enforce_view_constraints=False,
-    )
-
-    # Collapse arbitrated `out` (keys like `bga_ball.0`) back to the
-    # flat display-name → handles shape the prematch JSON contract
-    # exposes. Reverse the snake → display mapping; classes without an
-    # entry in `CLASS_JSON_KEY` use their display name verbatim.
+    # Collapse `out` (keys like `bga_ball.0`) back to the flat
+    # display-name → handles shape the prematch JSON contract exposes.
+    # Reverse the snake → display mapping; classes without an entry in
+    # `CLASS_JSON_KEY` use their display name verbatim. No cross-fire
+    # resolution runs here: BGABall/FiducialCircle are disambiguated by
+    # mutually exclusive view constraints at save-match/scan-all once side
+    # regions are drawn (preprocess has no rects yet).
     display_by_snake = {v: k for k, v in CLASS_JSON_KEY.items()}
     by_class_sets: dict[str, set[str]] = {}
     for key, instance_lists in out.items():
-        parsed = _parse_key(key)
+        parsed = parse_match_key(key)
         if parsed is None:
             continue
         _prefix, cls_snake, _idx = parsed
@@ -699,9 +681,8 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly. This worker
     # is a verbatim port of the loop that previously lived inside
     # `app/main.py:save_match_json` — same `out` shape, same per-class
-    # skip-when-impossible guard, same `arbitrate()` call, same on-disk
-    # JSON layout. Only the surrounding plumbing (HTTP handler → process
-    # pool) changes.
+    # skip-when-impossible + view-split guard, same on-disk JSON layout.
+    # Only the surrounding plumbing (HTTP handler → process pool) changes.
     #
     # IMPORTANT: read the library via `Store.load_library(...)` rather
     # than `LIBRARIES.get(...)`. The `LIBRARIES` singleton caches a
@@ -716,10 +697,8 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     #   - later saves → match.json is missing newly-added classes
     # The `_preprocess_worker` already follows this fresh-load pattern;
     # we mirror it here.
-    from app.class_arbitration import arbitrate
     from app.files import FILE_STORE
     from app.library import (
-        CLASS_ARBITRATION_GROUPS,
         CLASS_JSON_KEY,
         CLASS_VIEW_CONSTRAINTS,
         Store,
@@ -787,15 +766,9 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
                 side_counts[k] += n
             total_matches += len(result.matches)
 
-    out, arbitration_counts, view_drops = arbitrate(
-        out, shapes, CLASS_ARBITRATION_GROUPS,
-    )
-    for _label, by_prefix in view_drops.items():
-        for prefix, n in by_prefix.items():
-            bucket = prefix if prefix else "unassigned"
-            side_counts[bucket] = max(0, side_counts[bucket] - n)
-            side_counts["dropped"] += n
-
+    # BGABall/FiducialCircle (and any same-geometry pair) are disambiguated
+    # by the mutually exclusive view constraints applied in
+    # split_matches_by_side above — no post-match arbitration step.
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_path, "w") as f:
@@ -810,7 +783,6 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "side_counts": side_counts,
-        "arbitration_counts": arbitration_counts,
         "saved_to": saved_to,
         "match_saved": True,
     }

@@ -301,8 +301,8 @@ def test_c4ball_with_no_top_view_rect_triggers_skip(monkeypatch, tmp_path):
 def test_save_match_json_resolves_bga_fiducial_by_view(monkeypatch, tmp_path):
     """End-to-end: BGABall/FiducialCircle cross-fire on identical circle
     geometry resolves to one class per handle via mutually exclusive view
-    constraints (BGABall=bottom, FiducialCircle=top) — no density arbitration.
-    The worker reports an empty arbitration_counts (registry retired)."""
+    constraints (BGABall=bottom, FiducialCircle=top) — no density arbitration
+    (the subsystem was removed)."""
     from app.jobs import _save_match_worker
     from app.storage import match_path
 
@@ -338,16 +338,12 @@ def test_save_match_json_resolves_bga_fiducial_by_view(monkeypatch, tmp_path):
     }
     _install_fakes(monkeypatch, shapes, matches, tmp_path)
 
-    result = _save_match_worker(fid, str(match_path(fid)))
+    _save_match_worker(fid, str(match_path(fid)))
 
-    # Density arbitration is retired — the registry is empty, so the worker
-    # reports no arbitration_counts. The BGABall/FiducialCircle cross-fire is
-    # instead resolved by the mutually exclusive view constraints applied in
+    # Density arbitration is retired. The BGABall/FiducialCircle cross-fire is
+    # resolved by the mutually exclusive view constraints applied in
     # split_matches_by_side: BGABall-on-fids (top) and FiducialCircle-on-grid
     # (bottom) are both dropped, leaving grid→bga_ball, fids→fiducial_circle.
-    assert "arbitration_counts" in result
-    assert result["arbitration_counts"] == {}
-
     saved = json.loads(match_path(fid).read_text())
     # Grid handles end up under bga_ball; fid handles end up under
     # fiducial_circle. No handle appears under both.
@@ -604,7 +600,6 @@ def test_save_match_done_callback_flips_flag_and_stores_result(
     assert "template_keys" in r
     assert "total_matches" in r
     assert "side_counts" in r
-    assert "arbitration_counts" in r
     assert "saved_to" in r
     assert r["match_saved"] is True
 

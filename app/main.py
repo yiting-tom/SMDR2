@@ -42,9 +42,7 @@ from app.files import (
     PREPROCESSING,
     READY,
 )
-from app.class_arbitration import _parse_key, arbitrate
 from app.library import (
-    CLASS_ARBITRATION_GROUPS,
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_LIBRARY_ID,
@@ -64,7 +62,7 @@ from app.matching import (
 )
 from app.products import PRODUCT_STORE, VALID_ROLES, Product
 from app.drc_bundle import build_bundle
-from app.side_regions import normalise_rect, split_matches_by_side
+from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
 from app.storage import (
     DATA_DIR,
     layer_manifest_path,
@@ -1138,17 +1136,16 @@ async def scan_all(file_id: str) -> dict:
     """Overlay-only preview of "what class does each handle belong to".
 
     Runs the *same* pipeline as `save_match_json` — view split via
-    `split_matches_by_side` then `arbitrate` against
-    `CLASS_ARBITRATION_GROUPS` — so the overlay's per-class colouring
-    matches what Save Match would persist to disk. Without this, a
-    template that cross-fires on geometry shared with another class
-    (e.g. FiducialCircle + BGABall sharing a circle radius) would
-    paint the overlay one way and the saved JSON another.
+    `split_matches_by_side` — so the overlay's per-class colouring matches
+    what Save Match would persist to disk. Same-geometry classes that would
+    otherwise cross-fire (FiducialCircle + BGABall sharing a circle radius)
+    are disambiguated by their mutually exclusive view constraints (BGABall
+    bottom-only, FiducialCircle top-only): a match in a disallowed view is
+    dropped by `split_matches_by_side`.
 
-    Response shape is unchanged from before this endpoint started
-    arbitrating: `{by_class: {<display_name>: [handle, ...]}, total: N}`.
+    Response shape: `{by_class: {<display_name>: [handle, ...]}, total: N}`.
     Front-end overlay code (`runScanAll` in `canvas.js`) reads
-    `data.by_class[cls]` exactly as before.
+    `data.by_class[cls]`.
     """
     rec = _resolve_file(file_id)
     # Scope-aware load: merge library-scoped templates with this file's
@@ -1175,8 +1172,9 @@ async def scan_all(file_id: str) -> dict:
         "side_view": rec.side_view_rect,
     }
 
-    # Prefixed-key dict that arbitrate consumes. Same shape
-    # save_match_json builds before persistence.
+    # Prefixed-key dict, same shape save_match_json builds before
+    # persistence. BGABall/FiducialCircle are disambiguated by the view
+    # constraints applied in split_matches_by_side below — no arbitration step.
     out: dict[str, list[list[str]]] = {}
 
     for cls_name in classes:
@@ -1205,12 +1203,6 @@ async def scan_all(file_id: str) -> dict:
             for k, v in grouped.items():
                 out.setdefault(k, []).extend(v)
 
-    # Resolve cross-fire across arbitration-group members (e.g.
-    # BGABall vs FiducialCircle on same-radius circles).
-    out, _arbitration_counts, _view_drops = arbitrate(
-        out, shapes, CLASS_ARBITRATION_GROUPS,
-    )
-
     # Collapse prefixed-keys back to the flat {display_name: handles}
     # shape the overlay expects. Reverse-map snake_case → display name
     # via CLASS_JSON_KEY (classes without a snake override use the
@@ -1218,7 +1210,7 @@ async def scan_all(file_id: str) -> dict:
     display_by_snake = {v: k for k, v in CLASS_JSON_KEY.items()}
     by_class_sets: dict[str, set[str]] = {}
     for key, instance_lists in out.items():
-        parsed = _parse_key(key)
+        parsed = parse_match_key(key)
         if parsed is None:
             continue
         _prefix, cls_snake, _idx = parsed

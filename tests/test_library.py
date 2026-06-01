@@ -5,21 +5,15 @@ from __future__ import annotations
 import pytest
 
 from app.library import (
-    CLASS_ARBITRATION_GROUPS,
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
     DEFAULT_CLASSES,
     DEFAULT_LIBRARY_ID,
     PRODUCT_SCOPED_CLASSES,
-    ArbitrationGroup,
     Library,
     LibraryRegistry,
-    MaxNeighbors,
-    MinNeighbors,
     Store,
     Template,
-    _build_arbitration_index,
-    arbitration_group_for,
     is_allowed_view,
     is_product_scoped,
 )
@@ -451,79 +445,6 @@ def test_is_allowed_view_fiducial_circle_top_only():
     assert is_allowed_view("FiducialCircle", "bottom_view") is False
     assert is_allowed_view("FiducialCircle", "side_view") is False
     assert is_allowed_view("FiducialCircle", None) is False
-
-
-# ---- Neighbour-count arbitration registry ---------------------------------
-def test_arbitration_registry_is_empty():
-    """The density arbitration registry is retired: BGABall vs FiducialCircle
-    is now disambiguated by mutually exclusive view constraints (bottom-only
-    vs top-only), not by neighbour density. The arbitrate() machinery stays
-    for a future same-view collision but the default registry is empty."""
-    assert CLASS_ARBITRATION_GROUPS == ()
-
-
-def test_arbitration_group_for_returns_none_when_registry_empty():
-    assert arbitration_group_for("BGABall") is None
-    assert arbitration_group_for("FiducialCircle") is None
-    assert arbitration_group_for("Substrate") is None
-
-
-def test_arbitration_group_requires_rule_per_member():
-    with pytest.raises(ValueError, match="missing rules for members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={"BGABall": MinNeighbors(2)},  # FiducialCircle rule missing
-            default_class="BGABall",
-        )
-
-
-def test_arbitration_group_default_class_must_be_member():
-    with pytest.raises(ValueError, match="not in members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={
-                "BGABall":        MinNeighbors(2),
-                "FiducialCircle": MaxNeighbors(1),
-            },
-            default_class="Substrate",  # not a member
-        )
-
-
-def test_arbitration_group_rejects_extra_rules():
-    with pytest.raises(ValueError, match="non-members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall", "FiducialCircle"}),
-            rules={
-                "BGABall":        MinNeighbors(2),
-                "FiducialCircle": MaxNeighbors(1),
-                "Substrate":      MinNeighbors(0),  # extra
-            },
-            default_class="FiducialCircle",
-        )
-
-
-def test_arbitration_group_rejects_singleton_members():
-    with pytest.raises(ValueError, match="needs ≥2 members"):
-        ArbitrationGroup(
-            members=frozenset({"BGABall"}),
-            rules={"BGABall": MinNeighbors(2)},
-            default_class="BGABall",
-        )
-
-
-def test_arbitration_index_rejects_class_in_two_groups():
-    g1 = ArbitrationGroup(
-        members=frozenset({"BGABall", "FiducialCircle"}),
-        rules={"BGABall": MinNeighbors(2), "FiducialCircle": MaxNeighbors(1)},
-        default_class="FiducialCircle",
-    )
-    g2 = ArbitrationGroup(
-        members=frozenset({"BGABall", "C4Ball"}),
-        rules={"BGABall": MinNeighbors(2), "C4Ball": MaxNeighbors(1)},
-        default_class="C4Ball",
-    )
-    with pytest.raises(ValueError, match="appears in two arbitration groups"):
-        _build_arbitration_index((g1, g2))
 
 
 # ---- Per-class storage scope (library vs. product) -----------------------

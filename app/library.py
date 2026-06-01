@@ -108,8 +108,8 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
 # These constraints also *disambiguate* same-geometry classes by physical
 # view instead of by neighbour density: BGABall (bottom-only) and
 # FiducialCircle (top-only) are mutually exclusive, so a circle is classified
-# by which view it sits in — this replaces the old density-based
-# class-arbitration for that pair (CLASS_ARBITRATION_GROUPS is now empty).
+# by which view it sits in — this replaced the old density-based
+# class-arbitration subsystem for that pair (since removed).
 #
 # Absent key = class is unconstrained (all views including "unassigned"
 # permitted). Present key = strict mode: only the listed views are
@@ -227,118 +227,6 @@ def _template_signature_cached(t: "Template") -> tuple:
     sig = template_signature(t.entity_point_sets)
     object.__setattr__(t, "_signature", sig)
     return sig
-
-
-# ---- Neighbour-count arbitration registry -------------------------------
-# When two classes have geometrically identical templates (e.g., a BGA ball
-# and a circle fiducial of the same diameter), pure pattern matching pulls
-# the same handles into both classes. The arbitration step in
-# app/class_arbitration.py uses spatial neighbour density to split them.
-# This registry declares which class pairs participate and the
-# neighbour-count rule that disambiguates them.
-
-@dataclass(frozen=True)
-class MinNeighbors:
-    n: int
-
-    def matches(self, count: int) -> bool:
-        return count >= self.n
-
-
-@dataclass(frozen=True)
-class MaxNeighbors:
-    n: int
-
-    def matches(self, count: int) -> bool:
-        return count <= self.n
-
-
-NeighborRule = MinNeighbors | MaxNeighbors
-
-
-@dataclass(frozen=True)
-class ArbitrationGroup:
-    """Two-or-more classes whose templates can be indistinguishable;
-    instances are routed to one class via neighbour count."""
-
-    members: frozenset[str]
-    rules: dict[str, NeighborRule]
-    default_class: str
-    min_population: int = 8
-    pitch_multiplier: float = 1.5
-
-    def __post_init__(self) -> None:
-        if len(self.members) < 2:
-            raise ValueError(
-                f"ArbitrationGroup needs ≥2 members, got {self.members!r}"
-            )
-        missing = self.members - self.rules.keys()
-        if missing:
-            raise ValueError(
-                f"ArbitrationGroup missing rules for members: {sorted(missing)!r}"
-            )
-        extra = set(self.rules.keys()) - self.members
-        if extra:
-            raise ValueError(
-                f"ArbitrationGroup has rules for non-members: {sorted(extra)!r}"
-            )
-        if self.default_class not in self.members:
-            raise ValueError(
-                f"default_class {self.default_class!r} is not in members "
-                f"{sorted(self.members)!r}"
-            )
-        if self.pitch_multiplier <= 0:
-            raise ValueError(
-                f"pitch_multiplier must be > 0, got {self.pitch_multiplier!r}"
-            )
-        if self.min_population < 0:
-            raise ValueError(
-                f"min_population must be ≥ 0, got {self.min_population!r}"
-            )
-
-
-# Default registry — EMPTY. The BGABall|FiducialCircle pair (same circle
-# geometry) used to be split here by neighbour density; that heuristic was
-# fragile (derived-pitch / population-floor edge cases could collapse a real
-# BGA grid to FiducialCircle), so it was retired in favour of mutually
-# exclusive view constraints — BGABall is bottom-only, FiducialCircle is
-# top-only (see CLASS_VIEW_CONSTRAINTS). A circle is now classified by which
-# view it sits in; same-view cross-fire is resolved by the view-constraint
-# drop in split_matches_by_side.
-#
-# The `arbitrate()` machinery is retained (it is a no-op over an empty
-# registry) so a future *same-view* same-geometry collision can be handled by
-# adding a group here. Class-display-ID uniqueness across groups is enforced
-# below at import time.
-CLASS_ARBITRATION_GROUPS: tuple[ArbitrationGroup, ...] = ()
-
-
-def _build_arbitration_index(
-    groups: tuple[ArbitrationGroup, ...],
-) -> dict[str, ArbitrationGroup]:
-    """Precompute class → group lookup; raise on a class shared by two groups."""
-    idx: dict[str, ArbitrationGroup] = {}
-    for g in groups:
-        for cls in g.members:
-            prior = idx.get(cls)
-            if prior is not None:
-                raise ValueError(
-                    f"class {cls!r} appears in two arbitration groups: "
-                    f"{sorted(prior.members)!r} and {sorted(g.members)!r}"
-                )
-            idx[cls] = g
-    return idx
-
-
-_ARBITRATION_INDEX: dict[str, ArbitrationGroup] = _build_arbitration_index(
-    CLASS_ARBITRATION_GROUPS
-)
-
-
-def arbitration_group_for(class_name: str) -> ArbitrationGroup | None:
-    """Return the unique ArbitrationGroup that contains class_name, or None.
-    A class belongs to at most one group (enforced at import time)."""
-    return _ARBITRATION_INDEX.get(class_name)
 
 
 DEFAULT_LIBRARY_ID = "default"
