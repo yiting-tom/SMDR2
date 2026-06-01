@@ -2421,6 +2421,15 @@ function renderClassToolbar() {
       if (matchN === 0) cnt.classList.add("zero");
       btn.appendChild(cnt);
     }
+    // Grey is the default: a button shows its full class colour ONLY when
+    // its class has been found in the current image (matched ≥1 instance via
+    // the prematch overlay on load, or an explicit scan-all). Every other
+    // class — including before any scan has run — is dimmed, so the operator
+    // sees at a glance which objects are already extracted vs. still absent.
+    // The class being added right now is exempt (keeps its active styling).
+    if (!(matchN > 0) && addModeClass !== cls.name) {
+      btn.classList.add("absent");
+    }
     const matchedSuffix = scanAllSummary && matchN !== undefined
       ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
       : "";

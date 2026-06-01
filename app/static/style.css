@@ -296,6 +296,15 @@ nav#class-toolbar .class-btn {
   white-space: nowrap;
 }
 nav#class-toolbar .class-btn:hover { filter: brightness(1.25); }
+/* No matches for this class in the current image → dim the button so
+   "already extracted" (full class colour) vs "not yet" reads at a glance.
+   Keeps the class's own colour (no flat grey), just slightly faded +
+   desaturated so it reads as muted, not washed out. Still fully clickable. */
+nav#class-toolbar .class-btn.absent {
+  opacity: 0.8;
+  filter: saturate(0.7) brightness(0.9);
+}
+nav#class-toolbar .class-btn.absent:hover { filter: saturate(1) brightness(1.1); }
 nav#class-toolbar .class-btn.active {
   background: #1a2840;
   border-color: #ffb84d;
