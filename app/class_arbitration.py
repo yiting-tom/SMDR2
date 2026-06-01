@@ -320,27 +320,12 @@ def arbitrate(
                 classes_with_keys.add(display)
         if len(classes_with_keys) == 1 and instances:
             sole_class = next(iter(classes_with_keys))
-            # The short-circuit is only safe for a *non-default* sole class.
-            # A non-default member (e.g. BGABall) is the high-confidence
-            # label: the matcher only fired its template on geometry that
-            # already passed that class's own gate, so there is no cross-class
-            # competition and classify() could only mis-label by neighbour
-            # density (demoting isolated balls to phantom fiducials). Keep the
-            # source keys untouched.
-            #
-            # But when the sole class IS the default_class (the safe fallback,
-            # e.g. FiducialCircle), density can still disambiguate UPWARD: a
-            # dense grid matched only by the fiducial template must be promoted
-            # to BGABall. Short-circuiting there strands a real BGA grid under
-            # the fiducial label (the BGA-highlighted-as-FiducialCircle
-            # regression). So fall through to classify + population fallback —
-            # the floor still collapses a handful of true corner fiducials back
-            # to the default, while a genuine grid (≥ min_population) is
-            # promoted to BGABall.
-            if sole_class != group.default_class:
-                gc.assigned = {sole_class: len(instances)}
-                group_counts[label] = gc.to_dict()
-                continue
+            # No cross-class competition possible in the source keys —
+            # classify() could only mis-label individual instances by
+            # neighbour density. Leave source keys in `new_out` untouched.
+            gc.assigned = {sole_class: len(instances)}
+            group_counts[label] = gc.to_dict()
+            continue
 
         if len(instances) < 2:
             # Spec: empty / singleton pool → arbitration is a no-op.

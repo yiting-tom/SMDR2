@@ -253,14 +253,14 @@ def test_arbitrate_bga_grid_plus_corner_fiducials():
     assert view_drops == {}
 
 
-def test_arbitrate_only_corner_fiducials_triggers_population_fallback():
-    """A file with ONLY 4 corner fiducials and no BGA grid. The pool's sole
-    class is FiducialCircle, the *default* — so the single-class guard does
-    NOT short-circuit (density could legitimately promote a real grid). The
-    4 corners each have ≥2 neighbours within 1.5× the corner pitch, so
-    classify labels them BGABall; the population floor (4 < 8) then collapses
-    them back to FiducialCircle. End result: all 4 stay FiducialCircle, via
-    the classify-then-fallback path (not the short-circuit)."""
+def test_arbitrate_only_corner_fiducials_short_circuits_via_single_class_guard():
+    """A file with ONLY 4 corner fiducials and no BGA grid. The library
+    only has FiducialCircle templates → every pool instance has
+    `original_class=FiducialCircle` → the single-class guard short-circuits
+    arbitration before classify/fallback runs. End result (all 4 stay
+    FiducialCircle) is identical to the historical "classify mis-labels
+    as BGA → population fallback collapses back to FiducialCircle" path,
+    but the diagnostic now records short-circuit instead of fallback."""
     coords = {
         "f0": (-5.0, -5.0),
         "f1": (-5.0, 10.0),
@@ -273,48 +273,15 @@ def test_arbitrate_only_corner_fiducials_triggers_population_fallback():
     }
     new_out, counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
     label = "BGABall|FiducialCircle"
-    # Default-class pool falls through to classify + fallback.
-    assert counts[label]["population_fallback_triggered"] is True
-    assert counts[label]["derived_pitch"] == 15.0
-    assert counts[label]["assigned"] == {"FiducialCircle": 4, "BGABall": 0}
-    # All 4 land under fiducial keys.
+    # Short-circuit path: fallback never ran, pitch never derived.
+    assert counts[label]["population_fallback_triggered"] is False
+    assert counts[label]["derived_pitch"] is None
+    assert counts[label]["assigned"] == {"FiducialCircle": 4}
+    # All 4 land under fiducial keys (source keys, unmodified).
     fid_keys = [k for k in new_out if "fiducial_circle" in k]
     fid_total = sum(len(new_out[k]) for k in fid_keys)
     assert fid_total == 4
     assert all("bga_ball" not in k for k in new_out)
-
-
-def test_single_class_default_pool_grid_is_promoted_to_bga():
-    """Regression (BGA-highlighted-as-FiducialCircle): a dense grid matched
-    ONLY by the FiducialCircle template forms a single-class pool whose sole
-    class is the *default*. The single-class guard must NOT short-circuit
-    here — density evidence still disambiguates UPWARD, so a real BGA grid
-    keyed under fiducial_circle is promoted to BGABall.
-
-    Before the asymmetric guard, the symmetric single-class short-circuit
-    stranded this grid under the fiducial label (teal) even though every
-    point has 3–8 neighbours and unambiguously reads as a BGA grid (orange).
-    """
-    coords = {
-        f"g{i}_{j}": (float(i), float(j))
-        for i in range(5) for j in range(5)
-    }  # 25-point grid at pitch 1.0 — well above min_population=8
-    shapes = _shapes_from_coords(coords)
-    out = {"bottom_view.fiducial_circle.0": [[k] for k in coords]}
-    new_out, counts, _drops = arbitrate(out, shapes, [_bga_fiducial_group()])
-    label = "BGABall|FiducialCircle"
-    gc = counts[label]
-    # Short-circuit did NOT fire: classify ran (pitch derived) and promoted.
-    assert gc["derived_pitch"] == 1.0
-    assert gc["population_fallback_triggered"] is False
-    assert gc["assigned"] == {"BGABall": 25, "FiducialCircle": 0}
-    # Every handle re-emitted under a bga_ball key; no fiducial keys remain.
-    assert all("fiducial_circle" not in k for k in new_out)
-    bga_handles: set[str] = set()
-    for k in new_out:
-        for hl in new_out[k]:
-            bga_handles.update(hl)
-    assert bga_handles == set(coords)
 
 
 def test_arbitrate_view_conflict_drops_instance():
