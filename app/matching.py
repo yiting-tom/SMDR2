@@ -395,6 +395,39 @@ def _resample_arclength(points: np.ndarray, n: int) -> np.ndarray:
     return extended[idx] + frac[:, None] * deltas[idx]
 
 
+def _canonical_start(points: np.ndarray) -> int:
+    """Index of the vertex furthest from the centroid — a rotation- and
+    winding-stable anchor for arclength resampling.
+
+    `_resample_arclength` lays its N samples starting from `points[0]` in
+    stored order, so two geometrically identical outlines stored with a
+    different first vertex or opposite winding (CW vs CCW — common after a
+    CAD copy / mirror / rotate-paste) resample to *misaligned* sample grids.
+    At sharp corners that misalignment inflates the symmetric Chamfer well
+    past `TOLERANCE_ABS`, so identical shapes register as `reason="shape"`
+    near-misses. Anchoring the resample start at a geometry-determined vertex
+    (furthest from the centroid — always a corner for a substrate/component
+    outline) makes the sampling phase independent of vertex order and winding,
+    so identical shapes resample to the *same* grid and score Chamfer ~0. Any
+    residual corner-tie ambiguity (e.g. a near-square outline whose four
+    corners are equidistant) is absorbed by the existing 4 sign-variant
+    orientations downstream.
+    """
+    if points.shape[0] < 2:
+        return 0
+    c = points.mean(axis=0)
+    return int(np.argmax(((points - c) ** 2).sum(axis=1)))
+
+
+def _resample_canonical(points: np.ndarray, n: int) -> np.ndarray:
+    """`_resample_arclength` with a phase/winding-invariant start vertex."""
+    if points.shape[0] < 2:
+        return points
+    i = _canonical_start(points)
+    rolled = points if i == 0 else np.roll(points, -i, axis=0)
+    return _resample_arclength(rolled, n)
+
+
 def align_score(
     template_pts: np.ndarray,
     candidate_pts: np.ndarray,
@@ -405,10 +438,11 @@ def align_score(
     if template_pts.shape[0] < 2 or candidate_pts.shape[0] < 2:
         return None
     # Resample both to canonical density so vertex-count differences don't
-    # bias scale or Chamfer. _resample_arclength absorbs the closing-vertex
-    # dedup that the previous serial path did explicitly.
-    template_pts = _resample_arclength(template_pts, RESAMPLE_N)
-    candidate_pts = _resample_arclength(candidate_pts, RESAMPLE_N)
+    # bias scale or Chamfer. _resample_canonical also anchors the sampling
+    # phase to a geometry-stable start vertex so a different stored winding /
+    # first vertex doesn't misalign the grids (see _canonical_start).
+    template_pts = _resample_canonical(template_pts, RESAMPLE_N)
+    candidate_pts = _resample_canonical(candidate_pts, RESAMPLE_N)
     if template_pts.shape[0] < 2 or candidate_pts.shape[0] < 2:
         return None
     t_centered = template_pts - template_pts.mean(axis=0)
@@ -938,8 +972,10 @@ def _match_single_serial(
     if template.vertex_count < 2:
         return MatchOutput(matches=matches, near_misses=near)
 
-    # Template-side once
-    t_resampled = _resample_arclength(template.points, RESAMPLE_N)
+    # Template-side once. Canonical resampling anchors the sampling phase to a
+    # geometry-stable start vertex so candidates stored with a different first
+    # vertex / winding still align (see _canonical_start).
+    t_resampled = _resample_canonical(template.points, RESAMPLE_N)
     t_centered = t_resampled - t_resampled.mean(axis=0)
     t_axes, _ = _pca_axes(t_centered)
     t_norm = float(np.linalg.norm(t_centered, axis=1).mean())
@@ -958,7 +994,7 @@ def _match_single_serial(
         if shape.points.shape[0] < 2:
             continue
 
-        c_resampled = _resample_arclength(shape.points, RESAMPLE_N)
+        c_resampled = _resample_canonical(shape.points, RESAMPLE_N)
         c_centered = c_resampled - c_resampled.mean(axis=0)
         c_norm = float(np.linalg.norm(c_centered, axis=1).mean())
         if c_norm < 1e-9:
