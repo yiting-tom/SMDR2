@@ -67,6 +67,19 @@
         <span id="rule-sidebar-summary"></span>
         <button type="button" id="rule-sidebar-close" title="Hide">×</button>
       </header>
+      <div id="rule-sidebar-controls">
+        <input type="search" id="rule-search" placeholder="Search rule name / description…" autocomplete="off" />
+        <div class="rule-filter-row">
+          <select id="rule-category-filter" title="Filter by category">
+            <option value="">All categories</option>
+          </select>
+          <div id="rule-status-filter" class="seg" role="group" aria-label="Filter by status">
+            <button type="button" data-status="all" class="active">All</button>
+            <button type="button" data-status="pass">Pass</button>
+            <button type="button" data-status="fail">Fail</button>
+          </div>
+        </div>
+      </div>
       <div id="rule-sidebar-body"></div>
     </aside>
     <footer id="canvas-statusbar">
