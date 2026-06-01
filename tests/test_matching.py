@@ -202,6 +202,53 @@ def test_find_matches_density_invariant_under_mirror():
     assert {m.handles[0] for m in out.matches} == {"dense_mirror"}
 
 
+def _notched_substrate(x0=0.0, y0=0.0):
+    """86×75 substrate-like outline: chamfered corners + a chiral pin-1 notch
+    on the left edge. Sharp corners, so arclength-resample phase matters."""
+    W, H, c = 86.0, 75.0, 2.0
+    xs = np.linspace(c, W - c, 6)
+    pts = [(x, 0.0) for x in xs]
+    pts += [(W - c, 0.0), (W, c)]
+    pts += [(W, y) for y in np.linspace(c, H - c, 6)]
+    pts += [(W, H - c), (W - c, H)]
+    pts += [(x, H) for x in xs[::-1]]
+    pts += [(c, H), (0.0, H - c),
+            (0.0, 0.62 * H), (4.0, 0.55 * H), (0.0, 0.48 * H)]
+    pts += [(0.0, y) for y in np.linspace(H - c, c, 5)]
+    pts += [(0.0, c), (c, 0.0)]
+    arr = np.array(pts, dtype=float)
+    arr[:, 0] += x0
+    arr[:, 1] += y0
+    return arr
+
+
+def test_find_matches_identical_copy_with_reversed_winding_and_phase():
+    """An exact copy stored with opposite winding (CW vs CCW) and a different
+    first vertex — the way a CAD copy / mirror / rotate-paste lands in the DXF.
+
+    Arclength resampling is phase/winding-sensitive: before canonical-start
+    anchoring this congruent copy scored a Chamfer of ~1.8 mm (≫ 0.2 mm tol)
+    and registered as a `reason="shape"` near-miss despite being geometrically
+    identical to the template. The canonical resample anchor makes the sampling
+    phase winding-/order-independent, so it scores ~0 and matches.
+    """
+    base = _notched_substrate()
+    # Reverse the winding, roll the start vertex, and translate elsewhere on
+    # the sheet — the exact congruence the user's two substrates exhibited.
+    copy = np.roll(base[::-1].copy(), 7, axis=0)
+    copy[:, 0] += 0.001
+    copy[:, 1] -= 121.95
+    drawing = {
+        "t": shape("t", base),
+        "c": shape("c", copy),
+    }
+    out = find_matches(["t"], drawing)
+    assert {m.handles[0] for m in out.matches} == {"c"}
+    # A real, high-quality match — not a borderline pass just under tolerance.
+    score = next(m.score for m in out.matches if m.handles[0] == "c")
+    assert score < 0.05
+
+
 def test_find_matches_same_perimeter_different_shape_rejected():
     # Path length matches the rectangle's (perimeter 6) but the shape is
     # genuinely different — a 1.5×1.5 square. Density-invariant resampling
