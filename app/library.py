@@ -60,6 +60,23 @@ DEFAULT_CLASSES: list[str] = [
 DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
 
 
+# Code-declared default match config for built-in classes whose outline is a
+# large rigid loop best matched by perimeter + aspect (signature mode) rather
+# than PCA-chamfer. A big sharp-cornered boundary's chamfer score is sensitive
+# to the stored winding / start vertex of the loop (see
+# app.matching._canonical_start); signature matching keys only on size + aspect
+# and sidesteps that entirely. `bbox_ratio` is the signature size tolerance.
+# Classes absent here default to ('chamfer', None). Applied at class-seed time
+# (add_class) and via a boot migration that only converts rows still in the
+# pristine chamfer/NULL state — any explicit signature configuration set in the
+# UI (a different bbox_ratio) is preserved across reboots.
+CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
+    "Substrate": ("signature", 0.0001),
+    "LidOuter":  ("signature", 0.0001),
+    "LidInner":  ("signature", 0.0001),
+}
+
+
 # Display ID → match-JSON snake_case key. Display labels stay in their
 # canonical form (BGABall, Pin-1, …); only the persisted JSON key uses the
 # snake_case identifier downstream consumers (rule checker, exports) expect.
@@ -579,6 +596,19 @@ class Store:
                     (lib_id, c, now),
                 )
 
+        # Apply code-declared default match config for built-in large-outline
+        # classes (Substrate / LidOuter / LidInner -> signature). Only convert
+        # rows still in the pristine chamfer/NULL state; an explicit signature
+        # config set in the UI (any bbox_ratio) is preserved. Idempotent: once
+        # a row is signature the WHERE no longer matches it.
+        for cls_name, (strat, ratio) in CLASS_DEFAULT_MATCH_CONFIG.items():
+            self.conn.execute(
+                "UPDATE classes SET match_strategy = ?, bbox_ratio = ? "
+                "WHERE name = ? AND match_strategy = 'chamfer' "
+                "AND bbox_ratio IS NULL",
+                (strat, ratio, cls_name),
+            )
+
         # Re-rank classes per library so the toolbar order tracks the current
         # DEFAULT_CLASSES list. Anything not in DEFAULT_CLASSES (custom classes
         # added by the user) is pushed to the end, preserving relative order.
@@ -830,8 +860,19 @@ class Library:
             return
         self._classes.append(name)
         self._templates[name] = []
-        self._configs[name] = {"match_strategy": "chamfer", "bbox_ratio": None}
+        strategy, bbox_ratio = CLASS_DEFAULT_MATCH_CONFIG.get(
+            name, ("chamfer", None)
+        )
+        self._configs[name] = {
+            "match_strategy": strategy, "bbox_ratio": bbox_ratio,
+        }
         self.store.upsert_class(self.library_id, name)
+        # upsert_class inserts with the DB default (chamfer / NULL); persist the
+        # code-declared default when it differs so the DB row matches _configs.
+        if strategy != "chamfer" or bbox_ratio is not None:
+            self.store.update_class_strategy(
+                self.library_id, name, strategy, bbox_ratio
+            )
 
     def strategy_of(self, name: str) -> tuple[str, float | None]:
         """Per-class (match_strategy, bbox_ratio). Falls back to

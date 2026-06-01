@@ -496,6 +496,7 @@ def _fresh_library(client, name: str) -> str:
 def test_class_listing_includes_strategy_fields():
     from fastapi.testclient import TestClient
     from app.main import app
+    from app.library import CLASS_DEFAULT_MATCH_CONFIG
     with TestClient(app) as client:
         lib_id = _fresh_library(client, "strategy-listing")
         r = client.get(f"/api/libraries/{lib_id}/classes")
@@ -503,8 +504,13 @@ def test_class_listing_includes_strategy_fields():
         classes = r.json()["classes"]
         assert classes, "library should be seeded with default classes"
         for c in classes:
-            assert c["match_strategy"] == "chamfer"
-            assert c["bbox_ratio"] is None
+            # Most classes default to chamfer/None; the large-outline classes
+            # (Substrate / LidOuter / LidInner) seed as their signature default.
+            strat, ratio = CLASS_DEFAULT_MATCH_CONFIG.get(
+                c["name"], ("chamfer", None)
+            )
+            assert c["match_strategy"] == strat
+            assert c["bbox_ratio"] == ratio
 
 
 def test_set_strategy_signature_defaults_bbox_ratio_to_005():
