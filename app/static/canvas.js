@@ -1510,11 +1510,13 @@ let ruleCategoryFilter = "";   // "" = all categories
 let ruleStatusFilter = "all";  // "all" | "pass" | "fail"
 let currentRuleRole = null;    // last role passed to renderRuleSidebar, for filter re-renders
 
-// Rule names follow "<category>-<index>"; the category is everything before
-// the trailing -<number>. A name without that suffix is its own category.
+// Rule names follow "<prefix>-<ruleId>"; the category is the <prefix>, i.e.
+// everything before the first "-". The ruleId need not be numeric, so we split
+// on the separator rather than matching a trailing number. A name without a
+// "-" (or one leading with "-") is its own category.
 function ruleCategoryOf(name) {
-  const m = /^(.*)-\d+$/.exec(name);
-  return m ? m[1] : name;
+  const i = name.indexOf("-");
+  return i > 0 ? name.slice(0, i) : name;
 }
 
 // Lightweight case-insensitive subsequence fuzzy match (no extra deps):
@@ -1614,7 +1616,8 @@ function renderRuleSidebar(role) {
     a.pass === b.pass ? 0 : a.pass ? 1 : -1
   );
   // Apply the sidebar filters: status (all/pass/fail), category
-  // (<category>-<index> prefix), and a fuzzy search over name + description.
+  // (the <prefix> of the <prefix>-<ruleId> rule name), and a fuzzy search
+  // over name + description.
   const entries = allEntries.filter(([name, rule]) => {
     if (ruleStatusFilter === "pass" && !rule.pass) return false;
     if (ruleStatusFilter === "fail" && rule.pass) return false;
