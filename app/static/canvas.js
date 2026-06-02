@@ -520,6 +520,37 @@ const CLASS_COLORS = {
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
 
+const DARK_LABEL = "#0b0e13";
+const LIGHT_LABEL = "#ffffff";
+// WCAG relative luminance of an sRGB colour (channels 0..255).
+function _relLuminance(r, g, b) {
+  const lin = (c) => {
+    c /= 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+// Luminance of the two candidate labels, precomputed (DARK_LABEL ≈ 0.0045).
+const _DARK_LABEL_LUM = _relLuminance(0x0b, 0x0e, 0x13);
+const _LIGHT_LABEL_LUM = 1.0;
+function _contrastRatio(l1, l2) {
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+// Pick a black or white label that reads on a `hex` background by comparing the
+// actual WCAG contrast ratio of each candidate against the fill and taking the
+// higher — correct for every fill regardless of saturation (a plain BT.601
+// luminance threshold mispicks white on mid-tone cyans/reds/purples). Used to
+// label a "found" class button whose background is the full class colour. Falls
+// back to near-black on an unparseable colour.
+function labelColorOn(hex) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || "");
+  if (!m) return DARK_LABEL;
+  const n = parseInt(m[1], 16);
+  const fill = _relLuminance((n >> 16) & 255, (n >> 8) & 255, n & 255);
+  return _contrastRatio(fill, _DARK_LABEL_LUM) >= _contrastRatio(fill, _LIGHT_LABEL_LUM)
+    ? DARK_LABEL : LIGHT_LABEL;
+}
+
 // Per-class view constraints — JS mirror of library.CLASS_VIEW_CONSTRAINTS.
 // Some IC-packaging classes only physically appear in specific views:
 // C4 bumps in top_view, BGA balls in bottom_view / side_view. The Scan
@@ -2480,7 +2511,9 @@ function renderClassToolbar() {
     btn.type = "button";
     btn.className = "class-btn";
     btn.dataset.className = cls.name;
-    btn.style.setProperty("--class-color", classColor(cls.name));
+    const clsColor = classColor(cls.name);
+    btn.style.setProperty("--class-color", clsColor);
+    btn.style.setProperty("--class-text", labelColorOn(clsColor));
     if (addModeClass === cls.name) {
       btn.classList.add(matchesStaged ? "staged" : "active");
     }
@@ -2509,14 +2542,15 @@ function renderClassToolbar() {
       if (matchN === 0) cnt.classList.add("zero");
       btn.appendChild(cnt);
     }
-    // Grey is the default: a button shows its full class colour ONLY when
-    // its class has been found in the current image (matched ≥1 instance via
-    // the prematch overlay on load, or an explicit scan-all). Every other
-    // class — including before any scan has run — is dimmed, so the operator
-    // sees at a glance which objects are already extracted vs. still absent.
+    // Found vs absent telegraphs "already extracted in this image" at a glance.
+    // A class matched ≥1 instance (prematch overlay on load, or an explicit
+    // scan-all) renders "found": the button is FILLED with its class colour
+    // and a contrasting black/white label. Every other class — including
+    // before any scan has run — is "absent": a dim class-colour outline. The
+    // filled-vs-outline contrast is the strong signal the operator scans for.
     // The class being added right now is exempt (keeps its active styling).
-    if (!(matchN > 0) && addModeClass !== cls.name) {
-      btn.classList.add("absent");
+    if (addModeClass !== cls.name) {
+      btn.classList.add(matchN > 0 ? "found" : "absent");
     }
     const matchedSuffix = scanAllSummary && matchN !== undefined
       ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
