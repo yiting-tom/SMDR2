@@ -292,6 +292,10 @@ nav#class-toolbar .class-btn {
   padding: 0.25rem 0.6rem;
   font: inherit;
   font-size: 0.82rem;
+  /* Bold in every state (not just .found) so a button's text width is identical
+     across absent/found/active/staged — flipping to found on scan completion
+     must not widen it and shove its siblings sideways in the nowrap flex row. */
+  font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -305,6 +309,16 @@ nav#class-toolbar .class-btn.absent {
   filter: saturate(0.7) brightness(0.9);
 }
 nav#class-toolbar .class-btn.absent:hover { filter: saturate(1) brightness(1.1); }
+/* Class found in the current image → FILL the button with its class colour
+   and switch the label to a contrasting black/white (`--class-text`, picked
+   per-colour by `labelColorOn`). The solid chip stands out hard against the
+   dim outline of absent classes — the difference the operator scans for. */
+nav#class-toolbar .class-btn.found {
+  background: var(--class-color, #c0cad6);
+  border-color: var(--class-color, #c0cad6);
+  color: var(--class-text, #0b0e13);
+}
+nav#class-toolbar .class-btn.found:hover { filter: brightness(1.08); }
 nav#class-toolbar .class-btn.active {
   background: #1a2840;
   border-color: #ffb84d;
@@ -327,8 +341,9 @@ nav#class-toolbar .class-btn .class-strategy-tag {
 /* Live match count from the active scan-all / prematch overlay. Absent
    when scan-all hasn't been computed yet; present (incl. "×0") once it
    has, so the toolbar telegraphs both "matched N" and "scanned but
-   found none." Inherits the per-class accent colour, but at lower
-   opacity so the class name still reads as the primary label. */
+   found none." Inherits the button's text colour (the per-class accent on
+   absent buttons, the contrasting --class-text on found buttons) at lower
+   opacity, so on either state the full-opacity class name reads as primary. */
 nav#class-toolbar .class-btn .class-match-count {
   margin-left: 0.3rem;
   font-size: 0.78em;
