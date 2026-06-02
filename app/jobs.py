@@ -977,8 +977,10 @@ def submit_reprocess_all(
             str(prematch_path(rec.id)),
             rec.library_id,
             list(rec.selected_layers) if rec.selected_layers is not None else None,
-            None,
-            overrides_snap,
+            None,                     # transient_primitives: re-parse from source
+            overrides_snap,           # dev_overrides_snapshot
+            rec.user_unit_override,   # honour the operator's unit, skip the detector
+            rec.product_id,           # load product-scoped templates for pre-match
         )
         fut.add_done_callback(
             lambda f, fid=rec.id, pid=parent_id: _on_reprocess_step_done(pid, fid, f)
