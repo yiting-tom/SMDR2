@@ -262,7 +262,7 @@ the contract at that boundary.)
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `bundle_version` | semver string | yes | Manifest contract version. Consumers MUST refuse a major version they do not understand. Current value: `"1.3.0"` (minor bumped from `1.2.0` when the per-file `user_unit` / `original_unit` fields were added; `1.2.0` itself bumped from `1.1.0` for `customer` / `customer_id`). |
+| `bundle_version` | semver string | yes | Manifest contract version. Consumers MUST refuse a major version they do not understand. Current value: `"1.4.0"` (minor bumped from `1.3.0` when the per-file `view` array was added; `1.3.0` added `user_unit` / `original_unit`; `1.2.0` added `customer` / `customer_id`; each from `1.1.0`). |
 | `product_id` | string | yes | SMDR2 internal product id, opaque to the consumer. |
 | `product_name` | string | no | Human-readable name for cross-referencing reports. |
 | `customer_id` | string | yes | SMDR2 internal `library_id` the product is bound to. Opaque to the consumer; stable across library renames. Mirrors how `product_id` is treated. |
@@ -270,7 +270,7 @@ the contract at that boundary.)
 | `exported_at` | ISO 8601 string | no | Bundle generation time, second precision or finer. |
 | `files` | array of `file_entry` | yes | Every (DXF, Match JSON) pair in the bundle. |
 
-Every `file_entry` SHALL carry exactly these six keys:
+Every `file_entry` SHALL carry exactly these seven keys:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -280,10 +280,16 @@ Every `file_entry` SHALL carry exactly these six keys:
 | `match_json` | bundle-relative POSIX path | The Match JSON for this DXF. Keys are `<class>.<index>` or `<view>.<class>.<index>` (see "RuleChecking JSON output shape" requirement above for `<view>` values). |
 | `user_unit` | `"mm"` \| `"m"` \| `"inch"` \| `"cm"` \| `"um"` \| `"km"` \| `null` | The unit currently in force for the operator: the operator's unit-override if one is set, otherwise the effective unit derived from the applied auto-rescale factor. `null` only when no named unit applies (a unitless file the detector rescaled to a non-standard factor). `um` is ASCII (internal `μm` is translated); in practice `user_unit` never takes `km`. |
 | `original_unit` | `"mm"` \| `"m"` \| `"inch"` \| `"cm"` \| `"um"` \| `"km"` \| `null` | The DXF's declared `$INSUNITS` header mapped to a unit string (`1`→`inch`, `4`→`mm`, `5`→`cm`, `6`→`m`, `7`→`km`, `13`→`um`). `null` when the header is unitless (`0`), an unsupported unit (e.g. `2` foot), or missing. Reports the header verbatim, independent of whether the rescaler acted on it. |
+| `view` | array of `"top"` \| `"bottom"` \| `"side"` | The views the DXF carries, in canonical order top → bottom → side — one entry per side-region the operator has set (`top_view_rect` / `bottom_view_rect` / `side_view_rect`). `[]` when no side regions are set. Values correspond to the Match JSON key prefixes `top_view` / `bottom_view` / `side_view` (the `_view` suffix is dropped here). |
 
 The unit fields SHALL draw their non-null values exclusively from the
 vocabulary `{"mm", "m", "inch", "cm", "um", "km"}` — micrometre SHALL be
 emitted as ASCII `"um"`, not the internal Unicode `"μm"`.
+
+The `view` array SHALL list a view if and only if that view's side-region
+rectangle is set on the file, ordered top → bottom → side regardless of the
+order the operator painted them; it SHALL carry the view presence only, not the
+rectangle geometry.
 
 Each Match JSON in the bundle SHALL be the file's own per-DXF Match
 JSON exactly as persisted at `data/match/{file_id}.json` — **not**
@@ -360,7 +366,7 @@ rather than emit a manifest with a missing or guessed customer.
 #### Scenario: Every file_entry carries user_unit and original_unit
 - **WHEN** a bundle is exported for any product
 - **THEN** every `file_entry` carries both `user_unit` and `original_unit` keys
-- **AND** the manifest validates against `drc-manifest.schema.json` with `bundle_version` `"1.3.0"`
+- **AND** the manifest validates against `drc-manifest.schema.json` with `bundle_version` `"1.4.0"`
 - **AND** each non-null value is one of `{"mm", "m", "inch", "cm", "um", "km"}`
 
 #### Scenario: user_unit reflects the operator override
@@ -379,6 +385,18 @@ rather than emit a manifest with a missing or guessed customer.
 #### Scenario: original_unit reports km and micron headers
 - **WHEN** a file's `$INSUNITS` header is `7` (km) or `13` (micron)
 - **THEN** its `file_entry.original_unit` is `"km"` or `"um"` respectively
+
+#### Scenario: file_entry.view lists all declared views in canonical order
+- **WHEN** a DXF has its top, bottom, and side side-region rectangles all set
+- **THEN** its `file_entry.view` is `["top", "bottom", "side"]`
+
+#### Scenario: file_entry.view lists only the declared subset
+- **WHEN** a DXF has only its top side-region rectangle set
+- **THEN** its `file_entry.view` is `["top"]`
+
+#### Scenario: file_entry.view is empty when no regions are set
+- **WHEN** a DXF has none of its side-region rectangles set
+- **THEN** its `file_entry.view` is `[]`
 
 ### Requirement: Rule panel hover and pinned highlight
 

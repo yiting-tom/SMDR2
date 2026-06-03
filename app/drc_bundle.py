@@ -45,7 +45,7 @@ from app.products import Product
 from app.storage import match_path, upload_path
 
 
-BUNDLE_VERSION = "1.3.0"
+BUNDLE_VERSION = "1.4.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -95,6 +95,18 @@ def _user_unit(rec: FileRecord) -> str | None:
     return _INTERNAL_TO_MANIFEST_UNIT.get(internal) if internal else None
 
 
+def _views(rec: FileRecord) -> list[str]:
+    """The views the DXF carries — one per side-region rectangle the operator
+    has set, in canonical order top → bottom → side. Empty when none are set.
+    Values drop the `_view` suffix the Match JSON key prefixes carry."""
+    pairs = (
+        ("top", rec.top_view_rect),
+        ("bottom", rec.bottom_view_rect),
+        ("side", rec.side_view_rect),
+    )
+    return [name for name, rect in pairs if rect]
+
+
 def _file_entry(rec: FileRecord) -> dict:
     return {
         "role": rec.dxf_role,
@@ -103,6 +115,7 @@ def _file_entry(rec: FileRecord) -> dict:
         "match_json": f"{MATCH_DIR}/{rec.id}.json",
         "user_unit": _user_unit(rec),
         "original_unit": _original_unit(rec),
+        "view": _views(rec),
     }
 
 
