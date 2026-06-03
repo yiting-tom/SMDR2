@@ -516,6 +516,7 @@ const CLASS_COLORS = {
   "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
   "FiducialSquare": "#00acc1",  // even darker teal — sibling of FiducialCircle / FiducialCross
   "2DBarcode":      "#c6ff00",  // lime
+  "DAM":            "#8d6e63",  // brown — encapsulation dam; the one hue with no neighbour in the palette
 };
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
