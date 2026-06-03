@@ -44,6 +44,104 @@ def parse_match_key(key: str) -> tuple[str | None, str, int] | None:
     return None, ".".join(head), idx
 
 
+# Default-on master switch for contained-match suppression. This is a
+# source-level module constant — it is NOT registered in the developer-override
+# HTTP store, so changing it in a running deployment means editing source and
+# restarting (or setting the attribute in-process, e.g. from tests).
+# ``suppress_contained_matches`` reads it live on each call (a bare global
+# reference resolves to the current module value), so an in-process ``setattr``
+# takes effect on the very next call without re-importing.
+CONTAINED_SUPPRESSION_ENABLED = True
+
+
+def suppress_contained_matches(
+    out: dict[str, list[list[str]]],
+) -> dict[str, list[list[str]]]:
+    """Drop match instances contained within a larger same-class instance.
+
+    Within each class — pooled across every view prefix — an instance whose
+    consumed DXF-handle set is a *proper subset* of another instance's set is
+    removed; the superset (more handles) wins. This resolves the case where a
+    class holds both a partial template (e.g. an SMD mask-only pattern: two
+    rectangles) and a fuller one (the masks *plus* the centre body): a location
+    that has the body fires both, recording one physical feature twice.
+
+    Instances with identical handle sets collapse to one (kept: earliest
+    template ``idx``, then key, then position). Suppression is evaluated
+    non-iteratively over the full representative set, so a containment chain
+    ``A ⊊ B ⊊ C`` keeps only ``C``.
+
+    ``out`` is the prefixed Match-JSON dict
+    ``{"<view>.<class>.<idx>": [[handle, ...], ...]}``. Returns a new dict of
+    the same shape, preserving key order and within-key instance order minus
+    removed instances; keys left empty are dropped. Different classes are never
+    compared, so cross-class containment (e.g. a fiducial circle whose handle
+    sits inside a multi-entity pattern) is left untouched. Unparseable keys and
+    empty (no-handle) instances pass through unchanged.
+
+    Reads the live :data:`CONTAINED_SUPPRESSION_ENABLED` flag on each call;
+    when ``False`` it returns ``out`` unchanged.
+    """
+    if not CONTAINED_SUPPRESSION_ENABLED:
+        return out
+
+    # Pool instances by snake class, ignoring the view prefix. Each pooled
+    # entry remembers its origin (key, position), its template idx (for the
+    # equal-set tie-break) and its handle set. Pooling across prefixes is safe:
+    # two *different* physical instances have disjoint handles and can never be
+    # subsets, while a feature straddling a view-region boundary could have its
+    # partial and fuller matches land under different prefixes.
+    pools: dict[str, list[tuple[str, int, int, frozenset[str]]]] = {}
+    for key, instances in out.items():
+        parsed = parse_match_key(key)
+        if parsed is None:
+            continue  # unparseable keys pass through untouched
+        _prefix, snake, idx = parsed
+        for pos, handles in enumerate(instances):
+            if not handles:
+                continue  # defensive: an empty match is left in place
+            pools.setdefault(snake, []).append(
+                (key, pos, idx, frozenset(handles))
+            )
+
+    removed: set[tuple[str, int]] = set()
+    for items in pools.values():
+        # Collapse exact-duplicate handle sets to one representative; keep the
+        # earliest (idx, key, pos) and mark the rest removed.
+        by_set: dict[frozenset[str], list[tuple[str, int, int, frozenset[str]]]] = {}
+        for it in items:
+            by_set.setdefault(it[3], []).append(it)
+        reps: list[tuple[str, int, int, frozenset[str]]] = []
+        for group in by_set.values():
+            group.sort(key=lambda t: (t[2], t[0], t[1]))
+            reps.append(group[0])
+            for dup in group[1:]:
+                removed.add((dup[0], dup[1]))
+        # Proper-subset suppression over the distinct representatives. Sets are
+        # all distinct here, so ``<`` is strict subset. Evaluating against the
+        # full rep set (not survivors) is order-independent and collapses
+        # transitive chains in one pass.
+        for i, (key_i, pos_i, _idx_i, set_i) in enumerate(reps):
+            for j, (_key_j, _pos_j, _idx_j, set_j) in enumerate(reps):
+                if i != j and set_i < set_j:
+                    removed.add((key_i, pos_i))
+                    break
+
+    if not removed:
+        return out
+
+    result: dict[str, list[list[str]]] = {}
+    for key, instances in out.items():
+        kept = [
+            handles
+            for pos, handles in enumerate(instances)
+            if (key, pos) not in removed
+        ]
+        if kept:
+            result[key] = kept
+    return result
+
+
 class Rect(TypedDict):
     x0: float
     y0: float

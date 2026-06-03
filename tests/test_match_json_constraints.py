@@ -877,3 +877,160 @@ def test_preprocess_prematch_clean_when_radii_differ(
     # pre-arbitration sets. The user-visible win this test pins is
     # that prematch's by_class counts are no longer the raw
     # cross-fire union.
+
+
+# ---- Contained-match suppression -------------------------------------------
+#
+# A class can hold both a partial template (e.g. an SMD mask-only pattern:
+# two rectangles) and a fuller one (the masks PLUS the centre body). On a
+# location that has the body both fire, recording one physical SMD twice. The
+# persisted Match JSON — consumed per instance by rule-check — must record it
+# once: the instance whose handle set is contained in a larger same-class
+# instance's is dropped.
+
+def test_save_match_worker_suppresses_contained_smd(monkeypatch, tmp_path):
+    """Mask-only (idx 0) + mask+body (idx 1) templates of the SAME class: on a
+    body location the mask-only instance (handle subset) is dropped from the
+    written Match JSON; a mask-only-only location (no body) survives. The
+    reported counts satisfy `total = survivors + dropped + suppressed`."""
+    from app.jobs import _save_match_worker
+    from app.storage import match_path
+    from app.library import LIBRARIES, Template
+    import app.matching
+    import app.library
+    import app.jobs
+
+    fid = "smd-contained-1"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 100, "y1": 100},
+        bottom=None, side=None,
+    )
+    lib = LIBRARIES.create("test-contained-smd")
+    # Two DISTINCT template geometries so the library stores both (identical
+    # geometry would dedupe to one). The fake matcher ignores geometry and
+    # returns matches by call order, so idx 0 = mask-only, idx 1 = mask+body.
+    geoms = [
+        [[(0.0, 0.0), (1.0, 0.0)]],                  # idx 0: mask-only stand-in
+        [[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)]],      # idx 1: mask+body stand-in
+    ]
+    for g in geoms:
+        t = Template.from_entities("SMD-2T", g)
+        lib.add_template_for_file(t, product_id="test-product")
+    _bind_file_to_lib(fid, lib.library_id)
+
+    shapes = {
+        "m1": _shape("m1", [(10.0, 10.0)]),
+        "m2": _shape("m2", [(11.0, 10.0)]),
+        "body": _shape("body", [(10.5, 10.0)]),
+        "m3": _shape("m3", [(50.0, 50.0)]),
+        "m4": _shape("m4", [(51.0, 50.0)]),
+    }
+    # idx 0 (mask-only) fires on the body location (masks) AND a mask-only-only
+    # location; idx 1 (mask+body) fires only where the body is.
+    per_idx = {
+        0: [_mr(["m1", "m2"]), _mr(["m3", "m4"])],
+        1: [_mr(["m1", "m2", "body"])],
+    }
+    call_i = {"n": 0}
+
+    def fake_find(tps, shp, *, entity_kinds=None, strategy="chamfer",
+                  bbox_ratio=None):
+        i = call_i["n"]
+        call_i["n"] += 1
+        return _FakeFindResult(matches=list(per_idx.get(i, [])))
+
+    monkeypatch.setattr(app.matching, "find_matches_from_pointsets", fake_find)
+    monkeypatch.setattr(app.library, "build_handle_index", lambda _p: {})
+    monkeypatch.setattr(app.matching, "build_entity_shapes",
+                        lambda _p, _hi: dict(shapes))
+    stub = tmp_path / "stub_parsed.json"
+    stub.write_text('{"primitives": []}')
+    monkeypatch.setattr(app.jobs, "parsed_path", lambda _f: stub)
+
+    result = _save_match_worker(fid, str(match_path(fid)))
+    saved = json.loads(match_path(fid).read_text())
+
+    # The body location's fuller instance remains; its mask-only twin is gone.
+    assert saved.get("top_view.smd_2t.1") == [["m1", "m2", "body"]]
+    # The mask-only-only location survives under idx 0.
+    assert saved.get("top_view.smd_2t.0") == [["m3", "m4"]]
+    # No standalone {m1, m2} instance anywhere in the file.
+    all_instances = [hl for hls in saved.values() for hl in hls]
+    assert ["m1", "m2"] not in all_instances
+    # Each physical handle recorded exactly once.
+    flat = sorted(h for hl in all_instances for h in hl)
+    assert flat == ["body", "m1", "m2", "m3", "m4"]
+
+    # Counts + invariant.
+    assert result["suppressed_count"] == 1
+    assert result["total_matches"] == 3  # raw: 2 (idx 0) + 1 (idx 1)
+    sc = result["side_counts"]
+    survivors = (sc["top_view"] + sc["bottom_view"]
+                 + sc["side_view"] + sc["unassigned"])
+    assert survivors == 2
+    assert (result["total_matches"]
+            == survivors + sc["dropped"] + result["suppressed_count"])
+
+
+def test_scan_all_by_class_union_invariant_to_contained_match(monkeypatch):
+    """scan-all collapses to a per-class handle UNION, so a contained (subset)
+    instance does not change `by_class`. Presence vs absence of the mask-only
+    instance yields identical `by_class` — locking the proof that the scan-all
+    preview needs no suppression code."""
+    from fastapi.testclient import TestClient
+    from app.main import app as fastapi_app
+    from app.library import LIBRARIES, Template
+    import app.main
+
+    fid = "smd-union-invariant"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 100, "y1": 100},
+        bottom=None, side=None,
+    )
+    lib = LIBRARIES.create("test-union-invariant")
+    # Distinct geometries so both templates persist (see worker test above).
+    geoms = [
+        [[(0.0, 0.0), (1.0, 0.0)]],
+        [[(0.0, 0.0), (2.0, 0.0), (2.0, 1.0)]],
+    ]
+    for g in geoms:
+        t = Template.from_entities("SMD-2T", g)
+        lib.add_template_for_file(t, product_id="test-product")
+    _bind_file_to_lib(fid, lib.library_id)
+
+    shapes = {
+        "m1": _shape("m1", [(10.0, 10.0)]),
+        "m2": _shape("m2", [(11.0, 10.0)]),
+        "body": _shape("body", [(10.5, 10.0)]),
+    }
+    state = {"per_idx": {}, "i": 0}
+
+    def fake_find(tps, shp, *, entity_kinds=None, strategy="chamfer",
+                  bbox_ratio=None):
+        i = state["i"]
+        state["i"] += 1
+        return _FakeFindResult(matches=list(state["per_idx"].get(i, [])))
+
+    monkeypatch.setattr(app.main, "_shapes_for",
+                        lambda _f: ({}, dict(shapes)))
+    monkeypatch.setattr(app.main, "find_matches_from_pointsets", fake_find)
+
+    def _scan(per_idx):
+        state["per_idx"] = per_idx
+        state["i"] = 0
+        with TestClient(fastapi_app) as client:
+            r = client.get(f"/api/files/{fid}/scan-all")
+            assert r.status_code == 200, r.text
+            return r.json()
+
+    # PRESENT: mask-only (idx 0) + mask+body (idx 1) both fire.
+    present = _scan({0: [_mr(["m1", "m2"])],
+                     1: [_mr(["m1", "m2", "body"])]})
+    # ABSENT: only the mask+body fires (mask-only instance removed).
+    absent = _scan({0: [], 1: [_mr(["m1", "m2", "body"])]})
+
+    assert set(present["by_class"].get("SMD-2T", [])) == {"m1", "m2", "body"}
+    assert present["by_class"] == absent["by_class"]
+    assert present["total"] == absent["total"]
