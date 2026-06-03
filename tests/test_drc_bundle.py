@@ -157,6 +157,83 @@ def test_build_bundle_multi_dxf_per_role(seeded_product, manifest_schema):
     assert bd_entries[0]["file_id"] != bd_entries[1]["file_id"]
 
 
+# ---- unit fields (user_unit / original_unit) ---------------------------
+def test_build_bundle_carries_unit_fields_and_validates(
+    seeded_product, manifest_schema
+):
+    """Every file_entry carries `user_unit` + `original_unit`, the manifest
+    still validates against the (1.3.0) schema, and a declared-mm file with no
+    override reports both as `mm`."""
+    from app.drc_bundle import build_bundle
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    rec = seed("BD")
+    # Declared mm ($INSUNITS=4), no rescale, no override.
+    FILE_STORE.update_parsed(
+        rec.id, 0, (0.0, 0.0, 1.0, 1.0), "#ffffff",
+        insunits=4, applied_scale=1.0,
+    )
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    zip_bytes, _ = build_bundle(product, files_list)
+    manifest = _read_manifest(zip_bytes)
+
+    jsonschema.validate(manifest, manifest_schema)
+    assert manifest["bundle_version"] == "1.3.0"
+    entry = manifest["files"][0]
+    assert set(entry) == {
+        "role", "file_id", "dxf", "match_json", "user_unit", "original_unit",
+    }
+    assert entry["user_unit"] == "mm"
+    assert entry["original_unit"] == "mm"
+
+
+def test_unit_fields_value_matrix(seeded_product, manifest_schema):
+    """user_unit / original_unit across override, effective-unit fallback,
+    unitless, non-standard scale, and the km / micron INSUNITS codes."""
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+
+    def setup(role, *, insunits, applied_scale, override=None):
+        rec = seed(role)
+        FILE_STORE.update_parsed(
+            rec.id, 0, (0.0, 0.0, 1.0, 1.0), "#ffffff",
+            insunits=insunits, applied_scale=applied_scale,
+        )
+        if override is not None:
+            FILE_STORE.set_user_unit_override(rec.id, override)
+
+    # override μm wins over applied_scale; insunits 4 → mm
+    setup("SBT", insunits=4, applied_scale=1.0, override="μm")
+    # no override, applied_scale 25.4 → inch (effective); insunits 1 → inch
+    setup("BD", insunits=1, applied_scale=25.4)
+    # no override, applied_scale 1.0 → mm; insunits 0 unitless → null
+    setup("POD", insunits=0, applied_scale=1.0)
+    # no override, non-standard ×100 heuristic → user_unit null; insunits 7 → km
+    setup("RING", insunits=7, applied_scale=100.0)
+    # no override, applied_scale 0.001 → μm→um; insunits 13 micron → um
+    setup("LID", insunits=13, applied_scale=0.001)
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    manifest = build_manifest(product, files_list)
+    jsonschema.validate(manifest, manifest_schema)
+    by_role = {e["role"]: e for e in manifest["files"]}
+
+    assert by_role["SBT"]["user_unit"] == "um"       # override μm → ASCII um
+    assert by_role["SBT"]["original_unit"] == "mm"
+    assert by_role["BD"]["user_unit"] == "inch"      # effective from ×25.4
+    assert by_role["BD"]["original_unit"] == "inch"
+    assert by_role["POD"]["user_unit"] == "mm"       # effective from ×1.0
+    assert by_role["POD"]["original_unit"] is None   # unitless header
+    assert by_role["RING"]["user_unit"] is None      # ×100 maps to no unit
+    assert by_role["RING"]["original_unit"] == "km"
+    assert by_role["LID"]["user_unit"] == "um"       # ×0.001 → μm → um
+    assert by_role["LID"]["original_unit"] == "um"   # $INSUNITS 13 micron
+
+
 # ---- 3.3 no-merge-prefix invariant -------------------------------------
 def test_match_json_in_bundle_carries_raw_handles(seeded_product):
     """Every handle in every `match/*.json` inside the bundle MUST be
@@ -415,12 +492,13 @@ def test_manifest_raises_when_library_missing(seeded_product):
         build_manifest(bogus_product, files_list)
 
 
-def test_bundle_version_bumped_to_1_2_0():
-    """The `customer` / `customer_id` addition is paired with a minor
-    bundle_version bump so consumers can detect old bundles."""
+def test_bundle_version_bumped_to_1_3_0():
+    """The per-file `user_unit` / `original_unit` addition is paired with a
+    minor bundle_version bump (1.2.0 → 1.3.0) so consumers can detect old
+    bundles. (1.2.0 itself paired with the `customer` / `customer_id` fields.)"""
     from app.drc_bundle import BUNDLE_VERSION
 
-    assert BUNDLE_VERSION == "1.2.0"
+    assert BUNDLE_VERSION == "1.3.0"
 
 
 # ---- build_bundle_dir parity ------------------------------------------

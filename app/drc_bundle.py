@@ -38,16 +38,32 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.dxf import SCALE_TO_UNIT
 from app.files import FileRecord
 from app.library import LIBRARIES
 from app.products import Product
 from app.storage import match_path, upload_path
 
 
-BUNDLE_VERSION = "1.2.0"
+BUNDLE_VERSION = "1.3.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
+
+# Manifest unit vocabulary (ASCII `um`, not the internal Unicode `μm`). `km`
+# only ever appears as `original_unit` — the operator picker offers no km.
+#
+# Internal unit spelling (`app.dxf.UNIT_TO_SCALE` keys / `user_unit_override`)
+# → manifest spelling. Only μm diverges; the rest are identity.
+_INTERNAL_TO_MANIFEST_UNIT = {
+    "mm": "mm", "cm": "cm", "m": "m", "inch": "inch", "μm": "um",
+}
+
+# DXF `$INSUNITS` code → manifest unit string. Codes outside this map
+# (0 unitless, 2 foot, 3 miles, … or None) report as null.
+_INSUNITS_TO_MANIFEST_UNIT = {
+    1: "inch", 4: "mm", 5: "cm", 6: "m", 7: "km", 13: "um",
+}
 
 
 def _format_exported_at(now: datetime | None) -> str:
@@ -64,12 +80,29 @@ def _format_exported_at(now: datetime | None) -> str:
     return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _original_unit(rec: FileRecord) -> str | None:
+    """The DXF's declared `$INSUNITS` mapped to the manifest unit vocabulary,
+    or None when the header is unitless / unsupported / missing."""
+    return _INSUNITS_TO_MANIFEST_UNIT.get(rec.insunits)
+
+
+def _user_unit(rec: FileRecord) -> str | None:
+    """The unit currently in force for the operator: the explicit unit-picker
+    override if set, otherwise the effective unit implied by the applied
+    auto-rescale factor. None when no named unit applies (a unitless file the
+    detector rescaled to a non-standard factor, e.g. ×0.01 / ×100)."""
+    internal = rec.user_unit_override or SCALE_TO_UNIT.get(rec.applied_scale)
+    return _INTERNAL_TO_MANIFEST_UNIT.get(internal) if internal else None
+
+
 def _file_entry(rec: FileRecord) -> dict:
     return {
         "role": rec.dxf_role,
         "file_id": rec.id,
         "dxf": f"{DXF_DIR}/{rec.id}.dxf",
         "match_json": f"{MATCH_DIR}/{rec.id}.json",
+        "user_unit": _user_unit(rec),
+        "original_unit": _original_unit(rec),
     }
 
 
