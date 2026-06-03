@@ -227,6 +227,12 @@ def _submit_unit_rescale_migration() -> None:
     for rec in FILE_STORE.list_all():
         if rec.applied_scale != 1.0:
             continue
+        # An explicit operator override has authority over the unit; the
+        # auto-rescale migration must never re-evaluate or overwrite it
+        # (otherwise an "override to mm on a unit-suspect file" — which sits at
+        # applied_scale == 1.0 — would be re-queued and re-rescaled every boot).
+        if rec.user_unit_override is not None:
+            continue
         if rec.bbox is None:
             continue
         xmin, ymin, xmax, ymax = rec.bbox
