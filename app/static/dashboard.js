@@ -424,6 +424,21 @@ function productCard(p) {
   }
   rcBtn.addEventListener("click", () => runRuleCheck(p));
   footer.appendChild(rcBtn);
+
+  // "Check Result" re-opens the persisted rule-check result modal on
+  // demand. The modal otherwise only auto-pops once (on job completion and
+  // on the first dashboard re-entry after it), so this gives a standing
+  // entry point whenever a result exists. Hidden while a job is in flight —
+  // the in-flight run will auto-pop the fresh result on completion.
+  if (p.rule_check_available && !jobInFlight) {
+    const resBtn = document.createElement("button");
+    resBtn.type = "button";
+    resBtn.className = "rule-check-btn";
+    resBtn.textContent = "Check Result";
+    resBtn.title = "Show the latest rule-check result";
+    resBtn.addEventListener("click", () => showRuleCheckResult(p));
+    footer.appendChild(resBtn);
+  }
   // Dev mode: Download All Match — the DRC handoff bundle (zip of
   // every role-attached DXF + per-file Match JSON + manifest.json).
   // Disabled (not hidden) when the product isn't ready_for_rule_check
@@ -948,10 +963,33 @@ function isLocatable(sub) {
   return Boolean(sub && (sub.from || hasToValue(sub.to) || sub.tol));
 }
 
+// Re-open the persisted rule-check result modal for a product on demand
+// (the "Check Result" button). Unlike the auto-pop path there's no live job
+// summary here, so roles_covered comes from the product's latest rule-check
+// job result when available (null after a server restart → empty list, which
+// showRuleResults renders gracefully).
+async function showRuleCheckResult(p) {
+  $status.textContent = `loading rule-check result for "${p.name}"…`;
+  try {
+    const r = await fetch(`/api/products/${p.id}/rule-check`);
+    if (!r.ok) {
+      $status.textContent = `no rule-check result for "${p.name}" (${r.status})`;
+      return;
+    }
+    const data = await r.json();
+    data.roles_covered = p.latest_rule_check_job?.result?.roles_covered || [];
+    showRuleResults(p, data);
+    $status.textContent = "";
+  } catch (e) {
+    $status.textContent = `failed to load rule-check result: ${e}`;
+    console.error("showRuleCheckResult", e);
+  }
+}
+
 function showRuleResults(product, data) {
   $ruleResultsTitle.textContent = `Rule Check — ${product.name}`;
   $ruleResultsSummary.textContent =
-    `${data.pass_count}/${data.rule_count} pass · roles: ${data.roles_covered.join(", ")}`;
+    `${data.pass_count}/${data.rule_count} pass · roles: ${(data.roles_covered || []).join(", ")}`;
   $ruleResultsBody.innerHTML = "";
 
   for (const [name, rule] of Object.entries(data.results)) {
