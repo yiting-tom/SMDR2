@@ -11,7 +11,7 @@
       "description": "Semantic version of the manifest contract. Consumers MUST refuse manifests whose major version they do not understand.",
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["1.2.0"]
+      "examples": ["1.4.0"]
     },
     "product_id": {
       "description": "SMDR2 internal product identifier. Opaque to the consumer; useful for cross-referencing reports.",
@@ -46,7 +46,7 @@
   "$defs": {
     "file_entry": {
       "type": "object",
-      "required": ["role", "file_id", "dxf", "match_json"],
+      "required": ["role", "file_id", "dxf", "match_json", "user_unit", "original_unit", "view"],
       "additionalProperties": false,
       "properties": {
         "role": {
@@ -69,6 +69,22 @@
           "description": "Bundle-relative path to the Match JSON for this DXF. Same path conventions as `dxf`. The JSON object has keys of the form `<class>.<index>` or `<view>.<class>.<index>` where `<view>` ∈ {`top_view`, `bottom_view`, `side_view`}, and values are lists of handle-list match instances.",
           "type": "string",
           "minLength": 1
+        },
+        "user_unit": {
+          "description": "Unit currently in force for the operator: the operator's unit-picker override if set, otherwise the effective unit implied by the applied auto-rescale factor. `null` when no named unit applies (a unitless file the detector rescaled to a non-standard factor). Micrometre is spelled `um` (ASCII). In practice never `km` (the picker offers none).",
+          "type": ["string", "null"],
+          "enum": ["mm", "m", "inch", "cm", "um", "km", null]
+        },
+        "original_unit": {
+          "description": "The DXF's declared `$INSUNITS` header mapped to a unit string (1=inch, 4=mm, 5=cm, 6=m, 7=km, 13=um). `null` when the header is unitless (0), an unsupported unit (e.g. 2=foot), or missing. Reports the header verbatim, independent of whether the rescaler acted on it.",
+          "type": ["string", "null"],
+          "enum": ["mm", "m", "inch", "cm", "um", "km", null]
+        },
+        "view": {
+          "description": "The views this DXF carries, in canonical order top → bottom → side — one entry per side-region the operator has set on the file. `[]` when no side regions are set. Values are `top`/`bottom`/`side`, corresponding to the Match JSON key prefixes `top_view`/`bottom_view`/`side_view` (the `_view` suffix is dropped here).",
+          "type": "array",
+          "items": { "type": "string", "enum": ["top", "bottom", "side"] },
+          "uniqueItems": true
         }
       }
     }

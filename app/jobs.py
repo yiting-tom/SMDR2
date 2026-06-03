@@ -753,7 +753,11 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
         build_handle_index,
     )
     from app.matching import build_entity_shapes, find_matches_from_pointsets
-    from app.side_regions import split_matches_by_side
+    from app.side_regions import (
+        parse_match_key,
+        split_matches_by_side,
+        suppress_contained_matches,
+    )
     from app.storage import DB_PATH
 
     rec = FILE_STORE.get(file_id)
@@ -817,6 +821,28 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     # BGABall/FiducialCircle (and any same-geometry pair) are disambiguated
     # by the mutually exclusive view constraints applied in
     # split_matches_by_side above — no post-match arbitration step.
+    #
+    # Contained-match suppression: when one class holds both a partial
+    # template (e.g. SMD mask-only) and a fuller one (mask+body), a body
+    # location fires both and records the feature twice. Drop the instance
+    # whose handle set is contained in a larger same-class instance's, so the
+    # persisted Match JSON — which rule-check reads per instance — counts each
+    # physical feature once. `total_matches` stays the raw matches found;
+    # `side_counts` is recomputed from the survivors and `suppressed_count` is
+    # reported, keeping `raw = survivors + dropped + suppressed`.
+    pre_suppress = sum(len(v) for v in out.values())
+    out = suppress_contained_matches(out)
+    suppressed_count = pre_suppress - sum(len(v) for v in out.values())
+    _dropped = side_counts["dropped"]
+    side_counts = {
+        "top_view": 0, "bottom_view": 0, "side_view": 0,
+        "unassigned": 0, "dropped": _dropped,
+    }
+    for key, instances in out.items():
+        parsed = parse_match_key(key)
+        prefix = parsed[0] if parsed else None
+        side_counts[prefix if prefix else "unassigned"] += len(instances)
+
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_path, "w") as f:
@@ -831,6 +857,7 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "side_counts": side_counts,
+        "suppressed_count": suppressed_count,
         "saved_to": saved_to,
         "match_saved": True,
     }

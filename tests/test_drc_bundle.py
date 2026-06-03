@@ -157,6 +157,115 @@ def test_build_bundle_multi_dxf_per_role(seeded_product, manifest_schema):
     assert bd_entries[0]["file_id"] != bd_entries[1]["file_id"]
 
 
+# ---- unit fields (user_unit / original_unit) ---------------------------
+def test_build_bundle_carries_unit_fields_and_validates(
+    seeded_product, manifest_schema
+):
+    """Every file_entry carries `user_unit` + `original_unit` + `view`, the
+    manifest still validates against the (1.4.0) schema, and a declared-mm file
+    with no override / no side regions reports `mm` / `mm` / `[]`."""
+    from app.drc_bundle import build_bundle
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    rec = seed("BD")
+    # Declared mm ($INSUNITS=4), no rescale, no override.
+    FILE_STORE.update_parsed(
+        rec.id, 0, (0.0, 0.0, 1.0, 1.0), "#ffffff",
+        insunits=4, applied_scale=1.0,
+    )
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    zip_bytes, _ = build_bundle(product, files_list)
+    manifest = _read_manifest(zip_bytes)
+
+    jsonschema.validate(manifest, manifest_schema)
+    assert manifest["bundle_version"] == "1.4.0"
+    entry = manifest["files"][0]
+    assert set(entry) == {
+        "role", "file_id", "dxf", "match_json",
+        "user_unit", "original_unit", "view",
+    }
+    assert entry["user_unit"] == "mm"
+    assert entry["original_unit"] == "mm"
+    # No side regions painted on this stub → empty view list.
+    assert entry["view"] == []
+
+
+def test_unit_fields_value_matrix(seeded_product, manifest_schema):
+    """user_unit / original_unit across override, effective-unit fallback,
+    unitless, non-standard scale, and the km / micron INSUNITS codes."""
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+
+    def setup(role, *, insunits, applied_scale, override=None):
+        rec = seed(role)
+        FILE_STORE.update_parsed(
+            rec.id, 0, (0.0, 0.0, 1.0, 1.0), "#ffffff",
+            insunits=insunits, applied_scale=applied_scale,
+        )
+        if override is not None:
+            FILE_STORE.set_user_unit_override(rec.id, override)
+
+    # override μm wins over applied_scale; insunits 4 → mm
+    setup("SBT", insunits=4, applied_scale=1.0, override="μm")
+    # no override, applied_scale 25.4 → inch (effective); insunits 1 → inch
+    setup("BD", insunits=1, applied_scale=25.4)
+    # no override, applied_scale 1.0 → mm; insunits 0 unitless → null
+    setup("POD", insunits=0, applied_scale=1.0)
+    # no override, non-standard ×100 heuristic → user_unit null; insunits 7 → km
+    setup("RING", insunits=7, applied_scale=100.0)
+    # no override, applied_scale 0.001 → μm→um; insunits 13 micron → um
+    setup("LID", insunits=13, applied_scale=0.001)
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    manifest = build_manifest(product, files_list)
+    jsonschema.validate(manifest, manifest_schema)
+    by_role = {e["role"]: e for e in manifest["files"]}
+
+    assert by_role["SBT"]["user_unit"] == "um"       # override μm → ASCII um
+    assert by_role["SBT"]["original_unit"] == "mm"
+    assert by_role["BD"]["user_unit"] == "inch"      # effective from ×25.4
+    assert by_role["BD"]["original_unit"] == "inch"
+    assert by_role["POD"]["user_unit"] == "mm"       # effective from ×1.0
+    assert by_role["POD"]["original_unit"] is None   # unitless header
+    assert by_role["RING"]["user_unit"] is None      # ×100 maps to no unit
+    assert by_role["RING"]["original_unit"] == "km"
+    assert by_role["LID"]["user_unit"] == "um"       # ×0.001 → μm → um
+    assert by_role["LID"]["original_unit"] == "um"   # $INSUNITS 13 micron
+
+
+def test_view_field_reflects_side_regions(seeded_product, manifest_schema):
+    """`view` lists the views whose side-region rect is set, in canonical
+    order top → bottom → side, regardless of paint order; `[]` when none."""
+    from app.drc_bundle import build_manifest
+    from app.files import FILE_STORE
+
+    product, seed = seeded_product
+    R = {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+
+    r_all = seed("SBT")
+    FILE_STORE.update_side_regions(r_all.id, R, R, R)        # all three
+    r_top = seed("BD")
+    FILE_STORE.update_side_regions(r_top.id, R, None, None)  # only top
+    r_bs = seed("POD")
+    FILE_STORE.update_side_regions(r_bs.id, None, R, R)      # bottom + side
+    seed("RING")                                             # none set
+
+    files_list = [f for f in FILE_STORE.list_by_product(product.id) if f.dxf_role]
+    manifest = build_manifest(product, files_list)
+    jsonschema.validate(manifest, manifest_schema)
+    by_role = {e["role"]: e for e in manifest["files"]}
+
+    assert by_role["SBT"]["view"] == ["top", "bottom", "side"]
+    assert by_role["BD"]["view"] == ["top"]
+    # Canonical order, not paint order: bottom before side.
+    assert by_role["POD"]["view"] == ["bottom", "side"]
+    assert by_role["RING"]["view"] == []
+
+
 # ---- 3.3 no-merge-prefix invariant -------------------------------------
 def test_match_json_in_bundle_carries_raw_handles(seeded_product):
     """Every handle in every `match/*.json` inside the bundle MUST be
@@ -415,12 +524,13 @@ def test_manifest_raises_when_library_missing(seeded_product):
         build_manifest(bogus_product, files_list)
 
 
-def test_bundle_version_bumped_to_1_2_0():
-    """The `customer` / `customer_id` addition is paired with a minor
-    bundle_version bump so consumers can detect old bundles."""
+def test_bundle_version_bumped_to_1_4_0():
+    """The per-file `view` addition is paired with a minor bundle_version bump
+    (1.3.0 → 1.4.0) so consumers can detect old bundles. (1.3.0 added the unit
+    fields; 1.2.0 the `customer` / `customer_id` fields.)"""
     from app.drc_bundle import BUNDLE_VERSION
 
-    assert BUNDLE_VERSION == "1.2.0"
+    assert BUNDLE_VERSION == "1.4.0"
 
 
 # ---- build_bundle_dir parity ------------------------------------------
