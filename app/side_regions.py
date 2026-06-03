@@ -117,13 +117,23 @@ def suppress_contained_matches(
             reps.append(group[0])
             for dup in group[1:]:
                 removed.add((dup[0], dup[1]))
-        # Proper-subset suppression over the distinct representatives. Sets are
-        # all distinct here, so ``<`` is strict subset. Evaluating against the
-        # full rep set (not survivors) is order-independent and collapses
-        # transitive chains in one pass.
+        # Proper-subset suppression over the distinct representatives. A
+        # superset of X must contain ALL of X's handles, so it appears in the
+        # inverted index of every handle of X — in particular the rarest one.
+        # Checking only that bucket (instead of every rep) prunes the naive
+        # O(R²) scan to near-linear when matches are mostly disjoint: a BGA grid
+        # of single-handle instances shares no handles, so each rep's
+        # rarest-handle bucket is just itself. Sets are all distinct here, so
+        # ``<`` is strict subset; evaluating against the full rep set (not
+        # survivors) is order-independent and collapses transitive chains.
+        handle_to_reps: dict[str, list[int]] = {}
+        for ri, (_k, _p, _i, fset) in enumerate(reps):
+            for h in fset:
+                handle_to_reps.setdefault(h, []).append(ri)
         for i, (key_i, pos_i, _idx_i, set_i) in enumerate(reps):
-            for j, (_key_j, _pos_j, _idx_j, set_j) in enumerate(reps):
-                if i != j and set_i < set_j:
+            rarest = min(set_i, key=lambda h: len(handle_to_reps[h]))
+            for j in handle_to_reps[rarest]:
+                if j != i and set_i < reps[j][3]:
                     removed.add((key_i, pos_i))
                     break
 

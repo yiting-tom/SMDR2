@@ -163,6 +163,27 @@ def test_unparseable_keys_pass_through():
     assert res == out
 
 
+def test_large_disjoint_set_is_near_linear():
+    """Regression guard against an O(N²) scan: a class with many disjoint
+    single-handle matches (e.g. a large BGA grid) must complete fast. The
+    inverted-index pruning keeps it near-linear — under the previous pairwise
+    scan N=20000 took ~20s. Generous 2s budget vs the ~30ms expected avoids
+    machine-variance flakiness while still catching a quadratic regression."""
+    import time
+
+    N = 20000
+    out = {"bottom_view.bga_ball.0": [[f"h{i}"] for i in range(N)]}
+    start = time.perf_counter()
+    res = suppress_contained_matches(out)
+    elapsed = time.perf_counter() - start
+
+    assert len(res["bottom_view.bga_ball.0"]) == N  # all disjoint → none removed
+    assert elapsed < 2.0, (
+        f"suppression took {elapsed:.2f}s for N={N} disjoint instances — "
+        f"likely a quadratic regression in the subset scan"
+    )
+
+
 def test_empty_handle_instance_is_kept():
     out = {
         "top_view.smd_2t.0": [[], ["a", "b"]],
