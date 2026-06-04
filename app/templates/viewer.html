@@ -24,19 +24,19 @@
       <span id="unit-picker-hint" class="unit-picker-hint" hidden></span>
     </span>
     <select id="library-switcher" title="Library this file uses (set by its product)"></select>
-    <button id="library-btn" type="button" title="Manage saved templates (delete / move between classes)">📚 Library</button>
-    <button id="scan-all-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">🔍 Scan All</button>
-    <button id="save-match-btn" type="button" title="Generate Match JSON for downstream rule checking">💾 Save Match</button>
-    <button id="measure-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">📏 Measure</button>
-    <button id="visibility-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Layers</button>
-    <button id="rules-btn" type="button" title="Show / hide rule-check results for this product">📋 Rules</button>
     <button id="dev-params-toggle" type="button" hidden
             title="Adjust matching tunables (dev mode only)">⚙</button>
   </header>
   <nav id="class-toolbar" aria-label="Object classes">
     <button id="chain-btn" class="tool-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
-    <button id="sides-btn" class="tool-btn" type="button" title="Mark top / bottom / side view regions · left-click to draw all, right-click for options (hotkey: R)">Sides</button>
+    <button id="sides-btn" class="tool-btn" type="button" title="Mark the top / bottom / side view regions · left-click to draw all, right-click for options (hotkey: R)">Views</button>
     <span class="toolbar-sep" aria-hidden="true"></span>
+    <button id="library-btn" class="tool-btn" type="button" title="Manage saved templates (delete / move between classes)">📚 Library</button>
+    <button id="scan-all-btn" class="tool-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">🔍 Scan All</button>
+    <button id="save-match-btn" class="tool-btn" type="button" title="Generate Match JSON for downstream rule checking">💾 Save Match</button>
+    <button id="measure-btn" class="tool-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">📏 Measure</button>
+    <button id="visibility-btn" class="tool-btn" type="button" title="Toggle layer visibility on the canvas (does not change matching)">👁 Layers</button>
+    <button id="rules-btn" class="tool-btn" type="button" title="Show / hide rule-check results for this product">📋 Rules</button>
   </nav>
   <div id="sides-menu" class="popup-menu" hidden>
     <button type="button" data-sides-action="all">Redraw all</button>
@@ -47,6 +47,25 @@
   </div>
   <main>
     <canvas id="dxf-canvas"></canvas>
+    <!-- Floating object/class selector panels overlaid on the canvas.
+         Left: Structure / Balls / SMD (+ Other). Right: Marks. Populated by
+         renderClassToolbar() in canvas.js; hidden until they have content. -->
+    <aside id="class-panel-left" class="floating-panel class-panel class-panel-left" hidden>
+      <header>
+        <h3>Objects</h3>
+        <span class="spacer"></span>
+        <button type="button" class="floating-collapse" data-panel="class-panel-left" title="Collapse / expand">▾</button>
+      </header>
+      <div id="class-panel-left-body" class="class-panel-body"></div>
+    </aside>
+    <aside id="class-panel-right" class="floating-panel class-panel class-panel-right" hidden>
+      <header>
+        <h3>Marks</h3>
+        <span class="spacer"></span>
+        <button type="button" class="floating-collapse" data-panel="class-panel-right" title="Collapse / expand">▾</button>
+      </header>
+      <div id="class-panel-right-body" class="class-panel-body"></div>
+    </aside>
     <div id="measure-readout" class="measure-readout" hidden></div>
     <aside id="visibility-panel" class="floating-panel" hidden>
       <header>

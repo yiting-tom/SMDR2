@@ -497,6 +497,29 @@ def test_product_scoped_classes_subset_of_defaults():
     assert PRODUCT_SCOPED_CLASSES <= set(DEFAULT_CLASSES)
 
 
+def test_every_default_class_has_a_category():
+    from app.library import CLASS_CATEGORY, CLASS_CATEGORY_ORDER
+    # Every default class is categorised, and every category used is declared.
+    assert set(DEFAULT_CLASSES) <= set(CLASS_CATEGORY)
+    order_keys = [k for k, _ in CLASS_CATEGORY_ORDER]
+    assert order_keys == ["structure", "balls", "smd", "marks"]
+    assert set(CLASS_CATEGORY.values()) <= set(order_keys)
+    assert all(label for _, label in CLASS_CATEGORY_ORDER)
+
+
+def test_class_category_assignments():
+    from app.library import CLASS_CATEGORY
+    assert CLASS_CATEGORY["DAM"] == "structure"
+    assert CLASS_CATEGORY["Protrusion"] == "structure"
+    for s in ("SMD-2T", "SMD-3T", "SMD-8T", "SMD-14T"):
+        assert CLASS_CATEGORY[s] == "smd"
+    for b in ("C4Ball", "BGABall"):
+        assert CLASS_CATEGORY[b] == "balls"
+    for m in ("FiducialCircle", "FiducialCross", "FiducialSquare",
+              "Pin-1", "2DBarcode"):
+        assert CLASS_CATEGORY[m] == "marks"
+
+
 def _seeded_store(tmp_db):
     """Boot a Store + hydrate the default Library so its classes table is
     fully seeded — needed before exercising raw Store.insert_template /
