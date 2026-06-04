@@ -1829,11 +1829,12 @@ body.dashboard header .spacer { flex: 1; }
 }
 .slot-actions .action-btn.primary:hover { background: #e8b830; }
 
-/* ---- Floating class panels (object/class selector overlaid on the canvas) ---
-   The class buttons live in two floating panels overlaid on the canvas instead
-   of a single long toolbar row: left = Structure/Balls/SMD(/Other), right =
-   Marks. Both reuse the .floating-panel chrome; these rules (after
-   .floating-panel in source order) override its position/size. */
+/* ---- Floating class panel (object/class selector overlaid on the canvas) ----
+   The class buttons live in a single floating "Objects" panel overlaid on the
+   canvas instead of a long toolbar row, holding every category
+   (Structure / Balls / SMD / Marks / Other). It reuses the .floating-panel
+   chrome; these rules (after .floating-panel in source order) override its
+   position/size. */
 .class-panel {
   top: 0.6rem;
   width: auto;
@@ -1842,7 +1843,6 @@ body.dashboard header .spacer { flex: 1; }
   max-height: calc(100% - 1.2rem);
 }
 .class-panel.class-panel-left  { left: 0.6rem; right: auto; }
-.class-panel.class-panel-right { right: 0.6rem; left: auto; }
 .class-panel > header { cursor: default; }
 .class-panel-body {
   display: flex;
