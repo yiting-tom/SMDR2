@@ -93,14 +93,11 @@ let focusedSubRule = null;
 // {ruleName, rulePass, ruleText, part, from, to, text, idx}
 const $modeHint = document.getElementById("mode-hint");
 const $classToolbar = document.getElementById("class-toolbar");
-// Floating class-selector panels overlaid on the canvas (replace the long
-// toolbar row): left = Structure/Balls/SMD(/Other), right = Marks.
+// Single floating class-selector panel overlaid on the canvas (replaces the
+// long toolbar row): one "Objects" panel holding every category
+// (Structure / Balls / SMD / Marks / Other).
 const $classPanelLeft = document.getElementById("class-panel-left");
-const $classPanelRight = document.getElementById("class-panel-right");
 const $classPanelLeftBody = document.getElementById("class-panel-left-body");
-const $classPanelRightBody = document.getElementById("class-panel-right-body");
-// Category keys that render in the right-hand panel; everything else goes left.
-const RIGHT_PANEL_CATEGORIES = new Set(["marks"]);
 // Collapse / expand a floating panel to just its header (clicking ▾).
 document.querySelectorAll(".floating-collapse[data-panel]").forEach((b) => {
   b.addEventListener("click", () => {
@@ -2613,13 +2610,12 @@ function makeClassBtn(cls) {
 }
 
 function renderClassToolbar() {
-  // Class buttons live in two floating panels overlaid on the canvas — left
-  // (Structure / Balls / SMD / Other) and right (Marks) — grouped by
-  // CLASS_CATEGORY. Hotkeys are unaffected: they map HOTKEYS[idx] →
-  // classes[idx] by index, independent of which panel a button lands in.
-  if (!$classPanelLeftBody || !$classPanelRightBody) return;  // not the viewer
+  // Class buttons live in a single floating "Objects" panel overlaid on the
+  // canvas, grouped by CLASS_CATEGORY (Structure / Balls / SMD / Marks /
+  // Other). Hotkeys are unaffected: they map HOTKEYS[idx] → classes[idx] by
+  // index, independent of grouping.
+  if (!$classPanelLeftBody) return;  // not the viewer
   $classPanelLeftBody.innerHTML = "";
-  $classPanelRightBody.innerHTML = "";
   const expanded = isToolbarExpanded()
     || (addModeClass && COLLAPSED_TOOLBAR_CLASSES.has(addModeClass));
 
@@ -2681,21 +2677,17 @@ function renderClassToolbar() {
   };
 
   let leftGroups = 0;
-  let rightGroups = 0;
   for (const [key, label] of CLASS_CATEGORY_ORDER) {
-    const right = RIGHT_PANEL_CATEGORIES.has(key);
-    const target = right ? $classPanelRightBody : $classPanelLeftBody;
-    if (renderGroup(target, label, byCat.get(key) || [])) {
-      if (right) rightGroups++; else leftGroups++;
+    if (renderGroup($classPanelLeftBody, label, byCat.get(key) || [])) {
+      leftGroups++;
     }
   }
   if (byCat.has(OTHER)
       && renderGroup($classPanelLeftBody, "Other", byCat.get(OTHER))) {
     leftGroups++;
   }
-  // Hide a panel that has no groups (e.g. a library with no marks classes).
+  // Hide the panel entirely when it has no groups (e.g. an empty library).
   if ($classPanelLeft) $classPanelLeft.hidden = leftGroups === 0;
-  if ($classPanelRight) $classPanelRight.hidden = rightGroups === 0;
 }
 
 function enterAddMode(className) {

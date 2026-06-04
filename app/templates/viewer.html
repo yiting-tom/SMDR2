@@ -47,9 +47,10 @@
   </div>
   <main>
     <canvas id="dxf-canvas"></canvas>
-    <!-- Floating object/class selector panels overlaid on the canvas.
-         Left: Structure / Balls / SMD (+ Other). Right: Marks. Populated by
-         renderClassToolbar() in canvas.js; hidden until they have content. -->
+    <!-- Floating object/class selector panel overlaid on the canvas. A single
+         "Objects" panel holds every category (Structure / Balls / SMD / Marks
+         / Other). Populated by renderClassToolbar() in canvas.js; hidden until
+         it has content. -->
     <aside id="class-panel-left" class="floating-panel class-panel class-panel-left" hidden>
       <header>
         <h3>Objects</h3>
@@ -57,14 +58,6 @@
         <button type="button" class="floating-collapse" data-panel="class-panel-left" title="Collapse / expand">▾</button>
       </header>
       <div id="class-panel-left-body" class="class-panel-body"></div>
-    </aside>
-    <aside id="class-panel-right" class="floating-panel class-panel class-panel-right" hidden>
-      <header>
-        <h3>Marks</h3>
-        <span class="spacer"></span>
-        <button type="button" class="floating-collapse" data-panel="class-panel-right" title="Collapse / expand">▾</button>
-      </header>
-      <div id="class-panel-right-body" class="class-panel-body"></div>
     </aside>
     <div id="measure-readout" class="measure-readout" hidden></div>
     <aside id="visibility-panel" class="floating-panel" hidden>
