@@ -417,16 +417,29 @@ The system SHALL expose a data-driven registry
 maps a class **display ID** to the frozen set of allowed view
 prefixes (`"top_view"`, `"bottom_view"`, `"side_view"`), encoding
 the physical fact that some IC-packaging classes only appear in
-specific views (e.g., a C4 bump only appears in the chip's
-top-down view; a BGA ball only appears in the package's bottom or
-side cross-section view).
+specific views (e.g., a C4 bump only appears in the chip's top-down
+view; a BGA ball only appears on the package bottom).
+
+These constraints ALSO disambiguate same-geometry classes by physical
+view rather than by neighbour density: `BGABall` (bottom-only) and
+`FiducialCircle` (top-only) are mutually exclusive, so a circle is
+classified by which view rectangle covers it. This replaces the
+retired density-based class-arbitration for that pair (see
+`class-arbitration`).
 
 The registry SHALL include at minimum:
 
-| Display ID | Allowed views                  |
-|------------|--------------------------------|
-| `C4Ball`   | `{"top_view"}`                 |
-| `BGABall`  | `{"bottom_view", "side_view"}` |
+| Display ID       | Allowed views                  |
+|------------------|--------------------------------|
+| `C4Ball`         | `{"top_view"}`                 |
+| `BGABall`        | `{"bottom_view"}`              |
+| `FiducialCircle` | `{"top_view"}`                 |
+| `FiducialCross`  | `{"top_view", "bottom_view"}`  |
+| `FiducialSquare` | `{"top_view", "bottom_view"}`  |
+| `SMD-2T`         | `{"top_view", "bottom_view"}`  |
+| `SMD-3T`         | `{"top_view", "bottom_view"}`  |
+| `SMD-8T`         | `{"top_view", "bottom_view"}`  |
+| `SMD-14T`        | `{"top_view", "bottom_view"}`  |
 
 A class whose display ID is **absent** from the registry SHALL be
 treated as unconstrained (matches in any view, including unassigned,
@@ -458,19 +471,30 @@ helper as their single oracle.
 - **AND** `is_allowed_view("C4Ball", "side_view")` returns `False`
 - **AND** `is_allowed_view("C4Ball", None)` returns `False`
 
-#### Scenario: BGABall is allowed only in bottom_view and side_view
-- **WHEN** `CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view", "side_view"})`
+#### Scenario: BGABall is allowed only in bottom_view
+- **WHEN** `CLASS_VIEW_CONSTRAINTS["BGABall"] == frozenset({"bottom_view"})`
 - **THEN** `is_allowed_view("BGABall", "bottom_view")` returns `True`
-- **AND** `is_allowed_view("BGABall", "side_view")` returns `True`
+- **AND** `is_allowed_view("BGABall", "side_view")` returns `False`
 - **AND** `is_allowed_view("BGABall", "top_view")` returns `False`
 - **AND** `is_allowed_view("BGABall", None)` returns `False`
+
+#### Scenario: FiducialCircle is allowed only in top_view
+- **WHEN** `CLASS_VIEW_CONSTRAINTS["FiducialCircle"] == frozenset({"top_view"})`
+- **THEN** `is_allowed_view("FiducialCircle", "top_view")` returns `True`
+- **AND** `is_allowed_view("FiducialCircle", "bottom_view")` returns `False`
+- **AND** `is_allowed_view("FiducialCircle", None)` returns `False`
+
+#### Scenario: BGABall and FiducialCircle are disambiguated by view
+- **WHEN** a circle in the bottom_view rectangle is matched by both the BGABall and FiducialCircle templates (cross-fire)
+- **THEN** the BGABall match SHALL be kept (`bottom_view.bga_ball.*`)
+- **AND** the FiducialCircle match SHALL be dropped (FiducialCircle is top-only)
+- **AND** the symmetric case in top_view SHALL keep FiducialCircle and drop BGABall
 
 #### Scenario: Constrained class with unassigned position is rejected
 - **WHEN** a file has no `top_view_rect` set
 - **AND** a `C4Ball` match instance is therefore unassigned
 - **THEN** `is_allowed_view("C4Ball", None)` returns `False`
 - **AND** the instance SHALL be dropped by the match-JSON serialiser
-  and by the Scan All overlay
 
 ### Requirement: Per-class neighbour-count rule registry
 

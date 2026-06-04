@@ -294,7 +294,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | Layer 篩選 | `app/dxf.py` + `main.py` | `static/layer_modal.js` | `openspec/specs/dxf-pipeline/spec.md` |
 | Template library | `app/library.py` | `viewer.html` 框選介面 | `openspec/specs/template-library/spec.md` |
 | Pattern matching | `app/matching.py` + `jobs.py` | `static/canvas.js` | `openspec/specs/pattern-matching/spec.md` |
-| Class arbitration（同尺寸圓 BGABall ↔ FiducialCircle 分流）| `app/class_arbitration.py` | — | `openspec/specs/class-arbitration/spec.md` |
+| 同尺寸圓分流（BGABall ↔ FiducialCircle，依 view 約束）| `app/library.py`（`CLASS_VIEW_CONSTRAINTS`）+ `app/side_regions.py` | — | `openspec/specs/template-library/spec.md` |
 | Product / 多 DXF per role | `app/products.py` + `files.py` | `static/dashboard.js` | `openspec/specs/product-files/spec.md` |
 | Product view 覆蓋（role ↔ view 對應）| `app/product_views.py` | — | （併入 `openspec/specs/product-files/spec.md`）|
 | Side regions (top/bottom/side view rect) | `app/side_regions.py` | viewer 框選 | `openspec/specs/viewer-ui/spec.md` |
