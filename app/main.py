@@ -1301,8 +1301,8 @@ async def prematch(file_id: str) -> dict:
 #
 # The endpoint is async: it submits a `save_match` job to the worker
 # pool and returns 202 + {job_id, file_id} immediately. The result
-# (template_keys / total_matches / side_counts / arbitration_counts /
-# saved_to) lives on `GET /api/jobs/{job_id}` under `result` once the
+# (template_keys / total_matches / side_counts / saved_to) lives on
+# `GET /api/jobs/{job_id}` under `result` once the
 # job reaches status=done; `file.match_saved` flips at that point too.
 @app.post("/api/files/{file_id}/match-json")
 async def save_match_json(file_id: str) -> JSONResponse:

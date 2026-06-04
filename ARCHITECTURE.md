@@ -178,25 +178,20 @@ post-launch backlog。現有改動只保證 callback **fail-safe**，不保證
 
 ---
 
-## 5. Class arbitration：兩個 entry point
+## 5. 同尺寸圓的分流：view 約束
 
 class-agnostic 的 matcher 會讓共用同尺寸圓的兩個 class（典型
-`BGABall` vs `FiducialCircle`）在同一批 handle 都中。`app/class_arbitration.py`
-靠「鄰居密度」把每個 instance 分流到唯一一個 class。
+`BGABall` vs `FiducialCircle`）在同一批 handle 都中。靠**互斥的 view 約束**
+分流，而非密度啟發式：`CLASS_VIEW_CONSTRAINTS`（`app/library.py`）規定
+`BGABall` 只能落 bottom_view、`FiducialCircle` / `C4Ball` 只能落 top_view；
+`is_allowed_view()` 判定 (class, view) 是否合法，`split_matches_by_side`
+（`app/side_regions.py`）依工程師畫的 side region 把每個 instance 指派到唯一
+一個 view，落在不允許 view 的 instance 直接 drop。確定性、免參數、operator
+看得懂。完整 view 約束定義見 `openspec/specs/template-library/spec.md`。
 
-**有兩個 stage-specific entry point，差別只在 view 約束強制與否**：
-
-| 函式 | 用在 | view 約束 |
-|---|---|---|
-| `arbitrate_for_prematch(out, shapes, groups)` | preprocess（side region 還沒畫）| **不**強制（每個 instance `view_prefix=None`，強制的話會把所有受限 class 全丟掉）|
-| `arbitrate_for_match(out, shapes, groups)` | save-match / scan-all（side region 已畫）| **強制**：reassign 後 class 不允許該 view 的 instance 會被 drop 進 `dropped_by_view` |
-
-底層 `arbitrate(..., enforce_view_constraints=...)` 仍在（給單元測試用顯式
-模式）；**production code 一律用上面兩個 wrapper，不要直接傳 flag**。完整
-演算法與 group 定義見 `openspec/specs/class-arbitration/spec.md`。
-
-`POST /api/files/{id}/match-json` 回應的 `arbitration_counts` 就是這層的
-分流統計。
+> 舊版以「鄰居密度」分流的 `app/class_arbitration.py` 子系統已移除——view
+> 約束上線後它退化成 no-op dead code，於 `remove-density-arbitration-subsystem`
+> change 無行為變更下刪除。
 
 ---
 
