@@ -71,10 +71,14 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
 # (add_class) and via a boot migration that only converts rows still in the
 # pristine chamfer/NULL state — any explicit signature configuration set in the
 # UI (a different bbox_ratio) is preserved across reboots.
+# Pin-1 is not a large loop but a small orientation mark; it gets signature
+# mode too (matched on size + aspect, not chamfer) with a more generous
+# bbox_ratio so minor per-instance mark variation still matches.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
     "Substrate": ("signature", 0.0001),
     "LidOuter":  ("signature", 0.0001),
     "LidInner":  ("signature", 0.0001),
+    "Pin-1":     ("signature", 0.0005),
 }
 
 
