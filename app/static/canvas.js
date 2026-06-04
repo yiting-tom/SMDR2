@@ -3242,12 +3242,11 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // R / V = toggle mark-side-regions ("Views") mode. R takes precedence over
-  // the class hotkey for "r" so the user can rely on the muscle memory; V is
-  // the mnemonic for the "Views" toolbar button. Both no-op while add-mode or
-  // measure-mode owns the canvas.
-  if ((e.key === "r" || e.key === "R" || e.key === "v" || e.key === "V")
-      && !e.metaKey && !e.ctrlKey && !e.altKey) {
+  // V = toggle mark-side-regions ("Views") mode — mnemonic for the "Views"
+  // toolbar button. No-op while add-mode or measure-mode owns the canvas.
+  // ("r" is intentionally NOT bound here, so it falls through to its class
+  // hotkey below.)
+  if ((e.key === "v" || e.key === "V") && !e.metaKey && !e.ctrlKey && !e.altKey) {
     if (!addModeClass && !measureMode) toggleMarkMode();
     e.preventDefault();
     return;
