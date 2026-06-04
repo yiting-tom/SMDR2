@@ -194,6 +194,63 @@ if _unknown_product_scoped:
 del _unknown_product_scoped
 
 
+# ---- Per-class toolbar category -----------------------------------------
+# Functional grouping for the viewer's class toolbar. Display ID → category
+# key; CLASS_CATEGORY_ORDER gives each key a label in render order. JS canvas.js
+# MUST keep an in-sync mirror of BOTH between their CLASS_CATEGORY_BEGIN/_END and
+# CLASS_CATEGORY_ORDER_BEGIN/_END sentinels — the drift-guard test in
+# tests/test_canvas_constants.py enforces it. A class absent from CLASS_CATEGORY
+# is treated as uncategorised (the toolbar groups it under a trailing "Other").
+# CLASS_CATEGORY_BEGIN
+CLASS_CATEGORY: dict[str, str] = {
+    "Substrate":      "structure",
+    "DieArea":        "structure",
+    "DAM":            "structure",
+    "Lid":            "structure",
+    "LidOuter":       "structure",
+    "LidInner":       "structure",
+    "Protrusion":     "structure",
+    "C4Ball":         "balls",
+    "BGABall":        "balls",
+    "SMD-2T":         "smd",
+    "SMD-3T":         "smd",
+    "SMD-8T":         "smd",
+    "SMD-14T":        "smd",
+    "FiducialCircle": "marks",
+    "FiducialCross":  "marks",
+    "FiducialSquare": "marks",
+    "Pin-1":          "marks",
+    "2DBarcode":      "marks",
+}
+# CLASS_CATEGORY_END
+
+# CLASS_CATEGORY_ORDER_BEGIN
+CLASS_CATEGORY_ORDER: list[tuple[str, str]] = [
+    ("structure", "Structure"),
+    ("balls", "Balls & Bumps"),
+    ("smd", "SMD Pads"),
+    ("marks", "Fiducials & Marks"),
+]
+# CLASS_CATEGORY_ORDER_END
+
+
+# Invariants: every default class is categorised, and every category used is a
+# declared order key — so a newly-added default class can't be left ungrouped.
+_uncategorised = set(DEFAULT_CLASSES) - set(CLASS_CATEGORY)
+if _uncategorised:
+    raise ValueError(
+        f"DEFAULT_CLASSES not in CLASS_CATEGORY: {sorted(_uncategorised)!r}"
+    )
+_order_keys = {k for k, _ in CLASS_CATEGORY_ORDER}
+_unknown_category = set(CLASS_CATEGORY.values()) - _order_keys
+if _unknown_category:
+    raise ValueError(
+        f"CLASS_CATEGORY uses keys absent from CLASS_CATEGORY_ORDER: "
+        f"{sorted(_unknown_category)!r}"
+    )
+del _uncategorised, _order_keys, _unknown_category
+
+
 # ---- Template dedup signature -------------------------------------------
 # Coordinates are bucketed at 0.1 µm (10^-4 mm). Parallel to
 # _radius_bucket_key's grid in app/matching.py — same FP-noise tolerance,

@@ -281,7 +281,7 @@ nav#class-toolbar {
   flex-shrink: 0;
 }
 
-nav#class-toolbar .class-btn {
+.class-btn {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -299,40 +299,57 @@ nav#class-toolbar .class-btn {
   cursor: pointer;
   white-space: nowrap;
 }
-nav#class-toolbar .class-btn:hover { filter: brightness(1.25); }
+.class-btn:hover { filter: brightness(1.25); }
+/* Category group header (CLASS_CATEGORY_ORDER): a small muted uppercase label
+   with a left divider that separates the grouped class buttons in the row. */
+.class-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  flex-shrink: 0;
+  margin-left: 0.35rem;
+  padding: 0 0.1rem 0 0.45rem;
+  border-left: 1px solid #2a3340;
+  color: #6b7682;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
 /* No matches for this class in the current image → dim the button so
    "already extracted" (full class colour) vs "not yet" reads at a glance.
    Keeps the class's own colour (no flat grey), just slightly faded +
    desaturated so it reads as muted, not washed out. Still fully clickable. */
-nav#class-toolbar .class-btn.absent {
+.class-btn.absent {
   opacity: 0.8;
   filter: saturate(0.7) brightness(0.9);
 }
-nav#class-toolbar .class-btn.absent:hover { filter: saturate(1) brightness(1.1); }
+.class-btn.absent:hover { filter: saturate(1) brightness(1.1); }
 /* Class found in the current image → FILL the button with its class colour
    and switch the label to a contrasting black/white (`--class-text`, picked
    per-colour by `labelColorOn`). The solid chip stands out hard against the
    dim outline of absent classes — the difference the operator scans for. */
-nav#class-toolbar .class-btn.found {
+.class-btn.found {
   background: var(--class-color, #c0cad6);
   border-color: var(--class-color, #c0cad6);
   color: var(--class-text, #0b0e13);
 }
-nav#class-toolbar .class-btn.found:hover { filter: brightness(1.08); }
-nav#class-toolbar .class-btn.active {
+.class-btn.found:hover { filter: brightness(1.08); }
+.class-btn.active {
   background: #1a2840;
   border-color: #ffb84d;
   color: #ffb84d;
   filter: none;
 }
-nav#class-toolbar .class-btn.staged {
+.class-btn.staged {
   background: #003e4d;
   border-color: #00ffff;
   color: #00ffff;
   filter: none;
 }
-nav#class-toolbar .class-btn .name { color: inherit; }
-nav#class-toolbar .class-btn .class-strategy-tag {
+.class-btn .name { color: inherit; }
+.class-btn .class-strategy-tag {
   margin-left: 0.3rem;
   font-size: 0.78em;
   opacity: 0.75;
@@ -344,22 +361,22 @@ nav#class-toolbar .class-btn .class-strategy-tag {
    found none." Inherits the button's text colour (the per-class accent on
    absent buttons, the contrasting --class-text on found buttons) at lower
    opacity, so on either state the full-opacity class name reads as primary. */
-nav#class-toolbar .class-btn .class-match-count {
+.class-btn .class-match-count {
   margin-left: 0.3rem;
   font-size: 0.78em;
   font-variant-numeric: tabular-nums;
   opacity: 0.85;
 }
-nav#class-toolbar .class-btn .class-match-count.zero {
+.class-btn .class-match-count.zero {
   opacity: 0.4;
 }
-nav#class-toolbar .class-btn-more {
+.class-btn-more {
   color: #8794a3;
   border-color: #2a3340;
   border-style: dashed;
   margin-left: 0.2rem;
 }
-nav#class-toolbar .class-btn-more:hover {
+.class-btn-more:hover {
   color: #c0cad6;
   border-color: #3a4658;
   filter: none;
@@ -1811,3 +1828,55 @@ body.dashboard header .spacer { flex: 1; }
   font-weight: 600;
 }
 .slot-actions .action-btn.primary:hover { background: #e8b830; }
+
+/* ---- Floating class panels (object/class selector overlaid on the canvas) ---
+   The class buttons live in two floating panels overlaid on the canvas instead
+   of a single long toolbar row: left = Structure/Balls/SMD(/Other), right =
+   Marks. Both reuse the .floating-panel chrome; these rules (after
+   .floating-panel in source order) override its position/size. */
+.class-panel {
+  top: 0.6rem;
+  width: auto;
+  min-width: 130px;
+  max-width: 230px;
+  max-height: calc(100% - 1.2rem);
+}
+.class-panel.class-panel-left  { left: 0.6rem; right: auto; }
+.class-panel.class-panel-right { right: 0.6rem; left: auto; }
+.class-panel > header { cursor: default; }
+.class-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.45rem;
+  overflow-y: auto;
+}
+/* Each category = a wrapping block of buttons under a full-width label. */
+.class-panel .class-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+.class-panel .class-toolbar-group {
+  /* Override the horizontal-row divider styling: a full-width row label. */
+  flex-basis: 100%;
+  align-self: auto;
+  margin-left: 0;
+  padding-left: 0;
+  border-left: none;
+}
+.class-panel .class-btn { white-space: normal; }
+/* Collapse toggle (▾/▸) in the panel header hides the body. */
+.floating-collapse {
+  background: transparent;
+  border: none;
+  color: #8794a3;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+}
+.floating-collapse:hover { color: #e8eef5; }
+.class-panel.collapsed .class-panel-body { display: none; }
+.class-panel.collapsed .floating-collapse { transform: rotate(-90deg); }

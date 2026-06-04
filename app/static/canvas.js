@@ -93,6 +93,21 @@ let focusedSubRule = null;
 // {ruleName, rulePass, ruleText, part, from, to, text, idx}
 const $modeHint = document.getElementById("mode-hint");
 const $classToolbar = document.getElementById("class-toolbar");
+// Floating class-selector panels overlaid on the canvas (replace the long
+// toolbar row): left = Structure/Balls/SMD(/Other), right = Marks.
+const $classPanelLeft = document.getElementById("class-panel-left");
+const $classPanelRight = document.getElementById("class-panel-right");
+const $classPanelLeftBody = document.getElementById("class-panel-left-body");
+const $classPanelRightBody = document.getElementById("class-panel-right-body");
+// Category keys that render in the right-hand panel; everything else goes left.
+const RIGHT_PANEL_CATEGORIES = new Set(["marks"]);
+// Collapse / expand a floating panel to just its header (clicking ▾).
+document.querySelectorAll(".floating-collapse[data-panel]").forEach((b) => {
+  b.addEventListener("click", () => {
+    const panel = document.getElementById(b.dataset.panel);
+    if (panel) panel.classList.toggle("collapsed");
+  });
+});
 const ctx = $canvas.getContext("2d");
 
 const FILE_ID = document.body.dataset.fileId;
@@ -574,6 +589,41 @@ const CLASS_VIEW_CONSTRAINTS = {
   "SMD-14T":        ["top_view", "bottom_view"],
 };
 // CLASS_VIEW_CONSTRAINTS_END
+
+// Functional grouping for the class toolbar — mirror of library.py
+// CLASS_CATEGORY / CLASS_CATEGORY_ORDER (kept in sync by the drift test in
+// tests/test_canvas_constants.py). A class absent here is uncategorised and
+// the toolbar groups it under a trailing "Other".
+// CLASS_CATEGORY_BEGIN
+const CLASS_CATEGORY = {
+  "Substrate":      "structure",
+  "DieArea":        "structure",
+  "DAM":            "structure",
+  "Lid":            "structure",
+  "LidOuter":       "structure",
+  "LidInner":       "structure",
+  "Protrusion":     "structure",
+  "C4Ball":         "balls",
+  "BGABall":        "balls",
+  "SMD-2T":         "smd",
+  "SMD-3T":         "smd",
+  "SMD-8T":         "smd",
+  "SMD-14T":        "smd",
+  "FiducialCircle": "marks",
+  "FiducialCross":  "marks",
+  "FiducialSquare": "marks",
+  "Pin-1":          "marks",
+  "2DBarcode":      "marks",
+};
+// CLASS_CATEGORY_END
+// CLASS_CATEGORY_ORDER_BEGIN
+const CLASS_CATEGORY_ORDER = [
+  ["structure", "Structure"],
+  ["balls", "Balls & Bumps"],
+  ["smd", "SMD Pads"],
+  ["marks", "Fiducials & Marks"],
+];
+// CLASS_CATEGORY_ORDER_END
 
 function isAllowedView(className, view) {
   const allowed = CLASS_VIEW_CONSTRAINTS[className];
@@ -2496,88 +2546,89 @@ function setToolbarExpanded(v) {
   else   sessionStorage.removeItem(TOOLBAR_EXPAND_KEY);
 }
 
+// Build one class-toolbar button. Extracted from renderClassToolbar so the
+// toolbar can render buttons grouped under category headers (CLASS_CATEGORY)
+// without duplicating the button-construction logic.
+function makeClassBtn(cls) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "class-btn";
+  btn.dataset.className = cls.name;
+  const clsColor = classColor(cls.name);
+  btn.style.setProperty("--class-color", clsColor);
+  btn.style.setProperty("--class-text", labelColorOn(clsColor));
+  if (addModeClass === cls.name) {
+    btn.classList.add(matchesStaged ? "staged" : "active");
+  }
+  btn.innerHTML = `<span class="name">${cls.name}</span>`;
+  const isSig = cls.match_strategy === "signature";
+  if (isSig) {
+    const tag = document.createElement("span");
+    tag.className = "class-strategy-tag";
+    tag.textContent = cls.bbox_ratio != null
+      ? `sig·${Math.round(cls.bbox_ratio * 100)}%`
+      : "sig";
+    btn.appendChild(tag);
+  }
+  // Live match count from the active scan-all / prematch overlay. Only
+  // rendered when scan-all has actually been computed for this file
+  // (scanAllSummary is null until loadPrematch or runScanAll populates
+  // it). A class with zero hits in the current scan still gets the chip
+  // so "did the matcher run vs. has it not been touched" reads clearly:
+  // missing chip = scan not run; "×0" = scan ran but this class has no
+  // matches in this image.
+  const matchN = scanAllSummary?.byClass?.[cls.name];
+  if (scanAllSummary && matchN !== undefined) {
+    const cnt = document.createElement("span");
+    cnt.className = "class-match-count";
+    cnt.textContent = `×${matchN}`;
+    if (matchN === 0) cnt.classList.add("zero");
+    btn.appendChild(cnt);
+  }
+  // Found vs absent telegraphs "already extracted in this image" at a glance.
+  // A class matched ≥1 instance (prematch overlay on load, or an explicit
+  // scan-all) renders "found": the button is FILLED with its class colour
+  // and a contrasting black/white label. Every other class — including
+  // before any scan has run — is "absent": a dim class-colour outline. The
+  // filled-vs-outline contrast is the strong signal the operator scans for.
+  // The class being added right now is exempt (keeps its active styling).
+  if (addModeClass !== cls.name) {
+    btn.classList.add(matchN > 0 ? "found" : "absent");
+  }
+  const matchedSuffix = scanAllSummary && matchN !== undefined
+    ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
+    : "";
+  btn.title = (isSig
+    ? `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+      `signature-only match (bbox/aspect/vertex-count) at ±${(cls.bbox_ratio ?? 0.05) * 100}% — right-click to edit`
+    : `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
+      `chamfer match (default) — right-click to switch to signature mode`
+  ) + matchedSuffix;
+  btn.addEventListener("click", () => enterAddMode(cls.name));
+  btn.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    editClassStrategy(cls);
+  });
+  return btn;
+}
+
 function renderClassToolbar() {
-  // Remove only the dynamically-rendered class buttons; static
-  // mode-toggle prefix (Chain, Sides, separator) stays put.
-  $classToolbar.querySelectorAll(".class-btn").forEach(n => n.remove());
+  // Class buttons live in two floating panels overlaid on the canvas — left
+  // (Structure / Balls / SMD / Other) and right (Marks) — grouped by
+  // CLASS_CATEGORY. Hotkeys are unaffected: they map HOTKEYS[idx] →
+  // classes[idx] by index, independent of which panel a button lands in.
+  if (!$classPanelLeftBody || !$classPanelRightBody) return;  // not the viewer
+  $classPanelLeftBody.innerHTML = "";
+  $classPanelRightBody.innerHTML = "";
   const expanded = isToolbarExpanded()
     || (addModeClass && COLLAPSED_TOOLBAR_CLASSES.has(addModeClass));
-  let hasCollapsed = false;
-  classes.forEach((cls, i) => {
-    if (!expanded && COLLAPSED_TOOLBAR_CLASSES.has(cls.name)) {
-      hasCollapsed = true;
-      return;
-    }
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "class-btn";
-    btn.dataset.className = cls.name;
-    const clsColor = classColor(cls.name);
-    btn.style.setProperty("--class-color", clsColor);
-    btn.style.setProperty("--class-text", labelColorOn(clsColor));
-    if (addModeClass === cls.name) {
-      btn.classList.add(matchesStaged ? "staged" : "active");
-    }
-    btn.innerHTML = `<span class="name">${cls.name}</span>`;
-    const isSig = cls.match_strategy === "signature";
-    if (isSig) {
-      const tag = document.createElement("span");
-      tag.className = "class-strategy-tag";
-      tag.textContent = cls.bbox_ratio != null
-        ? `sig·${Math.round(cls.bbox_ratio * 100)}%`
-        : "sig";
-      btn.appendChild(tag);
-    }
-    // Live match count from the active scan-all / prematch overlay. Only
-    // rendered when scan-all has actually been computed for this file
-    // (scanAllSummary is null until loadPrematch or runScanAll populates
-    // it). A class with zero hits in the current scan still gets the chip
-    // so "did the matcher run vs. has it not been touched" reads clearly:
-    // missing chip = scan not run; "×0" = scan ran but this class has no
-    // matches in this image.
-    const matchN = scanAllSummary?.byClass?.[cls.name];
-    if (scanAllSummary && matchN !== undefined) {
-      const cnt = document.createElement("span");
-      cnt.className = "class-match-count";
-      cnt.textContent = `×${matchN}`;
-      if (matchN === 0) cnt.classList.add("zero");
-      btn.appendChild(cnt);
-    }
-    // Found vs absent telegraphs "already extracted in this image" at a glance.
-    // A class matched ≥1 instance (prematch overlay on load, or an explicit
-    // scan-all) renders "found": the button is FILLED with its class colour
-    // and a contrasting black/white label. Every other class — including
-    // before any scan has run — is "absent": a dim class-colour outline. The
-    // filled-vs-outline contrast is the strong signal the operator scans for.
-    // The class being added right now is exempt (keeps its active styling).
-    if (addModeClass !== cls.name) {
-      btn.classList.add(matchN > 0 ? "found" : "absent");
-    }
-    const matchedSuffix = scanAllSummary && matchN !== undefined
-      ? `\nmatched ${matchN} instance${matchN === 1 ? "" : "s"} in this image`
-      : "";
-    btn.title = (isSig
-      ? `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
-        `signature-only match (bbox/aspect/vertex-count) at ±${(cls.bbox_ratio ?? 0.05) * 100}% — right-click to edit`
-      : `${cls.name} · ${cls.count} template${cls.count === 1 ? "" : "s"}\n` +
-        `chamfer match (default) — right-click to switch to signature mode`
-    ) + matchedSuffix;
-    btn.addEventListener("click", () => enterAddMode(cls.name));
-    btn.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      editClassStrategy(cls);
-    });
-    $classToolbar.appendChild(btn);
-  });
-  // Only show the toggle if there's something to hide/reveal at all.
-  if (expanded || hasCollapsed) {
+
+  // The More/Less toggle reveals the collapsed SMD variants; it lives inside
+  // whichever group owns COLLAPSED_TOOLBAR_CLASSES (the SMD group).
+  const makeToggleBtn = () => {
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "class-btn class-btn-more";
-    // When collapsed and scan-all has hits in the hidden classes, surface
-    // the count on the toggle so the user doesn't have to open "More" to
-    // discover that SMD-3T / SMD-8T / SMD-14T actually matched something
-    // in this image.
     let hiddenHits = 0;
     if (!expanded && scanAllSummary) {
       for (const name of COLLAPSED_TOOLBAR_CLASSES) {
@@ -2596,8 +2647,55 @@ function renderClassToolbar() {
       setToolbarExpanded(!expanded);
       renderClassToolbar();
     });
-    $classToolbar.appendChild(toggle);
+    return toggle;
+  };
+
+  // Bucket the library's classes by functional category, preserving rank
+  // order within each bucket. A class with no CLASS_CATEGORY entry (e.g. a
+  // user-defined class) falls into a trailing "Other" group so it's never
+  // dropped.
+  const OTHER = "__other__";
+  const byCat = new Map();
+  for (const cls of classes) {
+    const cat = CLASS_CATEGORY[cls.name] || OTHER;
+    if (!byCat.has(cat)) byCat.set(cat, []);
+    byCat.get(cat).push(cls);
   }
+  const renderGroup = (target, label, members) => {
+    const hasCollapsible = members.some(
+      (c) => COLLAPSED_TOOLBAR_CLASSES.has(c.name));
+    const visible = expanded
+      ? members
+      : members.filter((c) => !COLLAPSED_TOOLBAR_CLASSES.has(c.name));
+    if (visible.length === 0 && !hasCollapsible) return false;
+    const groupEl = document.createElement("div");
+    groupEl.className = "class-group";
+    const hdr = document.createElement("span");
+    hdr.className = "class-toolbar-group";
+    hdr.textContent = label;
+    groupEl.appendChild(hdr);
+    for (const cls of visible) groupEl.appendChild(makeClassBtn(cls));
+    if (hasCollapsible) groupEl.appendChild(makeToggleBtn());
+    target.appendChild(groupEl);
+    return true;
+  };
+
+  let leftGroups = 0;
+  let rightGroups = 0;
+  for (const [key, label] of CLASS_CATEGORY_ORDER) {
+    const right = RIGHT_PANEL_CATEGORIES.has(key);
+    const target = right ? $classPanelRightBody : $classPanelLeftBody;
+    if (renderGroup(target, label, byCat.get(key) || [])) {
+      if (right) rightGroups++; else leftGroups++;
+    }
+  }
+  if (byCat.has(OTHER)
+      && renderGroup($classPanelLeftBody, "Other", byCat.get(OTHER))) {
+    leftGroups++;
+  }
+  // Hide a panel that has no groups (e.g. a library with no marks classes).
+  if ($classPanelLeft) $classPanelLeft.hidden = leftGroups === 0;
+  if ($classPanelRight) $classPanelRight.hidden = rightGroups === 0;
 }
 
 function enterAddMode(className) {
