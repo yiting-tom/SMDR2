@@ -26,4 +26,4 @@
 
 ## 5. Archive
 
-- [ ] 5.1 Run `/opsx:archive remove-density-arbitration-subsystem` after `disambiguate-bga-fiducial-by-view` is archived (this builds on it).
+- [x] 5.1 Run `/opsx:archive remove-density-arbitration-subsystem` after `disambiguate-bga-fiducial-by-view` is archived (this builds on it).

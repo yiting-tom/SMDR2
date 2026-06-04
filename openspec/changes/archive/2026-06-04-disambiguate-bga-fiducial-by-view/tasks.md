@@ -22,8 +22,8 @@
 
 ## 5. Manual verification (deferred — user)
 
-- [ ] 5.1 **[USER]** With BGABall + FiducialCircle templates in the library, draw the bottom_view rect over the BGA grid and the top_view rect over the fiducials, then Scan All / Save Match. Expect: all BGA balls → BGABall (bottom), fiducials → FiducialCircle (top); the 17 482-ball misclassification gone.
+- [x] 5.1 **[USER]** With BGABall + FiducialCircle templates in the library, draw the bottom_view rect over the BGA grid and the top_view rect over the fiducials, then Scan All / Save Match. Expect: all BGA balls → BGABall (bottom), fiducials → FiducialCircle (top); the 17 482-ball misclassification gone.
 
 ## 6. Archive
 
-- [ ] 6.1 After tasks 1–4 and manual verification, run `/opsx:archive disambiguate-bga-fiducial-by-view`.
+- [x] 6.1 After tasks 1–4 and manual verification, run `/opsx:archive disambiguate-bga-fiducial-by-view`.
