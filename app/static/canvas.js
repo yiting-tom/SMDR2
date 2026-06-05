@@ -213,6 +213,20 @@ function isRoleMatched(siblings) {
   return siblings.length > 0 && siblings.every(s => s.match_saved);
 }
 
+// A sibling DXF is only reachable from the switcher once it has finished the
+// discovering_layers → awaiting_layers → preprocessing pipeline and reached
+// `ready_to_match`. Opening a not-yet-ready (or errored) file would 425 on the
+// /primitives fetch and leave a blank canvas, so such siblings render disabled
+// rather than as navigable links.
+function isSibViewable(sib) {
+  return sib?.status === "ready_to_match";
+}
+function notReadyTitle(sib, role) {
+  if (sib.status === "error") return `${role} 處理失敗`;
+  if (sib.status === "awaiting_layers") return `${role} 尚未挑選圖層`;
+  return `${role} 尚未完成 preprocess`;  // discovering_layers / preprocessing
+}
+
 // Re-pull the product payload so the role switcher reflects fresh
 // `match_saved` flags. Callers: after Save Match JSON succeeds, and after
 // a region edit clears match_saved server-side. No-op outside a product
@@ -255,8 +269,11 @@ function renderRoleSlot(product, file, role, opts = {}) {
     btn.textContent = role;
     if (sibling.id === file.id) {
       btn.classList.add("current");
-    } else {
+    } else if (isSibViewable(sibling)) {
       btn.href = `/viewer/${sibling.id}`;
+    } else {
+      btn.classList.add("disabled");
+      btn.title = notReadyTitle(sibling, role);
     }
     if (isRoleMatched(siblings)) btn.classList.add("matched");
     return btn;
@@ -301,10 +318,14 @@ function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
     if (sib.id === currentFileId) {
       item = document.createElement("span");
       item.className = "role-menu__item role-menu__item--current";
-    } else {
+    } else if (isSibViewable(sib)) {
       item = document.createElement("a");
       item.className = "role-menu__item";
       item.href = `/viewer/${sib.id}`;
+    } else {
+      item = document.createElement("span");
+      item.className = "role-menu__item role-menu__item--disabled";
+      item.title = notReadyTitle(sib, role);
     }
     if (sib.match_saved) item.classList.add("role-menu__item--matched");
     item.setAttribute("role", "menuitem");
@@ -3761,6 +3782,18 @@ async function load() {
     fetchClasses(),
     loadFileInfo(),
   ]);
+  if (!primRes.ok) {
+    // Most likely HTTP 425: the file is still discovering layers / preprocessing
+    // (or errored), so /primitives refuses. Surface it instead of calling
+    // .json() on the error body and leaving a permanently blank canvas with the
+    // status stuck on "fetching…".
+    setBaseStatus(
+      primRes.status === 425
+        ? "此圖面尚未完成 preprocess,無法開啟 — 請回 Products 頁等待就緒"
+        : `無法載入圖元 (HTTP ${primRes.status})`
+    );
+    return;
+  }
   const data = await primRes.json();
   const tFetch = (performance.now() - t0).toFixed(0);
 
