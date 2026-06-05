@@ -12,8 +12,8 @@
 ## 3. Verify
 
 - [x] 3.1 `node --check app/static/canvas.js` — OK.
-- [ ] 3.2 **[USER]** Manual: product with one ready role + one role mid-preprocess → the preprocessing role is muted / not-allowed, has no link, shows its `title`; the ready role still navigates. Multi-DXF dropdown lists a not-ready sibling as a disabled non-link with a reason. Opening a not-ready file's viewer URL directly shows the "not ready" status message, not a blank canvas.
+- [x] 3.2 **[USER]** Manual: product with one ready role + one role mid-preprocess → the preprocessing role is muted / not-allowed, has no link, shows its `title`; the ready role still navigates. Multi-DXF dropdown lists a not-ready sibling as a disabled non-link with a reason. Opening a not-ready file's viewer URL directly shows the "not ready" status message, not a blank canvas. — user confirmed verified.
 
 ## 4. Archive
 
-- [ ] 4.1 `/opsx:archive viewer-guard-unready-files` after manual verification.
+- [x] 4.1 `/opsx:archive viewer-guard-unready-files` after manual verification.
