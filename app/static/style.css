@@ -96,6 +96,20 @@ header #role-switcher .role-btn.empty.disabled:hover {
   border-color: #1c2630;
   background: rgba(255, 255, 255, 0.02);
 }
+/* Populated role-btn whose DXF hasn't reached `ready_to_match` yet (still
+   discovering layers / preprocessing, or errored). Rendered without an href
+   and locked so the engineer can't open a file that would 425 on its
+   /primitives fetch and leave a blank canvas. No `pointer-events:none` — the
+   absent href is the navigation guard, and keeping pointer events alive lets
+   the `title` (lock reason) tooltip show on hover. The :hover override stops
+   it reading as clickable. */
+header #role-switcher .role-btn.disabled,
+header #role-switcher .role-btn.disabled:hover {
+  color: #4a5868;
+  border-color: #232c38;
+  background: rgba(255, 255, 255, 0.02);
+  cursor: not-allowed;
+}
 
 /* The RING | LID pair shares one conceptual 4th slot — the two
    buttons sit flush so they read as a single split control. */
@@ -157,6 +171,15 @@ header #role-switcher .role-menu__item--current {
 header #role-switcher .role-menu__item--current:hover {
   background: #003e4d;
   color: #00ffff;
+}
+/* Dropdown sibling whose DXF is not yet `ready_to_match` — non-link, locked,
+   carrying a `title` lock reason. The :hover override stops the cyan
+   highlight so it doesn't read as a clickable item. */
+header #role-switcher .role-menu__item--disabled,
+header #role-switcher .role-menu__item--disabled:hover {
+  color: #4a5868;
+  background: transparent;
+  cursor: not-allowed;
 }
 /* "Matched" = every sibling DXF under the role has saved its match.
    Placed after the .current / .empty rules so the green wins when both
