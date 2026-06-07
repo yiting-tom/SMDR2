@@ -858,7 +858,9 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     dst_path = Path(dst)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_path, "w") as f:
-        json.dump(out, f, indent=2)
+        # Compact separators: the rule-checker consumes this machine-to-machine,
+        # and indent=2 was ~2.3x larger on 10k-instance (BGA) saves.
+        json.dump(out, f, separators=(",", ":"))
 
     # Refresh the not-side-aware pre-match snapshot from this same live scan so
     # the auto-shown overlay on the next viewer load reflects the current

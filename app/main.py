@@ -28,6 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -252,6 +253,10 @@ def _submit_unit_rescale_migration() -> None:
 
 
 app = FastAPI(title="SMDR2", lifespan=lifespan)
+# Compress large JSON responses (notably GET /primitives — tens of MB on a
+# 400k-circle drawing). Transparent to the browser (response.json() decodes
+# gzip automatically); skips responses below the threshold.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -1186,7 +1191,7 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
 
 
 @app.get("/api/files/{file_id}/scan-all")
-async def scan_all(file_id: str) -> dict:
+def scan_all(file_id: str) -> dict:  # sync → FastAPI runs it in a threadpool
     """Overlay-only preview of "what class does each handle belong to".
 
     Runs the *same* pipeline as `save_match_json` — view split via
@@ -1200,6 +1205,12 @@ async def scan_all(file_id: str) -> dict:
     Response shape: `{by_class: {<display_name>: [handle, ...]}, total: N}`.
     Front-end overlay code (`runScanAll` in `canvas.js`) reads
     `data.by_class[cls]`.
+
+    Declared **sync** on purpose: the body is CPU-bound with no `await`, so as
+    an `async def` it would run on the event loop and block every other request
+    for the whole scan (the "user stuck behind one drawing's scan" symptom). A
+    plain `def` path operation is dispatched to Starlette's threadpool, keeping
+    the event loop free for other files' requests.
     """
     rec = _resolve_file(file_id)
     # Scope-aware load: merge library-scoped templates with this file's
