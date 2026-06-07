@@ -34,7 +34,9 @@ import json
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +56,69 @@ from app.side_regions import suppress_contained_matches  # noqa: E402
 # Three radii so circle templates land in distinct exact-radius buckets, like a
 # real layout's BGA / via / C4 populations.
 _RADII = (0.30, 0.15, 0.075)
+
+
+# ---- (A) ProcessPool across templates --------------------------------------
+# Worker-process state + task fns must be module-level so they pickle by
+# reference under the spawn start method (macOS default). Each worker rebuilds
+# the drawing shapes ONCE in its initializer (from a temp parsed file), then
+# matches its assigned templates against that shared in-process dict — the
+# production-faithful "fan out templates, shapes live in the worker" pattern.
+_WORKER_SHAPES = None
+
+
+def _worker_init(parsed_path: str) -> None:
+    global _WORKER_SHAPES
+    from app.library import build_handle_index
+    from app.matching import build_entity_shapes
+    data = json.loads(Path(parsed_path).read_text())
+    prims = data["primitives"]
+    hi = build_handle_index(prims)
+    _WORKER_SHAPES = build_entity_shapes(prims, hi)
+
+
+def _worker_match(task: tuple) -> list[list[str]]:
+    point_sets, kinds = task
+    from app.matching import find_matches_from_pointsets
+    res = find_matches_from_pointsets(
+        point_sets, _WORKER_SHAPES, entity_kinds=kinds, strategy="chamfer")
+    return [list(m.handles) for m in res.matches]  # lightweight return
+
+
+def bench_parallel(prims, tasks, worker_counts, repeats) -> dict:
+    """Measure the scan loop fanned out across a ProcessPool, per worker count.
+
+    cold_ms = pool spin-up + per-worker shape build + one full map (the real
+              single-scan-with-fresh-pool cost).
+    warm_median_ms = a subsequent map on the same live pool (shapes + signature
+              index already cached in each worker) — the reuse ceiling.
+    """
+    tmp = Path(tempfile.gettempdir()) / "smdr2_bench_parsed.json"
+    tmp.write_text(json.dumps({"primitives": prims}))
+    out: dict[str, dict] = {}
+    try:
+        for w in worker_counts:
+            ex = ProcessPoolExecutor(
+                max_workers=w, initializer=_worker_init, initargs=(str(tmp),))
+            try:
+                t0 = time.perf_counter()
+                cold = list(ex.map(_worker_match, tasks))
+                cold_ms = (time.perf_counter() - t0) * 1000.0
+                warm = []
+                for _ in range(repeats):
+                    t1 = time.perf_counter()
+                    list(ex.map(_worker_match, tasks))
+                    warm.append((time.perf_counter() - t1) * 1000.0)
+            finally:
+                ex.shutdown(wait=True)
+            out[f"workers_{w}"] = {
+                "cold_ms": round(cold_ms, 1),
+                "warm_median_ms": round(statistics.median(warm), 1),
+                "total_matches": sum(len(r) for r in cold),
+            }
+    finally:
+        tmp.unlink(missing_ok=True)
+    return out
 
 
 def make_primitives(
@@ -168,6 +233,13 @@ def run(args) -> dict:
     scan = timed(scan_loop, args.repeats)
     scan_out = scan.pop("_result")
 
+    # 4b. same scan fanned out across a ProcessPool, swept over worker counts.
+    parallel: dict = {}
+    if args.workers:
+        worker_counts = [int(x) for x in str(args.workers).split(",") if x.strip()]
+        tasks = [(t.entity_point_sets, t.entity_kinds) for t in all_t]
+        parallel = bench_parallel(prims, tasks, worker_counts, args.repeats)
+
     # 5. contained-match suppression at scale (synthetic 10k+ instances).
     n_inst = max(args.suppression_instances, 1)
     supp_in = {"bga_ball.0": [[f"c{i:07d}"] for i in range(n_inst)]}
@@ -206,6 +278,7 @@ def run(args) -> dict:
             "scan_all_loop": scan,
             "suppression_10k": {**supp, "instances": n_inst},
         },
+        "parallel_scan": parallel,
         "sizes": sizes,
         "env": _env(),
     }
@@ -257,6 +330,18 @@ def _print(report: dict, baseline: dict | None) -> None:
             extra = f"  ({v['instances']:,} inst)"
         print(f"{k:<24}{cur:>14,.2f}{bs:>14}{d:>12}{extra}")
 
+    par = report.get("parallel_scan") or {}
+    if par:
+        seq = report["timings"]["scan_all_loop"]["median_ms"]
+        print(f"\nparallel scan_all_loop (sequential = {seq:,.0f} ms):")
+        print(f"{'workers':<12}{'cold ms':>12}{'warm ms':>12}"
+              f"{'warm vs seq':>14}")
+        for k, v in par.items():
+            w = k.replace("workers_", "")
+            warm = v["warm_median_ms"]
+            d = f"{(warm - seq) / seq * 100:+.1f}%"
+            print(f"{w:<12}{v['cold_ms']:>12,.0f}{warm:>12,.0f}{d:>14}")
+
     s = report["sizes"]
     print(f"\nsizes: match-JSON indent2={s['match_json_indent2_bytes']:,}B "
           f"vs compact={s['match_json_compact_bytes']:,}B "
@@ -274,6 +359,9 @@ def main() -> None:
     ap.add_argument("--polyline-templates", type=int, default=20)
     ap.add_argument("--suppression-instances", type=int, default=10_000)
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--workers", default="",
+                    help="comma-separated worker counts for the parallel scan "
+                         "sweep, e.g. 2,4,6,8 (empty = skip)")
     ap.add_argument("--label", default="baseline")
     ap.add_argument("--baseline", default=None,
                     help="prior results JSON to diff against")

@@ -709,6 +709,79 @@ def _get_radius_buckets(
     return buckets
 
 
+# ---- Shared signature index (vectorised gate) ---------------------------
+# The chamfer single-entity hot loop calls `signatures_compatible` once per
+# drawing shape, per template. In a scan-all (50+ templates over the same
+# drawing) that re-walks the full shape dict in Python 50+ times — the
+# dominant cost (see benchmarks/perf_matcher.py). Precompute each shape's
+# four signature scalars into parallel numpy arrays ONCE per drawing, then
+# gate each template with a vectorised mask. Cached by `id(drawing)` with the
+# same lifetime invariant as `_radius_bucket_cache` above (a fresh drawing
+# dict from `_shapes_for` gets a fresh id → fresh slot on invalidation).
+_signature_index_cache: dict[int, dict[str, object]] = {}
+
+
+def _get_signature_index(drawing: dict[str, EntityShape]) -> dict[str, object]:
+    """Return (and cache) per-drawing signature arrays parallel to handles."""
+    cache_id = id(drawing)
+    cached = _signature_index_cache.get(cache_id)
+    if cached is not None:
+        return cached
+    handles = list(drawing.keys())
+    n = len(handles)
+    vcount = np.empty(n, dtype=np.int64)
+    pl = np.empty(n, dtype=np.float64)
+    rad = np.empty(n, dtype=np.float64)
+    sig = np.empty(n, dtype=np.float64)
+    for i, h in enumerate(handles):
+        s = drawing[h]
+        vcount[i] = s.vertex_count
+        pl[i] = s.path_length
+        rad[i] = s.radius
+        s1 = s.pca_sigma1
+        sig[i] = (s.pca_sigma2 / s1) if s1 > 0.0 else 0.0
+    idx: dict[str, object] = {
+        "handles": handles, "vcount": vcount, "pl": pl, "rad": rad, "sig": sig,
+    }
+    _signature_index_cache[cache_id] = idx
+    return idx
+
+
+def _gate_candidates(
+    template: EntityShape, idx: dict[str, object],
+) -> list[str]:
+    """Vectorised equivalent of `signatures_compatible(template, shape)` over a
+    whole drawing's precomputed signature index. Returns the handles (in dict
+    order) that pass the gate. Formula is identical to `signatures_compatible`
+    so the candidate set is bit-for-bit the same; `PATH_LENGTH_RATIO` /
+    `RADIUS_RATIO` are read at call time so dev-mode overrides flow through."""
+    if template.vertex_count < 2:
+        return []
+    plr = PATH_LENGTH_RATIO
+    rr = RADIUS_RATIO
+    vcount = idx["vcount"]
+    pl = idx["pl"]
+    rad = idx["rad"]
+    sig = idx["sig"]
+    handles = idx["handles"]
+
+    mask = vcount >= 2
+    t_pl = template.path_length
+    if t_pl > 0.0:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = t_pl / pl
+        mask &= (pl <= 0.0) | ((ratio >= 1.0 - plr) & (ratio <= 1.0 + plr))
+    t_rad = template.radius
+    if t_rad > 0.0:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rratio = t_rad / rad
+        mask &= (rad <= 0.0) | ((rratio >= 1.0 - rr) & (rratio <= 1.0 + rr))
+    t_s1 = template.pca_sigma1
+    t_sig = (template.pca_sigma2 / t_s1) if t_s1 > 0.0 else 0.0
+    mask &= np.abs(t_sig - sig) <= SIGMA_RATIO_TOL
+    return [handles[i] for i in np.nonzero(mask)[0]]
+
+
 # ---- Multi-entity fingerprint bucket -----------------------------------
 # Decimal digits kept when bucketing the (path_length, radius, sigma_ratio)
 # triple that fingerprints each EntityShape for the rigid-transform
@@ -986,11 +1059,14 @@ def _match_single_serial(
     use_tree = t_centered.shape[0] > BRUTE_FORCE_CUTOFF
     t_tree = cKDTree(t_centered) if use_tree else None
 
-    for handle, shape in drawing.items():
+    # Vectorised signature gate: build the per-drawing signature index once
+    # (cached across templates in a scan-all) and filter candidates with a
+    # numpy mask instead of a per-shape `signatures_compatible` Python call.
+    sig_index = _get_signature_index(drawing)
+    for handle in _gate_candidates(template, sig_index):
         if handle in skip:
             continue
-        if not signatures_compatible(template, shape):
-            continue
+        shape = drawing[handle]
         if shape.points.shape[0] < 2:
             continue
 

@@ -1,0 +1,84 @@
+{
+  "config": {
+    "circles": 200000,
+    "polylines": 300,
+    "circle_templates": 30,
+    "polyline_templates": 20,
+    "templates_total": 50,
+    "repeats": 3,
+    "shapes_built": 200300
+  },
+  "timings": {
+    "build_shapes": {
+      "median_ms": 2306.289,
+      "min_ms": 2303.276,
+      "max_ms": 2419.107,
+      "repeats": 3
+    },
+    "circle_template_one": {
+      "median_ms": 228.277,
+      "min_ms": 226.396,
+      "max_ms": 354.004,
+      "repeats": 5,
+      "matches": 198550
+    },
+    "polyline_template_one": {
+      "median_ms": 48.86,
+      "min_ms": 47.526,
+      "max_ms": 132.521,
+      "repeats": 5,
+      "matches": 300
+    },
+    "scan_all_loop": {
+      "median_ms": 1330.108,
+      "min_ms": 1220.651,
+      "max_ms": 1348.745,
+      "repeats": 3
+    },
+    "suppression_10k": {
+      "median_ms": 14.256,
+      "min_ms": 13.568,
+      "max_ms": 14.398,
+      "repeats": 3,
+      "instances": 10000
+    }
+  },
+  "parallel_scan": {
+    "workers_2": {
+      "cold_ms": 4348.5,
+      "warm_median_ms": 741.2,
+      "total_matches": 206000
+    },
+    "workers_4": {
+      "cold_ms": 4215.3,
+      "warm_median_ms": 464.9,
+      "total_matches": 206000
+    },
+    "workers_6": {
+      "cold_ms": 4207.8,
+      "warm_median_ms": 380.4,
+      "total_matches": 206000
+    },
+    "workers_8": {
+      "cold_ms": 4418.9,
+      "warm_median_ms": 494.7,
+      "total_matches": 206000
+    }
+  },
+  "sizes": {
+    "match_json_indent2_bytes": 6169072,
+    "match_json_compact_bytes": 2666721,
+    "match_json_indent_over_compact": 2.313,
+    "primitives_json_bytes": 13935851,
+    "primitives_json_gzip_bytes": 1015523,
+    "primitives_gzip_ratio": 13.72
+  },
+  "env": {
+    "timestamp": "2026-06-07T09:29:13.785547+00:00",
+    "git_commit": "f09ebb1",
+    "git_branch": "perf-benchmark",
+    "python": "3.13.5",
+    "numpy": "2.2.6",
+    "cpu_count": 10
+  }
+}
