@@ -1,0 +1,62 @@
+{
+  "config": {
+    "circles": 200000,
+    "polylines": 300,
+    "circle_templates": 30,
+    "polyline_templates": 20,
+    "templates_total": 50,
+    "repeats": 3,
+    "shapes_built": 200300
+  },
+  "timings": {
+    "build_shapes": {
+      "median_ms": 2266.555,
+      "min_ms": 2249.882,
+      "max_ms": 2397.652,
+      "repeats": 3
+    },
+    "circle_template_one": {
+      "median_ms": 221.433,
+      "min_ms": 220.308,
+      "max_ms": 346.795,
+      "repeats": 5,
+      "matches": 198550
+    },
+    "polyline_template_one": {
+      "median_ms": 96.166,
+      "min_ms": 95.322,
+      "max_ms": 96.515,
+      "repeats": 5,
+      "matches": 300
+    },
+    "scan_all_loop": {
+      "median_ms": 2244.579,
+      "min_ms": 2129.188,
+      "max_ms": 2259.66,
+      "repeats": 3
+    },
+    "suppression_10k": {
+      "median_ms": 13.808,
+      "min_ms": 13.639,
+      "max_ms": 118.617,
+      "repeats": 3,
+      "instances": 10000
+    }
+  },
+  "sizes": {
+    "match_json_indent2_bytes": 6169072,
+    "match_json_compact_bytes": 2666721,
+    "match_json_indent_over_compact": 2.313,
+    "primitives_json_bytes": 13935851,
+    "primitives_json_gzip_bytes": 1015523,
+    "primitives_gzip_ratio": 13.72
+  },
+  "env": {
+    "timestamp": "2026-06-07T09:15:52.287445+00:00",
+    "git_commit": "912f1cd",
+    "git_branch": "perf-benchmark",
+    "python": "3.13.5",
+    "numpy": "2.2.6",
+    "cpu_count": 10
+  }
+}
