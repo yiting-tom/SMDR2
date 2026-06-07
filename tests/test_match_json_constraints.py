@@ -879,6 +879,59 @@ def test_preprocess_prematch_clean_when_radii_differ(
     # cross-fire union.
 
 
+# ---- Regression: Save Match refreshes the stale pre-match snapshot ----------
+#
+# The auto-shown overlay on viewer load reads data/prematch/{id}.json, a
+# snapshot frozen at preprocess time. A template committed AFTER preprocess is
+# absent from it, so the overlay silently under-shows until the operator cancels
+# and re-runs Scan All. Save Match already does a fresh live scan for the Match
+# JSON; it now refreshes the pre-match snapshot from that same scan.
+
+def test_save_match_worker_refreshes_prematch_snapshot(monkeypatch, tmp_path):
+    """`_save_match_worker` SHALL rewrite `data/prematch/{id}.json` from its
+    live scan, so a class whose template was committed AFTER preprocess (absent
+    from the frozen snapshot) appears in the auto-shown overlay on the next
+    viewer load — instead of only after a manual Scan All."""
+    from app.jobs import _save_match_worker
+    from app.storage import match_path, prematch_path
+
+    fid = "save-refreshes-prematch"
+    _register_file_with_rects(
+        monkeypatch, fid,
+        top={"x0": 0, "y0": 0, "x1": 10, "y1": 10},
+        bottom=None, side=None,
+    )
+    library_id = _make_lib_with_constrained_templates(monkeypatch)
+    _bind_file_to_lib(fid, library_id)
+
+    # Simulate the stale preprocess-time snapshot: SMD-2T was committed AFTER
+    # this file was preprocessed, so the on-disk snapshot lacks it entirely.
+    pm_path = prematch_path(fid)
+    pm_path.parent.mkdir(parents=True, exist_ok=True)
+    pm_path.write_text(json.dumps({"by_class": {}, "total": 0}))
+
+    # SMD-2T (unconstrained) matches two handles in the top view; C4Ball has no
+    # matches and BGABall is skipped (no bottom rect), so neither pollutes the
+    # refreshed snapshot.
+    shapes = {
+        "s1": _shape("s1", [(5.0, 5.0)]),
+        "s2": _shape("s2", [(6.0, 5.0)]),
+    }
+    matches = {"C4Ball": [], "BGABall": [], "SMD-2T": [_mr(["s1"]), _mr(["s2"])]}
+    _install_fakes(monkeypatch, shapes, matches, tmp_path)
+
+    _save_match_worker(fid, str(match_path(fid)))
+
+    refreshed = json.loads(pm_path.read_text())
+    # The just-saved SMD-2T class now appears in the snapshot (was empty).
+    assert set(refreshed["by_class"].get("SMD-2T", [])) == {"s1", "s2"}
+    # Not-side-aware union: total == unique handles across classes.
+    assert refreshed["total"] == 2
+    # Classes with no matches do not create empty entries (mirrors preprocess).
+    assert "C4Ball" not in refreshed["by_class"]
+    assert "BGABall" not in refreshed["by_class"]
+
+
 # ---- Contained-match suppression -------------------------------------------
 #
 # A class can hold both a partial template (e.g. an SMD mask-only pattern:

@@ -790,6 +790,11 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
         "bottom_view": rec.bottom_view_rect,
         "side_view": rec.side_view_rect,
     }
+    # Raw per-display-class handle union for the not-side-aware pre-match
+    # snapshot we refresh after the scan (see the write below). Accumulated
+    # before split_matches_by_side / suppression so it mirrors the shape
+    # _preprocess_worker persists; the union is invariant to suppression.
+    prematch_sets: dict[str, set[str]] = {}
     for cls_name in classes:
         allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
         if allowed is not None and not any(
@@ -805,6 +810,13 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
                 entity_kinds=tmpl.entity_kinds,
                 strategy=strategy, bbox_ratio=bbox_ratio,
             )
+            # Raw (pre-split, pre-suppression) handle union for the refreshed
+            # pre-match snapshot. Only classes with ≥1 match get an entry, to
+            # match _preprocess_worker's by_class shape.
+            if result.matches:
+                pm_bucket = prematch_sets.setdefault(cls_name, set())
+                for m in result.matches:
+                    pm_bucket.update(m.handles)
             json_cls = CLASS_JSON_KEY.get(cls_name, cls_name)
             base_key = f"{json_cls}.{idx}"
             grouped, cnts = split_matches_by_side(
@@ -847,6 +859,32 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     with open(dst_path, "w") as f:
         json.dump(out, f, indent=2)
+
+    # Refresh the not-side-aware pre-match snapshot from this same live scan so
+    # the auto-shown overlay on the next viewer load reflects the current
+    # library (templates committed since preprocess included) instead of the
+    # frozen preprocess-time snapshot. Mirrors the {by_class, total} contract
+    # _preprocess_worker writes. Best-effort: a failure must not fail the Match
+    # JSON already persisted above — worst case the previous (stale) snapshot
+    # stays, i.e. no worse than before this change.
+    try:
+        pm_by_class = {k: sorted(v) for k, v in prematch_sets.items()}
+        pm_path = Path(prematch_path(file_id))
+        pm_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(pm_path, "w") as f:
+            json.dump(
+                {
+                    "by_class": pm_by_class,
+                    "total": sum(len(v) for v in pm_by_class.values()),
+                },
+                f,
+            )
+    except Exception:
+        logger.warning(
+            "save_match: failed to refresh pre-match snapshot for %s",
+            file_id, exc_info=True,
+        )
+
     try:
         saved_to = str(dst_path.relative_to(DATA_DIR.parent))
     except ValueError:
