@@ -3,6 +3,7 @@
 // Match JSON saved.
 
 import { openLayerModal } from "./layer_modal.js";
+import { openLayoutModal } from "./layout_modal.js";
 import { mountDevParamsModal } from "./dev_params.js";
 
 // SBT/BD/POD always render as single-role slots. The 4th grid cell
@@ -691,6 +692,19 @@ function appendUnitScaleAnnotation(parent, f) {
   // of append calls here. Reuses `.rescaled-pill` for the same neutral
   // informational style.
   appendRecoverAnnotation(parent, f);
+  appendLayoutAnnotation(parent, f);
+}
+
+// "tab: <name>" pill when the file renders from a paper-space AutoCAD
+// layout rather than model space. Modelspace files (chosen_layout NULL)
+// get nothing — the common case stays unannotated.
+function appendLayoutAnnotation(parent, f) {
+  if (!parent || !f.chosen_layout) return;
+  const pill = document.createElement("span");
+  pill.className = "rescaled-pill";
+  pill.textContent = `▦ tab: ${f.chosen_layout}`;
+  pill.title = `Geometry loaded from AutoCAD layout tab "${f.chosen_layout}" (model space was empty)`;
+  parent.appendChild(pill);
 }
 
 function appendRecoverAnnotation(parent, f) {
@@ -710,10 +724,12 @@ function fileStatusBits(f) {
     f.status === "ready_to_match"     ? "#69f0ae" :
     f.status === "preprocessing"      ? "#ffb84d" :
     f.status === "discovering_layers" ? "#ffb84d" :
+    f.status === "awaiting_layout"    ? "#ffd54f" :
     f.status === "awaiting_layers"    ? "#ffd54f" :
     f.status === "error"              ? "#ff5252" : "#9aa5b1";
   const statusLabel =
     f.status === "discovering_layers" ? "scanning layers…" :
+    f.status === "awaiting_layout"    ? "pick view" :
     f.status === "awaiting_layers"    ? "pick layers" :
     f.status;
   const matchBadge = f.match_saved
@@ -725,7 +741,15 @@ function fileStatusBits(f) {
 function buildFileActions(product, role, f, compact) {
   const actions = document.createElement("div");
   actions.className = "slot-actions";
-  if (f.status === "awaiting_layers") {
+  if (f.status === "awaiting_layout") {
+    const pickBtn = document.createElement("button");
+    pickBtn.className = "primary action-btn";
+    pickBtn.type = "button";
+    pickBtn.textContent = "Pick view";
+    pickBtn.title = "This DXF's geometry is in AutoCAD layout tabs — pick which one to load";
+    pickBtn.addEventListener("click", () => promptLayoutSelection(f));
+    actions.appendChild(pickBtn);
+  } else if (f.status === "awaiting_layers") {
     const pickBtn = document.createElement("button");
     pickBtn.className = "primary action-btn";
     pickBtn.type = "button";
@@ -735,7 +759,28 @@ function buildFileActions(product, role, f, compact) {
   } else if (f.status === "ready_to_match") {
     actions.innerHTML = `<a class="open-link" href="/viewer/${f.id}">Open →</a>`;
   }
-  if (f.status !== "discovering_layers" && f.status !== "error") {
+  // Re-pick the AutoCAD tab when this file went through the layout picker
+  // (a manifest exists) and isn't mid-discovery / errored / already at the
+  // pick-view gate.
+  if (
+    f.has_layout_options
+    && f.status !== "awaiting_layout"
+    && f.status !== "discovering_layers"
+    && f.status !== "error"
+  ) {
+    const viewBtn = document.createElement("button");
+    viewBtn.className = "replace-btn";
+    viewBtn.type = "button";
+    viewBtn.textContent = "View";
+    viewBtn.title = "Change which AutoCAD layout tab feeds the matcher";
+    viewBtn.addEventListener("click", () => promptLayoutSelection(f));
+    actions.appendChild(viewBtn);
+  }
+  if (
+    f.status !== "awaiting_layout"
+    && f.status !== "discovering_layers"
+    && f.status !== "error"
+  ) {
     const layersBtn = document.createElement("button");
     layersBtn.className = "replace-btn";
     layersBtn.type = "button";
@@ -1079,6 +1124,21 @@ async function promptLayerSelection(file) {
     fileName: file.name,
     onConfirm: async () => {
       $status.textContent = `Phase 2 running on ${file.name}…`;
+    },
+  });
+  if (result.confirmed) await refresh();
+  startPollingIfBusy();
+}
+
+// Layout (AutoCAD-tab) picker — shown when a DXF's geometry lives in more
+// than one paper-space layout. Confirming pins the tab and re-runs layer
+// discovery against it, so the flow chains straight into the layer picker.
+async function promptLayoutSelection(file) {
+  const result = await openLayoutModal({
+    fileId: file.id,
+    fileName: file.name,
+    onConfirm: async (layout) => {
+      $status.textContent = `Loading "${layout}" from ${file.name}…`;
     },
   });
   if (result.confirmed) await refresh();

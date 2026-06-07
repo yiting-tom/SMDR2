@@ -95,6 +95,24 @@
     </div>
   </div>
 
+  <!-- Layout (AutoCAD-tab) selection modal — shown when a DXF's geometry
+       lives in more than one paper-space layout (model space empty). -->
+  <div id="layout-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Pick view">
+      <header class="modal-header">
+        <h2 data-layout-title>Pick which view (AutoCAD tab) to load</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div data-layout-body class="layer-modal-body"></div>
+      <footer class="modal-footer">
+        <span class="spacer"></span>
+        <button type="button" data-layout-confirm class="primary">Pick a view</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Developer parameter overrides modal (Dev Mode only) -->
   <div id="dev-params-modal" class="modal" hidden>
     <div class="modal-bg" data-close></div>

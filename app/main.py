@@ -38,6 +38,7 @@ from starlette.requests import Request
 from app import jobs
 from app.files import (
     AWAITING_LAYERS,
+    AWAITING_LAYOUT,
     DISCOVERING_LAYERS,
     FILE_STORE,
     FileRecord,
@@ -69,6 +70,8 @@ from app.storage import (
     DATA_DIR,
     layer_manifest_path,
     layer_preview_svg_path,
+    layout_manifest_path,
+    layout_preview_svg_path,
     match_path,
     parsed_path,
     prematch_path,
@@ -283,6 +286,16 @@ class CreateProductRequest(BaseModel):
     library_id: str = DEFAULT_LIBRARY_ID
 
 
+def _file_payload(rec: FileRecord) -> dict:
+    """`rec.to_dict()` plus the dashboard-only `has_layout_options` flag —
+    true when a layout (AutoCAD-tab) picker manifest exists on disk for this
+    file, i.e. its geometry spans more than one paper-space layout so the
+    operator can (re-)pick which tab to load."""
+    d = rec.to_dict()
+    d["has_layout_options"] = layout_manifest_path(rec.id).exists()
+    return d
+
+
 def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
     """Build (`files_by_role`, `files_by_role_all`) from a product's file list.
 
@@ -303,7 +316,7 @@ def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
             by_role_recs[f.dxf_role].append(f)
     for role, recs in by_role_recs.items():
         recs.sort(key=lambda r: view_order.get(r.dxf_view, 9))
-        by_role_all[role] = [r.to_dict() for r in recs]
+        by_role_all[role] = [_file_payload(r) for r in recs]
     by_role = {
         role: (lst[0] if lst else None)
         for role, lst in by_role_all.items()
@@ -574,6 +587,11 @@ async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found")
+    if rec.status == AWAITING_LAYOUT:
+        raise HTTPException(
+            status_code=409,
+            detail="file is awaiting an AutoCAD-tab pick; choose a layout first",
+        )
     if not LIBRARIES.exists(req.library_id):
         raise HTTPException(status_code=400, detail=f"unknown library {req.library_id!r}")
     if rec.library_id == req.library_id:
@@ -609,6 +627,11 @@ async def post_unit_override(file_id: str, req: UnitOverrideRequest) -> JSONResp
     rec = FILE_STORE.get(file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found")
+    if rec.status == AWAITING_LAYOUT:
+        raise HTTPException(
+            status_code=409,
+            detail="file is awaiting an AutoCAD-tab pick; choose a layout first",
+        )
     inflight = jobs.find_inflight_preprocess_job(file_id)
     if inflight is not None:
         return JSONResponse(
@@ -801,6 +824,101 @@ async def trigger_discover_layers(file_id: str) -> dict:
     return {"file_id": file_id, "status": DISCOVERING_LAYERS, "job_id": job_id}
 
 
+# ---- Layout selection (AutoCAD-tab gate, runs before layer selection) ---
+# Only files whose geometry lives in >1 paper-space layout (model space
+# empty) ever produce a layout manifest and park in `awaiting_layout`;
+# model-space and single-tab files skip this gate entirely (the parser
+# auto-resolves them). See `app.jobs._discover_layers_worker`.
+def _read_layout_manifest(file_id: str) -> dict | None:
+    mp = layout_manifest_path(file_id)
+    if not mp.exists():
+        return None
+    with open(mp) as f:
+        return json.load(f)
+
+
+@app.get("/api/files/{file_id}/layouts")
+async def get_file_layouts(file_id: str) -> dict:
+    """Layout (AutoCAD-tab) picker manifest + current choice. 404 when no
+    layout picker applies to this file (geometry in model space / a single
+    tab) or discovery hasn't produced one yet."""
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    manifest = _read_layout_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layout manifest not available")
+    return {
+        "file_id": file_id,
+        "manifest": manifest,
+        "chosen_layout": rec.chosen_layout,
+        "status": rec.status,
+    }
+
+
+class LayoutConfirmRequest(BaseModel):
+    layout: str
+
+
+@app.post("/api/files/{file_id}/layouts")
+async def confirm_layout(file_id: str, req: LayoutConfirmRequest) -> dict:
+    """Persist the operator's chosen AutoCAD tab and re-run layer discovery
+    against it (Phase 1 → the layer picker). The chosen layout is pinned on
+    the file row so every later re-preprocess renders the same tab."""
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    manifest = _read_layout_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layout manifest not available")
+    known = {layout["name"] for layout in manifest["layouts"]}
+    if req.layout not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown layout for this file: {req.layout!r}",
+        )
+    FILE_STORE.set_chosen_layout(file_id, req.layout)
+    # Switching tabs swaps the entire entity set, so any saved Match JSON
+    # references the OLD tab's entities. Invalidate it (mirrors
+    # `patch_side_regions`) so a rule check can't run against a stale match
+    # — the operator re-runs Save Match after the new tab is ready.
+    if req.layout != rec.chosen_layout:
+        mp = match_path(file_id)
+        try:
+            mp.unlink()
+        except FileNotFoundError:
+            pass
+        FILE_STORE.set_match_saved(file_id, False)
+    FILE_STORE.update_status(file_id, DISCOVERING_LAYERS)
+    job_id = jobs.submit_discover_layers(file_id, layout_name=req.layout)
+    return {
+        "file_id": file_id,
+        "chosen_layout": req.layout,
+        "status": DISCOVERING_LAYERS,
+        "job_id": job_id,
+    }
+
+
+@app.get("/api/files/{file_id}/layout-preview/{safe_name}.svg")
+async def get_layout_preview_svg(file_id: str, safe_name: str):
+    """Serve one AutoCAD-tab SVG thumbnail for the layout picker. 404 when
+    the file has no layout manifest or the tab isn't in it."""
+    from fastapi.responses import FileResponse
+    rec = FILE_STORE.get(file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    manifest = _read_layout_manifest(file_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail="layout manifest not available")
+    valid = {layout["safe_name"] for layout in manifest["layouts"]}
+    if safe_name not in valid:
+        raise HTTPException(status_code=404, detail="unknown layout for this file")
+    path = layout_preview_svg_path(file_id, safe_name)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="preview SVG missing on disk")
+    return FileResponse(path, media_type="image/svg+xml")
+
+
 # ---- Library CRUD -------------------------------------------------------
 @app.get("/api/libraries")
 async def list_libraries() -> dict:
@@ -983,6 +1101,10 @@ async def primitives(file_id: str) -> dict:
         "bbox": data["bbox"],
         "background": data["background"],
         "count": len(data["primitives"]),
+        # Which AutoCAD tab these primitives came from ("Model" or a
+        # paper-space layout name); None on legacy parsed files. Lets the
+        # viewer surface a "loaded from <tab>" hint.
+        "source_layout": data.get("source_layout"),
     }
 
 

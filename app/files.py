@@ -25,6 +25,12 @@ from app.storage import DB_PATH
 #                                                     → checking_rules → report
 # (error short-circuits from anywhere.)
 DISCOVERING_LAYERS = "discovering_layers"
+# Phase 0 gate: the file's geometry lives in paper-space layouts and more
+# than one layout has content, so the operator must pick which AutoCAD tab
+# to load before layer discovery can proceed. Single-layout / model-space
+# files never enter this state (auto-resolution handles them). See
+# `app.jobs._discover_layers_worker`.
+AWAITING_LAYOUT = "awaiting_layout"
 AWAITING_LAYERS = "awaiting_layers"
 PREPROCESSING = "preprocessing"
 READY = "ready_to_match"
@@ -34,6 +40,7 @@ ERROR = "error"
 
 ALL_STATUSES = (
     DISCOVERING_LAYERS,
+    AWAITING_LAYOUT,
     AWAITING_LAYERS,
     PREPROCESSING,
     READY,
@@ -78,7 +85,13 @@ CREATE TABLE IF NOT EXISTS files (
     -- mode rejected the file and recover saved it. JSON-encoded dict
     -- with keys strict_error / n_fixed / n_unrecoverable /
     -- audit_messages. NULL means the file parsed cleanly via strict.
-    dxf_recover_notes TEXT
+    dxf_recover_notes TEXT,
+    -- Which AutoCAD "tab" the preprocessor rendered: "Model" /
+    -- "Layout1" / … . NULL = modelspace (the default, and what every
+    -- legacy row implies). Set either by the operator's layout picker
+    -- or auto-stamped when the file's geometry was found in a
+    -- paper-space layout. See `app.dxf.flatten_for_render(layout_name=)`.
+    chosen_layout TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
@@ -134,6 +147,11 @@ class FileRecord:
     #  "n_unrecoverable": int, "audit_messages": ["<msg>", …]}.
     # `None` for files that parsed cleanly via strict.
     dxf_recover_notes: dict | None = None
+    # Which AutoCAD tab was rendered. None = modelspace (default). A
+    # paper-space layout name (e.g. "Layout1") when the operator picked a
+    # tab or the file's geometry was auto-found in a layout. The dashboard
+    # keys its "tab: <name>" badge and the layout-picker re-open off this.
+    chosen_layout: str | None = None
 
     def to_dict(self) -> dict:
         # When the preprocessor applied a rescale, the persisted bbox is
@@ -182,6 +200,7 @@ class FileRecord:
             ),
             "user_unit_override": self.user_unit_override,
             "dxf_recover_notes": self.dxf_recover_notes,
+            "chosen_layout": self.chosen_layout,
         }
 
 
@@ -367,6 +386,12 @@ class FileStore:
                 self.conn.execute(
                     "ALTER TABLE files ADD COLUMN dxf_recover_notes TEXT"
                 )
+            if "chosen_layout" not in cols:
+                # NULL = modelspace (the default every legacy row implies).
+                # Non-NULL is the AutoCAD tab name the preprocessor rendered.
+                self.conn.execute(
+                    "ALTER TABLE files ADD COLUMN chosen_layout TEXT"
+                )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_files_product ON files(product_id)"
             )
@@ -467,6 +492,17 @@ class FileStore:
             self.conn.execute(
                 "UPDATE files SET user_unit_override = ? WHERE id = ?",
                 (unit, file_id),
+            )
+
+    def set_chosen_layout(self, file_id: str, layout: str | None) -> None:
+        """Persist or clear which AutoCAD tab the file renders from. `None`
+        clears back to the modelspace default. Mirrors
+        `set_user_unit_override`; the API/worker layer is responsible for
+        validating the name against the file's actual layouts."""
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE files SET chosen_layout = ? WHERE id = ?",
+                (layout, file_id),
             )
 
     def set_match_saved(self, file_id: str, value: bool = True) -> None:
@@ -623,6 +659,7 @@ def _row_to_record(row: sqlite3.Row) -> FileRecord:
         applied_scale=float(_get("applied_scale", 1.0) or 1.0),
         user_unit_override=_get("user_unit_override"),
         dxf_recover_notes=dxf_recover_notes,
+        chosen_layout=_get("chosen_layout"),
     )
 
 

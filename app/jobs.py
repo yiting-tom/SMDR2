@@ -45,6 +45,7 @@ from app.storage import (
     layer_preview_dir,
     layer_preview_primitives_path,
     layer_preview_svg_path,
+    layout_preview_dir,
     match_path,
     parsed_path,
     prematch_path,
@@ -88,6 +89,7 @@ def _preprocess_worker(
     dev_overrides_snapshot: dict[str, Any] | None = None,
     user_unit_override: str | None = None,
     product_id: str | None = None,
+    layout_name: str | None = None,
 ) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly.
     import math
@@ -118,12 +120,17 @@ def _preprocess_worker(
     primitives: list[dict[str, Any]]
     insunits: int | None
     applied_scale: float
+    # The Phase-1 transient cache is rendered from the SAME `chosen_layout`
+    # as this preprocess (both resolve it off the file row), so reusing it
+    # is layout-consistent — no extra cache key needed for `layout_name`.
     use_cache = (
         user_unit_override is None
         and transient_primitives
         and Path(transient_primitives).exists()
     )
     recover_notes: dict[str, Any] | None = None
+    source_layout: str | None = None
+    source_is_paperspace: bool = False
     if use_cache:
         with open(transient_primitives) as f:
             cached = json.load(f)
@@ -138,9 +145,12 @@ def _preprocess_worker(
         cached_notes = cached.get("recover_notes")
         if isinstance(cached_notes, dict):
             recover_notes = cached_notes
+        source_layout = cached.get("source_layout")
+        source_is_paperspace = bool(cached.get("source_is_paperspace", False))
     else:
         out = flatten_for_render(
             src, user_unit_override=user_unit_override, file_id=file_id,
+            layout_name=layout_name,
         )
         primitives = out.primitives
         bbox = out.bbox
@@ -148,6 +158,8 @@ def _preprocess_worker(
         insunits = out.insunits
         applied_scale = out.applied_scale
         recover_notes = out.recover_notes
+        source_layout = out.source_layout
+        source_is_paperspace = out.source_is_paperspace
 
     # 2. Apply layer filter (None = legacy, keep everything).
     if selected_layers is not None:
@@ -163,6 +175,7 @@ def _preprocess_worker(
                 "selected_layers": (
                     list(selected_layers) if selected_layers is not None else None
                 ),
+                "source_layout": source_layout,
             },
             f,
         )
@@ -277,6 +290,8 @@ def _preprocess_worker(
         "user_unit_override_requested": user_unit_override,
         "prematch_total": sum(len(v) for v in by_class.values()),
         "dxf_recover_notes": recover_notes,
+        "source_layout": source_layout,
+        "source_is_paperspace": source_is_paperspace,
     }
 
 
@@ -297,19 +312,29 @@ def submit_preprocess(
     selected_layers: list[str] | None = None,
     user_unit_override: str | None = None,
     product_id: str | None = None,
+    layout_name: str | None = None,
 ) -> str:
     """Submit a preprocess job. When `user_unit_override` is None,
     the worker reads the file row's persisted override (set in a
     prior viewer-picker action). Callers that came in via the
     `/unit-override` endpoint pass the new unit explicitly so the
-    job picks it up even before the row write commits."""
+    job picks it up even before the row write commits.
+
+    `layout_name` (which AutoCAD tab to render) is resolved the same
+    way: None falls back to the row's persisted `chosen_layout`, so a
+    file that was bound to a paper-space layout keeps rendering that
+    layout across every re-preprocess (library swap, unit override,
+    reprocess-all)."""
     # Worker runs in a separate process and can't trivially read the
-    # row, so resolve the active override here and pass it through.
-    if user_unit_override is None:
+    # row, so resolve the active override + chosen layout here.
+    if user_unit_override is None or layout_name is None:
         from app.files import FILE_STORE
         rec = FILE_STORE.get(file_id)
         if rec is not None:
-            user_unit_override = rec.user_unit_override
+            if user_unit_override is None:
+                user_unit_override = rec.user_unit_override
+            if layout_name is None:
+                layout_name = rec.chosen_layout
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
@@ -338,6 +363,7 @@ def submit_preprocess(
         _current_dev_overrides() or None,
         user_unit_override,
         product_id,
+        layout_name,
     )
     fut.add_done_callback(lambda f: _on_preprocess_done(job_id, f))
     with _lock:
@@ -381,6 +407,7 @@ def submit_unit_override_preprocess(file_id: str, unit: str) -> str:
         selected_layers=rec.selected_layers,
         user_unit_override=unit,
         product_id=rec.product_id,
+        layout_name=rec.chosen_layout,
     )
 
 
@@ -422,6 +449,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
             applied_scale=float(result.get("applied_scale", 1.0)),
         )
         FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
+        _persist_source_layout(file_id, result)
         if factor_changed:
             _invalidate_match_after_rescale(file_id)
         _maybe_clear_redundant_unit_override(file_id, result)
@@ -462,6 +490,21 @@ def _invalidate_match_after_rescale(file_id: str) -> None:
     FILE_STORE.set_match_saved(file_id, False)
 
 
+def _persist_source_layout(file_id: str, result: dict[str, Any]) -> None:
+    """Auto-stamp the file's `chosen_layout` when preprocess rendered from a
+    paper-space layout (modelspace was empty, so flatten fell back to a
+    layout tab). This pins the tab for every future re-preprocess (library
+    swap, unit override, reprocess-all) and feeds the dashboard's
+    "tab: <name>" badge. Modelspace sources leave `chosen_layout` untouched
+    so NULL stays the clean default for normal files."""
+    from app.files import FILE_STORE
+    if not result.get("source_is_paperspace"):
+        return
+    source_layout = result.get("source_layout")
+    if source_layout:
+        FILE_STORE.set_chosen_layout(file_id, source_layout)
+
+
 def _maybe_clear_redundant_unit_override(file_id: str, result: dict[str, Any]) -> None:
     """If the operator's override matches what the detector would have
     chosen anyway, persist `user_unit_override = NULL` so future
@@ -485,25 +528,116 @@ def _maybe_clear_redundant_unit_override(file_id: str, result: dict[str, Any]) -
 
 
 # ---- Discover-layers worker (Phase 1) ------------------------------------
+def _build_layout_picker(
+    src: str,
+    file_id: str,
+    preview: Path,
+    content_layouts: list[dict[str, Any]],
+) -> int:
+    """Render one SVG thumbnail per candidate AutoCAD tab and write the
+    layout manifest. Used only when a DXF's geometry lives in >1 paper-space
+    layout (model space empty) and the operator must choose which tab to
+    load. Returns the number of tabs actually offered.
+
+    Each candidate is flattened and tabs that produce ZERO primitives are
+    dropped — the `entity_count` proxy can flag a tab as "content" that
+    renders empty (e.g. TEXT-only under TextPolicy.IGNORE), and offering a
+    blank tab is a dead-end. The manifest is written only when at least two
+    tabs render something; otherwise nothing is written and the caller falls
+    through to layer discovery on the auto-resolved tab (return value < 2
+    signals this). Manifest + thumbnails live in the `layouts/` subdir so
+    they survive the later layer-discovery rewrite (which only touches files
+    in the parent dir) — letting the operator re-open the picker."""
+    from app.dxf import flatten_for_render, render_layer_svg, sanitize_layer_name
+
+    rendered_entries: list[tuple[str, dict[str, Any]]] = []
+    for layout in content_layouts:
+        name = layout["name"]
+        rendered = flatten_for_render(src, file_id=file_id, layout_name=name)
+        if not rendered.primitives:
+            continue  # renders empty — not a useful pick
+        safe = sanitize_layer_name(name)
+        svg = render_layer_svg(
+            rendered.primitives,
+            list(range(len(rendered.primitives))),
+            rendered.bbox,
+            background=rendered.background,
+        )
+        rendered_entries.append((svg, {
+            "name": name,
+            "safe_name": safe,
+            "svg_filename": f"{safe}.svg",
+            "entity_count": layout["entity_count"],
+            "is_paperspace": layout["is_paperspace"],
+        }))
+    if len(rendered_entries) < 2:
+        # Not genuinely ambiguous — don't write a manifest (keeps
+        # has_layout_options false and lets the worker proceed normally).
+        return len(rendered_entries)
+    layouts_dir = preview / "layouts"
+    layouts_dir.mkdir(parents=True, exist_ok=True)
+    for svg, entry in rendered_entries:
+        (layouts_dir / entry["svg_filename"]).write_text(svg)
+    manifest = {"file_id": file_id, "layouts": [e for _, e in rendered_entries]}
+    (layouts_dir / "layouts.json").write_text(json.dumps(manifest))
+    return len(rendered_entries)
+
+
 def _discover_layers_worker(
     file_id: str,
     src: str,
     preview_dir: str,
+    layout_name: str | None = None,
 ) -> dict[str, Any]:
     """Parse a DXF once, render per-layer SVG thumbnails, and persist the
-    full primitive set for Phase 2 reuse. Returns a manifest summary."""
+    full primitive set for Phase 2 reuse. Returns a manifest summary.
+
+    `layout_name` selects which AutoCAD tab to flatten (None = auto: model
+    space, or the richest paper-space layout when model space is empty).
+
+    Layout gate: when the operator has NOT already picked a tab
+    (`layout_name is None`) and auto-resolution fell back to a paper-space
+    layout (`out.source_is_paperspace`), we check whether the geometry is
+    spread across more than one paper-space layout. If so this is genuinely
+    ambiguous — we render a layout picker and return `needs_layout_pick`
+    instead of a layer manifest, so the file parks in `awaiting_layout`.
+    A single content layout is unambiguous: auto-resolution already chose
+    it, so we proceed straight to layer discovery. This keeps the common
+    case (geometry in model space) at exactly one DXF open with zero extra
+    work — the enumerate probe only runs on the paper-space-fallback path."""
     from app.dxf import (
+        enumerate_layouts,
         flatten_for_render,
         group_primitives_by_layer,
         render_layer_svg,
         sanitize_layer_name,
     )
 
-    out = flatten_for_render(src, file_id=file_id)
-    by_layer = group_primitives_by_layer(out.primitives)
+    out = flatten_for_render(src, file_id=file_id, layout_name=layout_name)
 
     preview = Path(preview_dir)
     preview.mkdir(parents=True, exist_ok=True)
+
+    if layout_name is None and out.source_is_paperspace:
+        inventory = enumerate_layouts(src, file_id=file_id)
+        content_paper = [
+            L for L in inventory
+            if L["is_paperspace"] and L["entity_count"] > 0
+        ]
+        # `_build_layout_picker` flattens each candidate and only commits a
+        # manifest when >= 2 tabs actually render; a return < 2 means the
+        # ambiguity dissolved (viewport-/text-only tabs), so fall through to
+        # layer discovery on the already auto-resolved tab (`out`).
+        if len(content_paper) >= 2:
+            n = _build_layout_picker(src, file_id, preview, content_paper)
+            if n >= 2:
+                return {
+                    "file_id": file_id,
+                    "needs_layout_pick": True,
+                    "layout_count": n,
+                }
+
+    by_layer = group_primitives_by_layer(out.primitives)
 
     # Per-layer SVG thumbnails.
     layers: list[dict[str, Any]] = []
@@ -526,12 +660,14 @@ def _discover_layers_worker(
         "layers": layers,
         "bbox": list(out.bbox) if out.bbox else None,
         "background": out.background,
+        "source_layout": out.source_layout,
     }
     (preview / "layers.json").write_text(json.dumps(manifest))
 
     # Transient primitives cache — Phase 2 picks it up to skip re-parsing.
     # The `recover_notes` carry-over lets Phase 2 persist the audit summary
-    # without re-opening the DXF when it reuses this cache.
+    # without re-opening the DXF when it reuses this cache; `source_layout`
+    # lets Phase 2 stamp the "tab: <name>" badge without re-opening either.
     (preview / "primitives.json").write_text(json.dumps({
         "primitives": out.primitives,
         "bbox": out.bbox,
@@ -539,6 +675,8 @@ def _discover_layers_worker(
         "insunits": out.insunits,
         "applied_scale": out.applied_scale,
         "recover_notes": out.recover_notes,
+        "source_layout": out.source_layout,
+        "source_is_paperspace": out.source_is_paperspace,
     }))
 
     return {
@@ -546,12 +684,24 @@ def _discover_layers_worker(
         "layer_count": len(layers),
         "bbox": out.bbox,
         "background": out.background,
+        "source_layout": out.source_layout,
     }
 
 
-def submit_discover_layers(file_id: str) -> str:
+def submit_discover_layers(file_id: str, layout_name: str | None = None) -> str:
     """Kick off Phase 1 in the worker pool. The file moves to
-    `awaiting_layers` once the manifest is ready."""
+    `awaiting_layers` once the manifest is ready — or to `awaiting_layout`
+    when the worker detects geometry spread across multiple paper-space
+    layouts and needs the operator to pick a tab first.
+
+    `layout_name` is resolved from the file row's persisted `chosen_layout`
+    when None, so a re-run after a layout pick (or for a tab-bound file)
+    renders the right tab and skips the picker gate."""
+    if layout_name is None:
+        from app.files import FILE_STORE
+        rec = FILE_STORE.get(file_id)
+        if rec is not None:
+            layout_name = rec.chosen_layout
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
@@ -570,6 +720,7 @@ def submit_discover_layers(file_id: str) -> str:
         file_id,
         str(upload_path(file_id)),
         str(layer_preview_dir(file_id)),
+        layout_name,
     )
     fut.add_done_callback(lambda f: _on_discover_done(job_id, f))
     with _lock:
@@ -579,7 +730,7 @@ def submit_discover_layers(file_id: str) -> str:
 
 
 def _on_discover_done(job_id: str, fut: Future) -> None:
-    from app.files import AWAITING_LAYERS, ERROR, FILE_STORE
+    from app.files import AWAITING_LAYERS, AWAITING_LAYOUT, ERROR, FILE_STORE
     with _lock:
         job = _jobs.get(job_id)
     if job is None:
@@ -599,7 +750,12 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
         job["status"] = "done"
         job["completed_at"] = time.time()
         job["result"] = result
-    FILE_STORE.update_status(file_id, AWAITING_LAYERS)
+    # Geometry spread across multiple paper-space layouts → park for a tab
+    # pick; otherwise proceed to the normal layer-selection gate.
+    if result.get("needs_layout_pick"):
+        FILE_STORE.update_status(file_id, AWAITING_LAYOUT)
+    else:
+        FILE_STORE.update_status(file_id, AWAITING_LAYERS)
 
 
 # ---- Rule-check worker ---------------------------------------------------
@@ -989,6 +1145,7 @@ def _on_save_match_done(job_id: str, fut: Future) -> None:
 # prematch/{file_id}.json get rewritten.
 _REPROCESS_SKIP_STATUSES = frozenset({
     "discovering_layers",
+    "awaiting_layout",
     "awaiting_layers",
     "error",
 })
@@ -1048,6 +1205,7 @@ def submit_reprocess_all(
             overrides_snap,           # dev_overrides_snapshot
             rec.user_unit_override,   # honour the operator's unit, skip the detector
             rec.product_id,           # load product-scoped templates for pre-match
+            rec.chosen_layout,        # keep rendering the operator's chosen tab
         )
         fut.add_done_callback(
             lambda f, fid=rec.id, pid=parent_id: _on_reprocess_step_done(pid, fid, f)
@@ -1080,6 +1238,7 @@ def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
         applied_scale=float(result.get("applied_scale", 1.0)),
     )
     FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
+    _persist_source_layout(file_id, result)
     if factor_changed:
         _invalidate_match_after_rescale(file_id)
     _maybe_clear_redundant_unit_override(file_id, result)

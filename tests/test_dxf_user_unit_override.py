@@ -211,15 +211,19 @@ def test_submit_unit_override_preprocess_writes_row_immediately(tmp_path, monkey
     fs.register("ovx", "o.dxf", 1)
     # Stub submit_preprocess so we don't actually spin up a worker.
     captured = {}
-    def fake_submit(file_id, library_id="default", selected_layers=None, user_unit_override=None, product_id=None):
+    def fake_submit(file_id, library_id="default", selected_layers=None,
+                    user_unit_override=None, product_id=None, layout_name=None):
         captured["file_id"] = file_id
         captured["unit"] = user_unit_override
+        captured["layout_name"] = layout_name
         return "fake-job-id"
     monkeypatch.setattr(jobs, "submit_preprocess", fake_submit)
 
     job_id = jobs.submit_unit_override_preprocess("ovx", "inch")
     assert job_id == "fake-job-id"
-    assert captured == {"file_id": "ovx", "unit": "inch"}
+    # chosen_layout is NULL for this model-space file, so it threads through
+    # as None alongside the override.
+    assert captured == {"file_id": "ovx", "unit": "inch", "layout_name": None}
     rec = fs.get("ovx")
     assert rec.user_unit_override == "inch"
     assert rec.status == PREPROCESSING

@@ -7,6 +7,9 @@
        layers.json
        <safe_name>.svg
        primitives.json                — transient: full primitives for Phase 2
+       layouts/                       — AutoCAD-tab picker assets (only when
+         layouts.json                   a DXF's geometry lives in >1 paper-
+         <safe_name>.svg                space layout — see app.jobs)
      library.sqlite                   — templates + file metadata
 """
 
@@ -63,3 +66,19 @@ def layer_preview_svg_path(file_id: str, safe_name: str) -> Path:
 def layer_preview_primitives_path(file_id: str) -> Path:
     """Transient — written by Phase 1, deleted by Phase 2 on success."""
     return layer_preview_dir(file_id) / "primitives.json"
+
+
+# ---- Layout (AutoCAD-tab) picker assets ----------------------------------
+# Lives in a subdir of the layer-preview dir so a single cleanup of
+# layer_preview/{file_id}/ removes both. Subdir keeps layout SVGs from
+# colliding with layer SVGs (a layout could share a layer's name).
+def layout_preview_dir(file_id: str) -> Path:
+    return layer_preview_dir(file_id) / "layouts"
+
+
+def layout_manifest_path(file_id: str) -> Path:
+    return layout_preview_dir(file_id) / "layouts.json"
+
+
+def layout_preview_svg_path(file_id: str, safe_name: str) -> Path:
+    return layout_preview_dir(file_id) / f"{safe_name}.svg"
