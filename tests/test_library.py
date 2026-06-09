@@ -114,17 +114,17 @@ def test_new_class_defaults_to_chamfer(tmp_db):
 
 
 def test_large_outline_classes_default_to_signature(tmp_db):
-    """Substrate / LidOuter / LidInner seed as signature with bbox_ratio
+    """Substrate / RingOuter / RingInner seed as signature with bbox_ratio
     0.0001 — their large sharp-cornered boundary is matched by size + aspect,
     not chamfer (which is winding / start-vertex sensitive). Persists across a
     store reload."""
     lib = _default_lib(tmp_db)
-    for c in ("Substrate", "LidOuter", "LidInner"):
+    for c in ("Substrate", "RingOuter", "RingInner"):
         assert lib.strategy_of(c) == ("signature", 0.0001)
     # Reload: the seeded default sticks (and is not re-clobbered by the boot
     # migration, which only touches untouched chamfer/NULL rows).
     lib2 = _default_lib(tmp_db)
-    for c in ("Substrate", "LidOuter", "LidInner"):
+    for c in ("Substrate", "RingOuter", "RingInner"):
         assert lib2.strategy_of(c) == ("signature", 0.0001)
 
 
@@ -480,7 +480,7 @@ def test_is_product_scoped_partition():
     """The 8 design-specific classes return True; library-scoped classes
     (SMD/Fiducial/Pin-1/2DBarcode) and arbitrary custom classes return False."""
     for cls in (
-        "Substrate", "Lid", "LidOuter", "LidInner", "DieArea",
+        "Substrate", "Lid", "RingOuter", "RingInner", "DieArea",
         "C4Ball", "BGABall", "Protrusion",
     ):
         assert is_product_scoped(cls) is True, cls

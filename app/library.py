@@ -37,8 +37,8 @@ DEFAULT_CLASSES: list[str] = [
     "Substrate",
     "Pin-1",
     "Lid",
-    "LidOuter",
-    "LidInner",
+    "RingOuter",
+    "RingInner",
     "DieArea",
     "DAM1",
     "DAM2",
@@ -82,8 +82,8 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side", "DAM"})
 # DAM1 / DAM2 are the encapsulation dam rings — same large-outline rationale.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
     "Substrate": ("signature", 0.0001),
-    "LidOuter":  ("signature", 0.0001),
-    "LidInner":  ("signature", 0.0001),
+    "RingOuter": ("signature", 0.0001),
+    "RingInner": ("signature", 0.0001),
     "Pin-1":     ("signature", 0.0005),
     "DieArea":   ("signature", 0.0005),
     "DAM1":      ("signature", 0.0005),
@@ -98,8 +98,8 @@ CLASS_JSON_KEY: dict[str, str] = {
     "Substrate":      "substrate",
     "Pin-1":          "pin_1",
     "Lid":            "lid",
-    "LidOuter":       "lid_outer",
-    "LidInner":       "lid_inner",
+    "RingOuter":      "ring_outer",
+    "RingInner":      "ring_inner",
     "DieArea":        "die_area",
     "DAM1":           "dam1",
     "DAM2":           "dam2",
@@ -124,11 +124,16 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
     "smd":           "SMD-2T",
     "substrate":     "Substrate",
     "die_area":      "DieArea",
-    "lid_outer":     "LidOuter",
-    "lid_inner":     "LidInner",
+    "lid_outer":     "RingOuter",
+    "lid_inner":     "RingInner",
     "bga_ball":      "BGABall",
     "pin_mark":      "Pin-1",
     "2d_barcode":    "2DBarcode",
+    # LidOuter / LidInner were renamed to RingOuter / RingInner on 2026-06-09.
+    # Rewrite existing class rows AND their templates in place (the rename
+    # pass touches both tables), so saved Ring templates survive the rename.
+    "LidOuter":      "RingOuter",
+    "LidInner":      "RingInner",
 }
 
 
@@ -186,8 +191,8 @@ def is_allowed_view(class_name: str, view: str | None) -> bool:
 PRODUCT_SCOPED_CLASSES: frozenset[str] = frozenset({
     "Substrate",
     "Lid",
-    "LidOuter",
-    "LidInner",
+    "RingOuter",
+    "RingInner",
     "DieArea",
     "C4Ball",
     "BGABall",
@@ -222,8 +227,8 @@ CLASS_CATEGORY: dict[str, str] = {
     "DAM1":           "structure",
     "DAM2":           "structure",
     "Lid":            "structure",
-    "LidOuter":       "structure",
-    "LidInner":       "structure",
+    "RingOuter":      "structure",
+    "RingInner":      "structure",
     "Protrusion":     "structure",
     "C4Ball":         "balls",
     "BGABall":        "balls",
@@ -571,7 +576,7 @@ class Store:
                 )
 
         # Apply code-declared default match config for built-in large-outline
-        # classes (Substrate / LidOuter / LidInner -> signature). Only convert
+        # classes (Substrate / RingOuter / RingInner -> signature). Only convert
         # rows still in the pristine chamfer/NULL state; an explicit signature
         # config set in the UI (any bbox_ratio) is preserved. Idempotent: once
         # a row is signature the WHERE no longer matches it.

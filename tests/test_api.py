@@ -505,7 +505,7 @@ def test_class_listing_includes_strategy_fields():
         assert classes, "library should be seeded with default classes"
         for c in classes:
             # Most classes default to chamfer/None; the large-outline classes
-            # (Substrate / LidOuter / LidInner) seed as their signature default.
+            # (Substrate / RingOuter / RingInner) seed as their signature default.
             strat, ratio = CLASS_DEFAULT_MATCH_CONFIG.get(
                 c["name"], ("chamfer", None)
             )
