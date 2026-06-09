@@ -1,0 +1,95 @@
+# Product 版本管理規劃（同一 product、多版號）
+
+> 狀態：**討論中、尚未實作**。本文是決策文件（design / open questions），不是施工單。
+> 最後更新：2026-06-09。分支：`product-versioning`。
+> 待下方 §3 的問題與 user 定案後，才會收斂成 OpenSpec change（propose-first）。
+
+本文回答一個問題：**同一個 product 會有不同版本（圖紙小改），user 要能輸入版號 —— 資料模型怎麼設計、有哪些要先跟 user 確認的決策。**
+
+---
+
+## 0. 現況
+
+- 儲存全在 `data/library.sqlite`，階層 `library → product → {templates, files}`。
+- 相關 table：
+  - `products (id, name, library_id, created_at)`
+  - `templates (id, library_id, class_name, entity_point_sets[JSON], centroid, bbox, product_id, created_at)`
+  - `files (id=content-hash, product_id, library_id, role∈{SBT,BD,POD,RING,LID})`
+- template 有**兩層 scope**：
+  - **library-scoped**（`product_id IS NULL`）— 跨所有 product 共用的標準件（如 BGABall）。
+  - **product-scoped**（`product_id = X`）— 綁單一 product（Substrate / Ring / DieArea …），從該 product 圖紙框選而來。
+- rule 邏輯不存 DB（外部團隊的 stub）；rule 結果存 `data/rule_check/{product_id}.json`。
+- **目前完全沒有 version / snapshot 概念。**
+
+## 1. 需求（來自討論）
+
+- 同一個 product 會有不同版本。
+- user 要能在選 product 後**輸入版號**。
+- 已知事實（user 確認）：
+  - **要檢查的 rules 跨版本不變。**
+  - **圖紙每版只改一兩個小東西。**
+
+## 2. 已定案（內部討論，2026-06-09）
+
+1. **版本不是不同 product。** rules 不變 → 規則屬 product 身分層級；變的只是比對基準。做成獨立 product 會把固定 rules 複製 N 份 → drift。
+2. **儲存用整組快照（方式 A）**，不做 base+diff。版本數頂多 ~20，快照最穩；要看「改了什麼」就兩版即時 diff，不預建 diff 結構。
+3. **rules 掛 product、跨版共用；version 只換比對基準。** 若日後有人要「按版本改規則」→ 擋下,那要走的是開新 product。
+4. 模型雛形：
+   ```
+   library → product (身分 + 固定 rules)
+                └─ version (版號 + 該版快照)
+   ```
+   schema 動作預估：新增 `versions(id, product_id, label, created_at)`；product-scoped 的 templates/files 改掛 `version_id`；library-scoped 維持 `product_id IS NULL` 不動；rule 結果從 `{product_id}.json` 改成 `{version_id}.json`。
+
+---
+
+## 3. 待跟 user 討論的問題
+
+> 以下每題都會影響 schema / UI / 遷移，請逐題拍板。
+
+### Q1.（最關鍵）版本到底換掉什麼？
+系統裡「圖紙」= 上傳的 **role-bound DXF files（SBT/BD/POD/RING/LID）**；**product-scoped templates** 是從這些圖紙框選出的參考幾何。換版時：
+- (a) files 換新的、對應的 product-scoped templates 也一起重抽？（兩者綁在一起當一份快照）
+- (b) 只換 files，templates 想跨版沿用？
+- (c) 其他情形？
+→ **這題決定 `version_id` 掛在哪幾張 table。**
+
+### Q2. library-scoped 標準件（共用件）確定版本無關？
+BGABall 等共用範本目前跨 product 共用。版本切換時這些**完全不動**，對嗎？還是某些共用件也可能隨版本變？
+
+### Q3. 版號的格式與輸入規則
+- 自由輸入文字（如 `v1.0`、`A`、`2026-06`）還是固定格式？
+- 系統自動遞增，還是純人工輸入？
+- 同一 product 內版號**可否重複**？重複時報錯還是覆蓋？
+
+### Q4. 舊版的保留與生命週期
+- 舊版要**永久保留**還是只留最近 N 版？
+- 舊版可否刪除？刪除權限？
+- 要能**回看舊版**的 match / rule 結果嗎？（影響結果檔要不要也版本化、UI 要不要版本切換）
+
+### Q5. 建新版的起點
+建立新版時，要不要從**上一版複製**（templates + files）當起點、再讓 user 改那一兩個小東西？還是每版從零上傳全部角色檔？
+→ 「只改一兩個小東西」強烈暗示要 clone 起點，但請 user 確認操作習慣。
+
+### Q6. 跨版本比較需求
+有沒有「v1 ↔ v2 差在哪」的需求？若有，是現在就要（影響 UI），還是先不做、未來再加？
+
+### Q7. 新 product 的第一版
+新建 product 時自動建一個預設版（如 `v1`），還是 product 可以「沒有任何版本」的空狀態存在？
+
+### Q8. 與權限模型的關係（連動 `auth-permissions.md`）
+auth 規劃裡 **editor 綁特定 product**。版本上線後：
+- editor 是綁到 **product**（能改所有版本）還是綁到**特定版本**？
+- 既有的 product 級編輯鎖（pessimistic lock）要不要下放到版本級？
+
+### Q9. 既有資料遷移
+目前已有的 product / templates / files / rule 結果都沒有版本。上線時：
+- 把既有資料**全部歸到一個預設版（如 `v1`）**嗎？
+- rule 結果檔 `{product_id}.json` → `{version_id}.json` 的搬遷由 migration 自動處理？
+
+---
+
+## 4. 下一步
+
+- §3 各題定案 → 收斂成 OpenSpec change（schema 變更 + 遷移 + API + UI）。
+- 在那之前**不動 code**。
