@@ -22,48 +22,50 @@ deletable.
 
 ### Requirement: Default class seeding
 
-Every newly-created library SHALL be seeded with the following 17
+Every newly-created library SHALL be seeded with the following 19
 canonical IC-packaging classes, in this order, and the order SHALL
 be the toolbar / class-list order surfaced in the UI:
 
 1. `Substrate`
 2. `Pin-1`
 3. `Lid`
-4. `LidOuter`
-5. `LidInner`
+4. `RingOuter`
+5. `RingInner`
 6. `DieArea`
-7. `FiducialCircle`
-8. `FiducialCross`
-9. `FiducialSquare`
-10. `SMD-2T`
-11. `C4Ball`
-12. `BGABall`
-13. `Protrusion`
-14. `2DBarcode`
-15. `SMD-3T`
-16. `SMD-8T`
-17. `SMD-14T`
+7. `DAM1`
+8. `DAM2`
+9. `FiducialCircle`
+10. `FiducialCross`
+11. `FiducialSquare`
+12. `SMD-2T`
+13. `C4Ball`
+14. `BGABall`
+15. `Protrusion`
+16. `2DBarcode`
+17. `SMD-3T`
+18. `SMD-8T`
+19. `SMD-14T`
 
 The trailing three SMD variants (`SMD-3T`, `SMD-8T`, `SMD-14T`)
 SHALL be members of the viewer's collapsed-toolbar fold group so
 the toolbar stays compact by default.
 
-Two classes that previously appeared in the seed list SHALL be
+Three classes that previously appeared in the seed list SHALL be
 deprecated and SHALL NOT be seeded into any new or existing
 library: `FiducialMark` (superseded by the
-`FiducialCircle` / `FiducialCross` / `FiducialSquare` family) and
-`Side` (unused in practice).
+`FiducialCircle` / `FiducialCross` / `FiducialSquare` family),
+`Side` (unused in practice), and `DAM` (split into `DAM1` / `DAM2`).
 
-#### Scenario: New library has the 17 default classes in canonical order
+#### Scenario: New library has the 19 default classes in canonical order
 - **WHEN** the user creates a new library via `POST /api/libraries`
-- **THEN** `GET /api/libraries/{id}/classes` returns the 17 names listed above
+- **THEN** `GET /api/libraries/{id}/classes` returns the 19 names listed above
 - **AND** the names appear in the listed order (Substrate first, SMD-14T last)
 - **AND** `C4Ball` appears immediately before `BGABall`
 - **AND** `FiducialSquare` appears immediately after `FiducialCross`
 
 #### Scenario: Deprecated classes are not seeded
 - **WHEN** a new library is created
-- **THEN** the returned class list contains neither `FiducialMark` nor `Side`
+- **THEN** the returned class list contains none of `FiducialMark`, `Side`, or `DAM`
 
 #### Scenario: Existing library converges to the new defaults on boot
 - **WHEN** a Store boots against a DB whose `default` library still has the
@@ -147,7 +149,7 @@ a template's scope.
 
 ### Requirement: Per-class storage scope (library vs. product)
 
-The library SHALL partition its 17 default classes into two
+The library SHALL partition its 19 default classes into two
 storage-scope tiers via a module-level constant
 `library.PRODUCT_SCOPED_CLASSES: frozenset[str]`.
 
@@ -157,14 +159,14 @@ sharing the same library:
 
 - `Substrate`
 - `Lid`
-- `LidOuter`
-- `LidInner`
+- `RingOuter`
+- `RingInner`
 - `DieArea`
 - `C4Ball`
 - `BGABall`
 - `Protrusion`
 
-**Library-scoped (the remaining 9 defaults plus any custom user
+**Library-scoped (the remaining 11 defaults plus any custom user
 class)** — templates SHALL be stored per-library and SHALL be visible
 to every product bound to that library:
 
@@ -172,6 +174,7 @@ to every product bound to that library:
 - `FiducialCircle`, `FiducialCross`, `FiducialSquare`
 - `Pin-1`
 - `2DBarcode`
+- `DAM1`, `DAM2`
 - any class added by the user that is not in `PRODUCT_SCOPED_CLASSES`
 
 The system SHALL expose a helper
@@ -187,8 +190,8 @@ choose the scope independently of the class.
 
 #### Scenario: Helper reflects the partition
 - **WHEN** `is_product_scoped` is called for `"Substrate"`, `"C4Ball"`,
-  `"BGABall"`, `"DieArea"`, `"Protrusion"`, `"Lid"`, `"LidOuter"`, or
-  `"LidInner"`
+  `"BGABall"`, `"DieArea"`, `"Protrusion"`, `"Lid"`, `"RingOuter"`, or
+  `"RingInner"`
 - **THEN** it returns `True`
 - **AND** for `"SMD-2T"`, `"FiducialCircle"`, `"FiducialSquare"`,
   `"Pin-1"`, `"2DBarcode"`, or any custom class name
@@ -362,9 +365,11 @@ to use the display ID.
 | `Substrate`      | `substrate`       |
 | `Pin-1`          | `pin_1`           |
 | `Lid`            | `lid`             |
-| `LidOuter`       | `lid_outer`       |
-| `LidInner`       | `lid_inner`       |
+| `RingOuter`      | `ring_outer`      |
+| `RingInner`      | `ring_inner`      |
 | `DieArea`        | `die_area`        |
+| `DAM1`           | `dam1`            |
+| `DAM2`           | `dam2`            |
 | `FiducialCircle` | `fiducial_circle` |
 | `FiducialCross`  | `fiducial_cross`  |
 | `FiducialSquare` | `fiducial_square` |
@@ -657,7 +662,7 @@ The default categorisation SHALL be:
 
 | Category key | Label | Members |
 |---|---|---|
-| `structure` | Structure | Substrate, DieArea, DAM, Lid, LidOuter, LidInner, Protrusion |
+| `structure` | Structure | Substrate, DieArea, DAM1, DAM2, Lid, RingOuter, RingInner, Protrusion |
 | `balls` | Balls & Bumps | C4Ball, BGABall |
 | `smd` | SMD Pads | SMD-2T, SMD-3T, SMD-8T, SMD-14T |
 | `marks` | Fiducials & Marks | FiducialCircle, FiducialCross, FiducialSquare, Pin-1, 2DBarcode |
@@ -674,9 +679,9 @@ The default categorisation SHALL be:
 - **THEN** its keys are exactly `["structure", "balls", "smd", "marks"]` in that order
 - **AND** each entry carries a non-empty display label
 
-#### Scenario: DAM is structural and fiducials and marks are merged
+#### Scenario: DAM rings are structural and fiducials and marks are merged
 - **WHEN** reading `CLASS_CATEGORY`
-- **THEN** `CLASS_CATEGORY["DAM"]` is `"structure"`
+- **THEN** `CLASS_CATEGORY["DAM1"]` and `CLASS_CATEGORY["DAM2"]` are `"structure"`
 - **AND** `CLASS_CATEGORY["Pin-1"]` and `CLASS_CATEGORY["2DBarcode"]` are `"marks"`
 - **AND** the three `Fiducial*` classes also map to `"marks"`
 

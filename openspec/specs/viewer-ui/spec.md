@@ -1498,7 +1498,7 @@ The panels SHALL preserve existing per-button behaviour: the collapse of `COLLAP
 - **WHEN** the viewer loads a library seeded with the default classes
 - **THEN** the left panel shows the Structure, Balls & Bumps, and SMD Pads groups (plus an "Other" group only if uncategorised classes exist)
 - **AND** the right panel shows the Fiducials & Marks group (Pin-1, the three Fiducial classes, 2DBarcode)
-- **AND** DAM appears under the left panel's Structure group
+- **AND** DAM1 and DAM2 appear under the left panel's Structure group
 
 #### Scenario: SMD variants collapse within their group
 - **WHEN** the toolbar is not expanded

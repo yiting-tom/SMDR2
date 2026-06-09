@@ -194,9 +194,10 @@ DXF 內部統一用 snake_case key：
 | `substrate` | 基板輪廓 |
 | `pin_1` | 1 號接腳標示 |
 | `lid` | 封裝蓋板（整體） |
-| `lid_outer` | 蓋板外輪廓 |
-| `lid_inner` | 蓋板內輪廓 |
+| `ring_outer` | 環外輪廓 |
+| `ring_inner` | 環內輪廓 |
 | `die_area` | 晶粒區 |
+| `dam1` / `dam2` | 封裝壩（內 / 外） |
 | `fiducial_circle` | 圓形對位標 |
 | `fiducial_cross` | 十字對位標 |
 | `smd_2t` / `smd_3t` / `smd_8t` / `smd_14t` | 對應接點數的 SMD |
