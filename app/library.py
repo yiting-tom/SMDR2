@@ -74,11 +74,14 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
 # Pin-1 is not a large loop but a small orientation mark; it gets signature
 # mode too (matched on size + aspect, not chamfer) with a more generous
 # bbox_ratio so minor per-instance mark variation still matches.
+# DieArea is the die-area boundary loop — same large-rigid-outline rationale;
+# the 0.0005 bbox_ratio leaves headroom for minor per-instance size variation.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
     "Substrate": ("signature", 0.0001),
     "LidOuter":  ("signature", 0.0001),
     "LidInner":  ("signature", 0.0001),
     "Pin-1":     ("signature", 0.0005),
+    "DieArea":   ("signature", 0.0005),
 }
 
 
