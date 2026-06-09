@@ -108,13 +108,6 @@ class RenderOutput:
     source_is_paperspace: bool = False
 
 
-# Expected packaging-design diagonal range (mm) for the unitless path of
-# `detect_scale_factor`. A factor M is accepted iff
-# `original_diagonal * M ∈ [EXPECTED_LOW, EXPECTED_HIGH]`.
-EXPECTED_DIAGONAL_LOW_MM = 10.0
-EXPECTED_DIAGONAL_HIGH_MM = 5000.0
-
-
 # Maps the operator-facing unit-override strings (persisted in
 # `files.user_unit_override`) to the multiplier that brings coordinates
 # in that unit into mm. When an override is set, `_maybe_rescale` skips
@@ -133,71 +126,21 @@ SCALE_TO_UNIT: dict[float, str] = {v: k for k, v in UNIT_TO_SCALE.items()}
 
 
 def detect_scale_factor(insunits: int | None, bbox_diagonal: float) -> float:
-    """Decide what multiplier to apply so a file's coordinates land in mm.
+    """Always returns `1.0` — automatic unit detection is disabled.
 
-    `applied_scale` semantics: `rescaled_coord = original_coord * factor`.
-    Returns `1.0` when no rescale is needed (or none is safe).
+    Every uploaded DXF is now taken to be authored in mm as-is; the
+    preprocessor never auto-rescales. Only an explicit operator choice in
+    the viewer's unit picker (`files.user_unit_override`) rescales a file,
+    and that path bypasses this function entirely (`_maybe_rescale` reads
+    `UNIT_TO_SCALE` directly). The `insunits` / `bbox_diagonal` arguments
+    are retained for signature stability with existing callers.
 
-    Declared-unit cases trust the INSUNITS header:
-      - 1 (inch) → 25.4
-      - 5 (cm)   → 10.0
-      - 6 (m)    → 1000.0
-      - 4 (mm)   → 1.0 (always trust mm — never auto-rescale)
-
-    Unitless / unknown (`0` or `None`) picks the power-of-10 in
-    `[-4, +4]` that brings the diagonal into the expected packaging
-    range, preferring the factor closest to 1. A one-order-of-magnitude
-    safety guard keeps marginal factors (e.g. ×3, ×7) at `1.0`."""
-    # Declared units are authoritative.
-    if insunits == 1:
-        return 25.4
-    if insunits == 5:
-        return 10.0
-    if insunits == 6:
-        return 1000.0
-    if insunits == 4:
-        return 1.0
-    # Unitless / unknown path. Heuristic only — bail on degenerate inputs.
-    if insunits not in (0, None):
-        return 1.0
-    if not math.isfinite(bbox_diagonal) or bbox_diagonal <= 0:
-        return 1.0
-    # Cap the unitless heuristic at ±3 orders of magnitude (M ∈ [0.001,
-    # 1000]). Bigger factors would cover declared-unit cases (e.g. m → mm
-    # is ×1000) but those bypass this path entirely; extreme-magnitude
-    # unitless rescales (e.g. ×10⁴) are almost always pathology, not a
-    # legitimate unit choice, and the safer behaviour is to leave them
-    # at M=1.0 and let the user see the warning badge.
-    candidates = [10 ** k for k in range(-3, 4)]
-    in_range = [
-        m for m in candidates
-        if EXPECTED_DIAGONAL_LOW_MM <= bbox_diagonal * m <= EXPECTED_DIAGONAL_HIGH_MM
-    ]
-    if not in_range:
-        return 1.0
-    # Prefer M=1.0 (no rescale) when it qualifies — the file is already in
-    # the expected packaging range. Otherwise pick the factor that drives
-    # the diagonal as far down inside the range as possible: packaging
-    # designs cluster in the 1–50 mm chip / 5–200 mm package band, so for
-    # an out-of-range file the aggressive choice (smallest post-rescale
-    # diagonal) is almost always right, and ambiguous cases like
-    # diagonal=6000 → {60, 600} mm pick 60 mm. The price is that a
-    # legitimate 600 mm panel mistakenly stored at 6000 units would be
-    # over-corrected to 60 mm; declared-unit files (mm/cm/m/inch) bypass
-    # this path entirely, so the only risk is genuinely unitless files
-    # which are already a guess.
-    if 1.0 in in_range:
-        best = 1.0
-    else:
-        best = min(in_range, key=lambda m: bbox_diagonal * m)
-    # Safety guard: refuse marginal factors (≤ ±1 order of magnitude) so a
-    # borderline file like a real 5×5 mm dice (diagonal ≈ 7 mm, would
-    # otherwise grab M=10 → 70 mm) stays at 1.0 and falls back to the
-    # existing "suspect" badge for a human. Strictly greater than 1 means
-    # 100×+ rescales pass; 10× rescales don't.
-    if abs(math.log10(best)) <= 1.0:
-        return 1.0
-    return float(best)
+    Previously this inspected `$INSUNITS` and the bbox diagonal to guess a
+    power-of-10 (or inch) correction. That heuristic was removed on
+    2026-06-09: it caused false rescales on legitimate files, and the
+    operator's manual picker is the authoritative override when a file
+    really is in non-mm units."""
+    return 1.0
 
 
 def _scale_primitive_coords(prim: dict[str, Any], factor: float) -> None:

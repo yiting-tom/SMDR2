@@ -103,11 +103,11 @@ def test_none_override_falls_through_to_detector():
 def test_unknown_override_string_falls_through_to_detector():
     """A bad override string (the endpoint already rejects these, but
     defence-in-depth) drops into the detector path so we don't crash
-    inside the rescale helper."""
+    inside the rescale helper. Since auto-detection is disabled the
+    detector returns 1.0 — the file is left as-is."""
     r = _render(0, (0.0, 0.0, 42_000.0, 42_000.0))
     out, factor = _maybe_rescale(r, user_unit_override="feet")
-    # 42_000 diagonal → detector picks 0.001.
-    assert factor == pytest.approx(0.001)
+    assert factor == 1.0
 
 
 # ---- Clear-on-match: override agreeing with detector → NULL ---------------

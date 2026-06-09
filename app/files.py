@@ -204,36 +204,15 @@ class FileRecord:
         }
 
 
-# Unit-scale heuristic. Returns (kind, detail) — kind is None when the
-# file looks fine. Pure function for testability and so the dashboard
-# can render directly off the dict without re-implementing the rule.
-# Thresholds (drawing units):
-#   ≤ 100         — small enough that "unitless" is academic
-#   100..1000     — plausible packaging range
-#   > 1000        — suspect for a packaging file
+# Unit-scale warning — DISABLED. Every file is treated as mm as-authored
+# (see `app.dxf.detect_scale_factor`), so there is nothing to warn about;
+# this always returns `(None, "")`. Kept as a pure function with its old
+# signature so `to_dict` and the dashboard need no changes. Removed the
+# diagonal/INSUNITS heuristic on 2026-06-09 along with auto-rescale.
 def compute_unit_scale_warning(
     insunits: int | None,
     bbox: tuple[float, float, float, float] | None,
 ) -> tuple[str | None, str]:
-    if not bbox:
-        return None, ""
-    xmin, ymin, xmax, ymax = bbox
-    dx = float(xmax) - float(xmin)
-    dy = float(ymax) - float(ymin)
-    if dx <= 0 and dy <= 0:
-        return None, ""
-    import math as _math
-    diagonal = _math.hypot(max(dx, 0.0), max(dy, 0.0))
-    iu = "None" if insunits is None else str(insunits)
-    base = f"INSUNITS={iu}, diagonal={diagonal:.1f}"
-    declared = insunits in (4, 5, 6)  # mm / cm / m
-    if diagonal > 1000:
-        return "suspect_scale", f"{base} — bbox is huge for a packaging design, likely a 1000×-style scale issue"
-    if insunits == 0:
-        if diagonal > 100:
-            return "suspect_scale", f"{base} — declared unitless and bbox is large; treat as suspect"
-        return "unitless", f"{base} — DXF is declared unitless ($INSUNITS=0)"
-    # diagonal ≤ 1000, declared unit (or unknown) → no warning.
     return None, ""
 
 

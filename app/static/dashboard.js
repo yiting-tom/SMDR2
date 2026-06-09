@@ -680,13 +680,11 @@ function appendUnitScaleAnnotation(parent, f) {
     }
     pill.title = title;
     parent.appendChild(pill);
-  } else if (f.unit_scale_warning) {
-    const badge = document.createElement("span");
-    badge.className = "warn-badge";
-    badge.textContent = "⚠ unit";
-    badge.title = f.unit_scale_warning_detail || "";
-    parent.appendChild(badge);
   }
+  // The legacy "⚠ unit" auto-detection warning badge was removed on
+  // 2026-06-09: files are taken as mm as-authored, so there is no
+  // suspect-scale verdict to surface. Only the manual-override rescale
+  // pill above remains.
   // Recover pill — independent of rescale/warning; spec says when both
   // are present render rescale first then recover, which is the order
   // of append calls here. Reuses `.rescaled-pill` for the same neutral

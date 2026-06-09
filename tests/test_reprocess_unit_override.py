@@ -77,29 +77,30 @@ def test_reprocess_all_passes_none_override_for_unset_file(tmp_path, monkeypatch
     assert args[_PRODUCT_ARG] is None
 
 
-def test_startup_migration_excludes_overridden_file(tmp_path, monkeypatch):
-    """A unit-suspect file (detector factor != 1.0, applied_scale == 1.0) that
-    carries an explicit override must NOT be re-queued by the boot migration;
-    an equivalent file without an override still is."""
+def test_startup_migration_is_a_noop_after_auto_rescale_removed(tmp_path, monkeypatch):
+    """Auto-rescale was removed on 2026-06-09 (`detect_scale_factor` is
+    pinned to 1.0), so the boot migration never re-queues anything — not the
+    legacy unitless 1000×-too-big shape it used to catch, nor an
+    override-pinned file."""
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
     monkeypatch.setattr("app.main.FILE_STORE", fs)
 
-    # Both are legacy unitless 1000x-too-big (detector would pick 0.001).
+    # Both are legacy unitless 1000x-too-big — the old migration's target.
     _ready_file(fs, "needs", insunits=0, bbox=(0, 0, 42_000, 42_000))
     _ready_file(fs, "pinned", insunits=0, bbox=(0, 0, 42_000, 42_000))
-    fs.set_user_unit_override("pinned", "mm")  # operator pinned → authority
+    fs.set_user_unit_override("pinned", "mm")
 
-    captured: dict = {}
+    called = {"hit": False}
 
     def fake_submit(file_id_filter=None, *, kind="reprocess-all"):
-        captured["filter"] = set(file_id_filter or ())
+        called["hit"] = True
         return "fake-job-id"
 
     monkeypatch.setattr("app.main.jobs.submit_reprocess_all", fake_submit)
 
     main_mod._submit_unit_rescale_migration()
 
-    assert captured["filter"] == {"needs"}, (
-        "overridden file must be excluded from the auto-rescale migration"
+    assert called["hit"] is False, (
+        "auto-rescale migration must submit nothing once detection is disabled"
     )

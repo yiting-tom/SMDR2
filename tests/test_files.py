@@ -53,34 +53,21 @@ def test_update_parsed_omits_insunits(tmp_db):
     assert d["unit_scale_warning"] is None
 
 
-@pytest.mark.parametrize("insunits,bbox,expected_kind", [
-    # No bbox yet → no warning regardless.
-    (4,    None,                          None),
-    # Tiny bboxes are always fine.
-    (0,    (0, 0, 50, 50),                "unitless"),     # diagonal ~70 > 100? actually ~70.7 < 100 → mild
-    # Wait — 50x50 diagonal = sqrt(5000) ≈ 70.7. Below 100. So this case:
-    # insunits=0, diagonal<100 → "unitless" kind. Keep parametrization
-    # mapped to the diagonal-aware table.
-    # Normal packaging file: mm, diagonal 300 → no warning.
-    (4,    (0, 0, 200, 200),              None),           # diagonal ~283
-    # Declared mm but bbox enormous → suspect.
-    (4,    (0, 0, 30_000, 30_000),        "suspect_scale"),
-    # Unitless, mid-large diagonal → suspect.
-    (0,    (0, 0, 500, 500),              "suspect_scale"),  # diagonal ~707 > 100
-    # Unitless, tiny bbox → mild "unitless".
-    (0,    (0, 0, 30, 30),                "unitless"),       # diagonal ~42 < 100
-    # Legacy NULL insunits, large bbox → suspect.
-    (None, (0, 0, 30_000, 30_000),        "suspect_scale"),
-    # Legacy NULL insunits, mid bbox → no warning (we don't speculate).
-    (None, (0, 0, 200, 200),              None),
+# Unit-scale warnings were removed on 2026-06-09 — every file is treated
+# as mm as-authored, so the warning is never raised for any INSUNITS/bbox.
+@pytest.mark.parametrize("insunits,bbox", [
+    (4,    None),
+    (0,    (0, 0, 50, 50)),
+    (4,    (0, 0, 200, 200)),
+    (4,    (0, 0, 30_000, 30_000)),     # would have been "suspect_scale"
+    (0,    (0, 0, 500, 500)),           # would have been "suspect_scale"
+    (0,    (0, 0, 30, 30)),             # would have been "unitless"
+    (None, (0, 0, 30_000, 30_000)),     # would have been "suspect_scale"
 ])
-def test_unit_scale_warning_heuristic(insunits, bbox, expected_kind):
+def test_unit_scale_warning_always_none(insunits, bbox):
     kind, detail = compute_unit_scale_warning(insunits, bbox)
-    assert kind == expected_kind
-    if kind:
-        # Detail should mention both the raw INSUNITS value and the diagonal.
-        assert "INSUNITS" in detail
-        assert "diagonal" in detail
+    assert kind is None
+    assert detail == ""
 
 
 def test_update_status_error(tmp_db):
