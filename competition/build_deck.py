@@ -395,8 +395,8 @@ steps4 = [
     ("⑥ spectra-archive\n歸檔 + spec 同步", False),
 ]
 bx, by = 0.6, 2.16
-bw, bh = 3.5, 0.84
-hg, vg = 0.55, 0.36
+bw, bh = 3.5, 0.78
+hg, vg = 0.55, 0.3
 pos = {
     0: (bx + 0 * (bw + hg), by),
     1: (bx + 1 * (bw + hg), by),
@@ -425,17 +425,24 @@ for a in (3, 4):
 x, y = pos[5]
 rect(s, x + bw / 2 - 0.13, y - vg + 0.02, 0.26, vg - 0.04, fill=VIOLET, shape=MSO_SHAPE.UP_ARROW)
 
-# tool-stack chips
-tcy = by + 2 * bh + vg + 0.2
-chip(s, 0.6, tcy, 3.3, 0.46, "MCP：codegraph · playwright · discord", NAVY, WHITE, size=11)
-chip(s, 4.05, tcy, 2.55, 0.46, "Skills：spectra 規格流 · add-rule", CYAN8, WHITE, size=10.5)
-chip(s, 6.75, tcy, 3.05, 0.46, "Hooks：RTK 省 ~52% token · auto-sync", RGBColor(0x3A, 0x4A, 0x6A), WHITE, size=11)
-chip(s, 9.95, tcy, 2.78, 0.46, "信任邊界：機密 DXF 不進 context", AMBER, NAVY, size=11)
+# tool-stack chips (row 1) + skill ecosystem band (row 2)
+tcy = by + 2 * bh + vg + 0.14
+chip(s, 0.6, tcy, 3.95, 0.42, "MCP：codegraph · playwright · discord", NAVY, WHITE, size=11)
+chip(s, 4.75, tcy, 3.9, 0.42, "Hooks：RTK 省 ~52% token · auto-sync", RGBColor(0x3A, 0x4A, 0x6A), WHITE, size=11)
+chip(s, 8.85, tcy, 3.88, 0.42, "信任邊界：機密 DXF 不進 context", AMBER, NAVY, size=11)
+sky = tcy + 0.52
+card(s, 0.6, sky, 12.13, 0.62, 'tint', radius=0.1)
+txt(s, 0.85, sky, 11.65, 0.62, [
+    {'runs': [("Skills｜自建技能生態　", 11, True, CYAN8, False, FONT),
+              ("規格流 spectra-* ×12（propose→apply→archive→verify…）· 測試 tdd · 審查 grill-me / grill-with-docs / diagnose / triage",
+               10, False, TEXT, False, FONT)], 'space_after': 2},
+    one("規劃 to-prd / to-issues · 領域 add-rule · 雛型 prototype · 架構 improve-codebase-architecture · zoom-out · write-a-skill · caveman",
+        10, False, MUTE)], anchor=MSO_ANCHOR.MIDDLE)
 
 # decision strip
-dy = tcy + 0.62
-card(s, 0.6, dy, 12.13, 1.46, 'white')
-txt(s, 0.85, dy + 0.12, 11.6, 0.4, [one("AI 提案，工程判斷把關——每個採用都附一個被我否決的替代方案", 13.5, True, NAVY)])
+dy = sky + 0.72
+card(s, 0.6, dy, 12.13, 1.34, 'white')
+txt(s, 0.85, dy + 0.1, 11.6, 0.4, [one("AI 提案，工程判斷把關——每個採用都附一個被我否決的替代方案", 13, True, NAVY)])
 deci = [
     ("採用", EMER, "我否決 Claude 的「密度啟發式」，改採確定性互斥視圖規則——可重現、operator 看得懂"),
     ("後來推翻", ROSE, "密度仲裁上線後產線 17,482 球整批誤判，我判定不追不可重現的 bug、整個子系統當死碼砍掉"),
@@ -443,11 +450,11 @@ deci = [
     ("延後", MUTE, "Postgres／MinIO 遷移我寫好 ADR 但標「未實作」——_jobs 才是硬牆，無 HA 需求前不動"),
 ]
 for i, (tag, c, body) in enumerate(deci):
-    yy = dy + 0.56 + i * 0.225
+    yy = dy + 0.52 + i * 0.205
     chip(s, 0.85, yy, 1.55, 0.2, tag, c, WHITE, size=10.5)
     txt(s, 2.5, yy - 0.02, 10.1, 0.26, [one(body, 11, False, TEXT)], anchor=MSO_ANCHOR.MIDDLE)
 
-txt(s, 0.6, dy + 1.56, 12.13, 0.34, [one(
+txt(s, 0.6, dy + 1.42, 12.13, 0.34, [one(
     "45 archived + 25 active changes　·　9 capability specs　·　175 commits（50 帶 Claude co-author）　·　三週",
     11.5, True, CYAN8, align=PP_ALIGN.CENTER, name=MONO)])
 
