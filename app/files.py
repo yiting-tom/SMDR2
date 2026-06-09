@@ -192,6 +192,8 @@ class FileRecord:
             "side_view_rect": dict(self.side_view_rect) if self.side_view_rect else None,
             "insunits": self.insunits,
             "applied_scale": self.applied_scale,
+            "unit_label": unit_display(self.insunits, self.user_unit_override)[0],
+            "unit_is_mm": unit_display(self.insunits, self.user_unit_override)[1],
             "unit_scale_warning": kind,
             "unit_scale_warning_detail": detail if (kind or self.applied_scale != 1.0) else None,
             "applied_scale_label": (
@@ -216,7 +218,8 @@ def compute_unit_scale_warning(
     return None, ""
 
 
-# Map INSUNITS → short human label, used only for the rescale pill text.
+# Map INSUNITS → short human label. Used for the rescale pill text and the
+# dashboard's per-file unit badge.
 _INSUNITS_LABELS = {
     0: "unitless",
     1: "inch",
@@ -225,6 +228,27 @@ _INSUNITS_LABELS = {
     5: "cm",
     6: "m",
 }
+
+
+def unit_display(
+    insunits: int | None, user_unit_override: str | None,
+) -> tuple[str, bool]:
+    """Resolve the unit label shown on the dashboard, plus whether it is mm.
+
+    An operator unit-override is authoritative (it is the source unit the
+    human declared and that we rescaled from). Otherwise the label comes
+    from the source DXF's `$INSUNITS`. `None`/unmapped values render as
+    `"未指定"` (unspecified) since we cannot prove they are mm.
+
+    The bool is `True` only for an exact mm match — the dashboard raises a
+    "not mm" warning when it is `False` and the file was not rescaled."""
+    if user_unit_override:
+        label = user_unit_override
+    elif insunits is None:
+        label = "未指定"
+    else:
+        label = _INSUNITS_LABELS.get(insunits, "未指定")
+    return label, label == "mm"
 
 
 def format_applied_scale_label(applied_scale: float, insunits: int | None) -> str:

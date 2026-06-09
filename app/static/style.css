@@ -996,6 +996,12 @@ body.dashboard main.dashboard-main {
   font-size: 0.78rem;
   cursor: help;
 }
+.unit-badge {
+  color: #8aa0b8;
+  margin-left: 0.5em;
+  font-size: 0.78rem;
+  cursor: help;
+}
 .product-card .slot .slot-actions {
   display: flex;
   gap: 0.4rem;

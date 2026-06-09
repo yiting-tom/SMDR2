@@ -11,6 +11,7 @@ from app.files import (
     READY,
     compute_unit_scale_warning,
     format_applied_scale_label,
+    unit_display,
 )
 
 
@@ -68,6 +69,35 @@ def test_unit_scale_warning_always_none(insunits, bbox):
     kind, detail = compute_unit_scale_warning(insunits, bbox)
     assert kind is None
     assert detail == ""
+
+
+@pytest.mark.parametrize("insunits,override,exp_label,exp_is_mm", [
+    (4,    None,   "mm",       True),    # declared mm
+    (1,    None,   "inch",     False),   # declared inch → warn on dashboard
+    (5,    None,   "cm",       False),
+    (6,    None,   "m",        False),
+    (0,    None,   "unitless", False),
+    (2,    None,   "foot",     False),   # declared foot
+    (3,    None,   "未指定",    False),   # unmapped INSUNITS → unspecified
+    (None, None,   "未指定",    False),   # legacy / missing header
+    (0,    "inch", "inch",     False),   # operator override is authoritative
+    (1,    "mm",   "mm",       True),    # override to mm wins over INSUNITS=inch
+])
+def test_unit_display(insunits, override, exp_label, exp_is_mm):
+    label, is_mm = unit_display(insunits, override)
+    assert label == exp_label
+    assert is_mm is exp_is_mm
+
+
+def test_to_dict_exposes_unit_fields(tmp_db):
+    fs = FileStore(tmp_db)
+    fs.register("u", "u.dxf", 1)
+    fs.update_parsed("u", 1, (0, 0, 254, 254), "#000",
+                     insunits=1, applied_scale=25.4)
+    fs.set_user_unit_override("u", "inch")
+    d = fs.get("u").to_dict()
+    assert d["unit_label"] == "inch"
+    assert d["unit_is_mm"] is False
 
 
 def test_update_status_error(tmp_db):

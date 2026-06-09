@@ -657,38 +657,66 @@ function slotFileRow(product, role, f, compact) {
   return row;
 }
 
-// A file gets either the "auto-rescaled" info pill (when preprocess
-// applied a non-1.0 factor) or the legacy "⚠ unit" warning badge — never
-// both. The pill wins because once we've fixed the units the warning is
-// no longer actionable; the title text still spells out what happened.
-// When the rescale came from the viewer's unit picker rather than the
-// auto-rescale detector, the pill text is suffixed with `(user override)`
-// so a reviewer sees that a human chose the unit.
+// bbox diagonal length, or null when there is no bbox yet.
+function bboxDiagonal(bbox) {
+  if (!bbox || bbox.length < 4) return null;
+  const dx = bbox[2] - bbox[0];
+  const dy = bbox[3] - bbox[1];
+  return Math.hypot(Math.max(dx, 0), Math.max(dy, 0));
+}
+
+// Format a length for the unit badges: up to one decimal, thousands
+// separators, no trailing ".0".
+function fmtLen(n) {
+  if (n == null || !isFinite(n)) return "?";
+  const r = Math.round(n * 10) / 10;
+  return r.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+
+// Per-file unit annotations on the dashboard (`/`):
+//   1. Always show the file's unit (`單位 <label>`).
+//   2. If the unit is not mm AND the file was not rescaled, raise an amber
+//      warning — it is being treated as mm as-authored, so a non-mm source
+//      may be at the wrong scale; the operator should confirm or pick a unit.
+//   3. If the file WAS adjusted (a unit override rescaled it to mm), show the
+//      before → after extent so the change is visible.
 function appendUnitScaleAnnotation(parent, f) {
   if (!parent) return;
-  if (f.applied_scale && f.applied_scale !== 1.0 && f.applied_scale_label) {
+  const adjusted = !!(f.applied_scale && f.applied_scale !== 1.0);
+
+  // 1) + 2) unit badge — only once the file has been parsed (has a bbox).
+  if (f.bbox && f.unit_label) {
+    const warnNonMm = !f.unit_is_mm && !adjusted;
+    const badge = document.createElement("span");
+    badge.className = warnNonMm ? "warn-badge" : "unit-badge";
+    badge.textContent = warnNonMm
+      ? `⚠ 單位 ${f.unit_label}（非 mm）`
+      : `單位 ${f.unit_label}`;
+    badge.title = warnNonMm
+      ? `來源 $INSUNITS = ${f.unit_label}，非 mm。目前直接以 mm 處理；` +
+        `若實際單位不同，請在檢視器手動指定單位以換算。`
+      : `單位：${f.unit_label}`;
+    parent.appendChild(badge);
+  }
+
+  // 3) adjusted → before/after pill.
+  if (adjusted && f.applied_scale_label) {
     const pill = document.createElement("span");
     pill.className = "rescaled-pill";
-    const override = f.user_unit_override;
-    const suffix = override ? " (user override)" : "";
-    pill.textContent = `ℹ rescaled ${f.applied_scale_label}${suffix}`;
-    let title = f.unit_scale_warning_detail || "";
-    if (override) {
-      title = title
-        ? `${title}; user_unit_override=${override}`
-        : `user_unit_override=${override}`;
-    }
-    pill.title = title;
+    const override = f.user_unit_override ? "（手動指定）" : "";
+    const post = bboxDiagonal(f.bbox);
+    const pre = post != null && f.applied_scale ? post / f.applied_scale : null;
+    const beforeAfter =
+      pre != null
+        ? `：對角線 ${fmtLen(pre)} ${f.unit_label} → ${fmtLen(post)} mm`
+        : "";
+    pill.textContent = `ℹ 已調整 ${f.applied_scale_label}${override}${beforeAfter}`;
+    pill.title = f.unit_scale_warning_detail || "";
     parent.appendChild(pill);
   }
-  // The legacy "⚠ unit" auto-detection warning badge was removed on
-  // 2026-06-09: files are taken as mm as-authored, so there is no
-  // suspect-scale verdict to surface. Only the manual-override rescale
-  // pill above remains.
-  // Recover pill — independent of rescale/warning; spec says when both
-  // are present render rescale first then recover, which is the order
-  // of append calls here. Reuses `.rescaled-pill` for the same neutral
-  // informational style.
+
+  // Recover pill — independent of unit/rescale; rendered after so the
+  // ordering stays unit → rescale → recover → layout.
   appendRecoverAnnotation(parent, f);
   appendLayoutAnnotation(parent, f);
 }
