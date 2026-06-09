@@ -549,7 +549,8 @@ const CLASS_COLORS = {
   "FiducialCross":  "#26c6da",  // darker teal — sibling of FiducialCircle
   "FiducialSquare": "#00acc1",  // even darker teal — sibling of FiducialCircle / FiducialCross
   "2DBarcode":      "#c6ff00",  // lime
-  "DAM":            "#8d6e63",  // brown — encapsulation dam; the one hue with no neighbour in the palette
+  "DAM1":           "#8d6e63",  // brown — encapsulation dam (inner); browns have no neighbour in the palette
+  "DAM2":           "#5d4037",  // dark brown — encapsulation dam (outer); sibling of DAM1
 };
 const FALLBACK_CLASS_COLOR = "#888888";
 function classColor(name) { return CLASS_COLORS[name] ?? FALLBACK_CLASS_COLOR; }
@@ -616,7 +617,8 @@ const CLASS_VIEW_CONSTRAINTS = {
 const CLASS_CATEGORY = {
   "Substrate":      "structure",
   "DieArea":        "structure",
-  "DAM":            "structure",
+  "DAM1":           "structure",
+  "DAM2":           "structure",
   "Lid":            "structure",
   "LidOuter":       "structure",
   "LidInner":       "structure",

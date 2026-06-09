@@ -509,7 +509,8 @@ def test_every_default_class_has_a_category():
 
 def test_class_category_assignments():
     from app.library import CLASS_CATEGORY
-    assert CLASS_CATEGORY["DAM"] == "structure"
+    assert CLASS_CATEGORY["DAM1"] == "structure"
+    assert CLASS_CATEGORY["DAM2"] == "structure"
     assert CLASS_CATEGORY["Protrusion"] == "structure"
     for s in ("SMD-2T", "SMD-3T", "SMD-8T", "SMD-14T"):
         assert CLASS_CATEGORY[s] == "smd"

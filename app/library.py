@@ -40,7 +40,8 @@ DEFAULT_CLASSES: list[str] = [
     "LidOuter",
     "LidInner",
     "DieArea",
-    "DAM",
+    "DAM1",
+    "DAM2",
     "FiducialCircle",
     "FiducialCross",
     "FiducialSquare",
@@ -58,7 +59,9 @@ DEFAULT_CLASSES: list[str] = [
 # Class IDs that are no longer seeded. The migration drops both their class
 # row and any templates filed under them, so legacy DBs converge to the new
 # default list without manual cleanup.
-DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
+# "DAM" was split into DAM1 / DAM2 on 2026-06-09 — drop the old single class
+# (it carried no templates) so legacy libraries converge to the new pair.
+DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side", "DAM"})
 
 
 # Code-declared default match config for built-in classes whose outline is a
@@ -76,12 +79,15 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side"})
 # bbox_ratio so minor per-instance mark variation still matches.
 # DieArea is the die-area boundary loop — same large-rigid-outline rationale;
 # the 0.0005 bbox_ratio leaves headroom for minor per-instance size variation.
+# DAM1 / DAM2 are the encapsulation dam rings — same large-outline rationale.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
     "Substrate": ("signature", 0.0001),
     "LidOuter":  ("signature", 0.0001),
     "LidInner":  ("signature", 0.0001),
     "Pin-1":     ("signature", 0.0005),
     "DieArea":   ("signature", 0.0005),
+    "DAM1":      ("signature", 0.0005),
+    "DAM2":      ("signature", 0.0005),
 }
 
 
@@ -95,7 +101,8 @@ CLASS_JSON_KEY: dict[str, str] = {
     "LidOuter":       "lid_outer",
     "LidInner":       "lid_inner",
     "DieArea":        "die_area",
-    "DAM":            "dam",
+    "DAM1":           "dam1",
+    "DAM2":           "dam2",
     "FiducialCircle": "fiducial_circle",
     "FiducialCross":  "fiducial_cross",
     "FiducialSquare": "fiducial_square",
@@ -212,7 +219,8 @@ del _unknown_product_scoped
 CLASS_CATEGORY: dict[str, str] = {
     "Substrate":      "structure",
     "DieArea":        "structure",
-    "DAM":            "structure",
+    "DAM1":           "structure",
+    "DAM2":           "structure",
     "Lid":            "structure",
     "LidOuter":       "structure",
     "LidInner":       "structure",
