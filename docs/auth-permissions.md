@@ -83,22 +83,26 @@
 
 ### §7 多用戶併發與編輯鎖定
 
-現況是**單用戶假設**：兩個人同時改同一個 product / file，會 last-write-wins、後者默默覆蓋前者，沒有任何提示。加上多人上線後一定會踩到。要先想清楚兩件事——**併發策略**與**鎖定粒度**。
+現況是**單用戶假設**：兩個人同時改同一個 product，會 last-write-wins、後者默默覆蓋前者，沒有任何提示。多人上線後一定會踩到。對「編輯」走 **pessimistic lock（編輯鎖）**，對「查看」完全不擋（viewer 永遠不被鎖影響）。
 
-初步傾向（待確認）：對「編輯」走 **pessimistic lock（編輯鎖）**，對「查看」完全不擋（viewer 永遠不被鎖影響）。
+理由：編輯是「一個操作員把一個 product 從上傳到 commit 範本」的**長時間連續互動（數十分鐘）**。樂觀鎖（version / ETag）只在**存檔當下**才偵測衝突 → 操作員可能做很久才被擋下重做；悲觀鎖**進場就擋**，第二人一進來就看到「X 正在編輯，唯讀」，不白做工。
 
-- [ ] **鎖定粒度**：鎖在 **product** 級（同一 product 同時只有一個 editor 能編）、**file** 級、還是 **template** 級？粒度越粗越簡單但越擋人，越細越自由但越難正確。
-- [ ] **策略選型**：
-  - **悲觀鎖**（進編輯先搶鎖，他人看到「X 正在編輯，唯讀」）——直覺、衝突前就擋住，但要處理「鎖沒釋放」。
-  - **樂觀鎖**（version / ETag，存檔時比版本，衝突就擋下重整）——不擋人、實作輕，但衝突發生在**存檔當下**、使用者已白做。
-  - 兩者混用？
-- [ ] **鎖的取得 / 釋放**：何時上鎖（開編輯頁 vs 第一次寫入）？何時釋放（離開頁、存檔、登出）？
-- [ ] **stale lock（殭屍鎖）**：使用者直接關分頁、斷線、當機 → 鎖怎麼自動失效？靠 **TTL + heartbeat**？多久？
-- [ ] **admin 強制解鎖**：admin 能不能搶走 / 釋放別人的鎖？要不要留紀錄？
-- [ ] **背景 job 的併發**：現在 `jobs.py` 已有背景處理（preprocess / scan-all）。某 product 正在被一個 job 寫入時，另一個人的編輯 / 另一個 job 要不要互斥？鎖要不要涵蓋「人 + job」兩種寫入者？
-- [ ] **即時性**：他人需要**即時看到**變更（WebSocket / SSE 推播）還是「被擋住 + 手動重整」就夠？（越即時越複雜，內部工具通常後者就夠）
-- [ ] **SQLite 寫入併發**：目前 DB 是 SQLite（單寫入者）。多人同時寫，DB 層的鎖 / busy-timeout / WAL 設定要不要一起檢視？（這跟 [docs/production-storage.md](production-storage.md) 的 DB 規劃相關）
-- [ ] **鎖 vs 權限的交集**：editor 只能編自己的 product，鎖自然也只在那個 product 範圍內競爭；但若改成「一 product 一 library」（§4），鎖粒度可能直接對齊 library——兩個決策會互相影響。
+#### 已定案
+- **鎖定粒度 = `product` 級**：同一 product 同時只有一個 editor 能編。工作的真實單位就是 product；file / template 級太細，擋不到「共用 product 狀態（match JSON、範本集合）」的衝突。
+- **策略 = 悲觀鎖（編輯 session）**：進編輯先搶鎖，他人唯讀。
+- **取得方式 = 明確「開始編輯」按鈕 + 顯示鎖持有者**：不走隱式上鎖。UI 要清楚顯示「誰、從何時起正在編輯這個 product」，讓佔鎖者有自覺、被擋者知道在等誰。
+- **殭屍鎖 = heartbeat + TTL 自動過期**：開著編輯頁時定期 heartbeat；沒人續 → 鎖自動失效（關分頁 / 斷線 / 當機不留死鎖）。(間隔與 TTL 數字見待討論 ④)
+- **admin 強制解鎖**：admin 可搶走 / 釋放別人的鎖，留一行 audit。應付「卡死又等不及」。
+- **背景 job 涵蓋在 product 鎖內**：`jobs.py` 的 preprocess / scan-all 是該 editor 動作觸發的，天然屬於他的 product 鎖；job 寫的是衍生資料（match JSON、預覽）、冪等，收尾晚一點無妨。鎖只需保證「同一 product 同時只有一個**人類**寫入者」。
+- **不需即時共編**：內部工具，「被擋住 + 顯示鎖狀態 + 手動重整（或輕量輪詢更新鎖狀態）」即可，不上 WebSocket 即時協作。
+
+#### 待討論
+- ③ **該 product 的 editor、但鎖被別人佔住時**怎麼辦？純唯讀等他放，還是給「**請求接手 / 通知 admin**」？
+- ④ **heartbeat 間隔與鎖 TTL** 取多少？取決於你們會不會編到一半離開很久（開會、查資料）。太短 → 正常 idle 被誤踢；太長 → 殭屍鎖卡很久。（初步候選：heartbeat 30s、TTL 2–5 分鐘，待確認你們作業節奏）
+
+#### 相依
+- **鎖粒度與 §4 拓樸相依**：editor 只能編自己的 product，鎖也只在該 product 範圍競爭；若改成「一 product 一 library」，鎖邊界會直接對齊 library。
+- **SQLite 寫入併發（與鎖無關、但必做）**：DB 是 SQLite（單寫入者），多人一上來就要設 **WAL + `busy_timeout`**，否則併發寫直接 `database is locked`。與 [docs/production-storage.md](production-storage.md) 的 DB 規劃一起看。
 
 ---
 
