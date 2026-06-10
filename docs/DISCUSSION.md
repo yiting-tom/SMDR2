@@ -93,7 +93,7 @@
 > 細節：[`auth-permissions.md` §6](auth-permissions.md)
 
 - [x] **F1. 已隨 E4 定案：** 靠 Keycloak 停用帳號自動失效（登不進來 = 權限死），App 不用另外清。
-- [ ] **F2.** 要不要 **audit log**（誰在何時改了什麼）？合規上是否必要？
+- [x] **F2. 已定案（2026-06-10）：要。** 至少記錄 **library 內容的增刪改**：哪個 editor、在哪個 product（含版本）、對 templates / match 調參做了 add / delete / modify。雛形：`audit_log(id, ts, user_sub, product_id, version_id, action, target_type, target_id, detail)`。是否擴及其他動作（上傳檔、建 product、rule-check 觸發…）實作時再議，表結構先留通用。
 - [ ] **F3.** **未登入**怎麼處理——直接導去 Keycloak，還是保留公開唯讀頁？
 - [ ] **F4.** 內網 vs 外網存取限制？只能公司網段用嗎？
 

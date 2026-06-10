@@ -86,7 +86,7 @@
 
 ### §6 邊界與營運
 - [ ] **離職 / 轉組**：權限怎麼收？靠 Keycloak 停用帳號自動失效，還是 App 要另外清？
-- [ ] 要不要 **audit log**（誰在何時改了什麼）？合規上是否必要？
+- [x] **已定案（2026-06-10）：要 audit log。** 至少涵蓋 **library 內容的增刪改**：哪個 editor、在哪個 product（含版本）、對 templates / match 調參做了 add / delete / modify。雛形：`audit_log(id, ts, user_sub, product_id, version_id, action, target_type, target_id, detail)`。admin 強制解鎖已定要留 audit（§7），寫同一張表。是否擴及其他動作（上傳檔、建 product、rule-check 觸發…）實作時再議，表結構先留通用。
 - [ ] **未登入**怎麼處理——直接導去 Keycloak，還是保留公開唯讀頁？
 - [ ] 內網 vs 外網存取限制？只能公司網段用嗎？
 - [ ] 上線權限後，**既有資料**（現在無隔離）要不要回溯指派 owner / product 歸屬？
