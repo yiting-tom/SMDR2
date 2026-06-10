@@ -38,17 +38,18 @@
 - [x] **A1. 已定案（2026-06-10，同日精煉）：一 version 一 library（路線 1）。** product 是 version 的容器，每個 version 1:1 擁有自己的 library（templates + match 調參）；product 間完全不共用。建新版 = clone 上一版 library；調參跟著快照 → 舊版結果可重現。schema 只加 `versions(id, product_id, label, library_id, created_at)`，`templates`/`classes` 不動。**編輯鎖維持 product 級**（D3 結論不變）。
 - [x] **A1b. 已定案（2026-06-10）：不再有任何共用範本——新 product 空白開始（選 c）。** 標準件每 product 自己框、調參自己調。影響：兩層 scope 區分整個消失（`PRODUCT_SCOPED_CLASSES` 與雙 scope merge 可刪）；versioning 的 C2 跟著蒸發（快照 = 整個 product library）。
 - [x] **A2. 已隨 A1b 蒸發：** 沒有共用範本，無此題。
-- [ ] **A3.** 不同 product 要**完全隔離**（editor 看不到別人 product），還是「viewer 看全部、只是不能編」？
+- [x] **A3. 已定案（2026-06-10）：全部可看。** 登入即可看所有 product（含版本與結果），只是不能編。無另外的可見性模型。
 
 ---
 
 ## §B. Editor 的編輯範圍（**次先定**）
 > 細節：[`auth-permissions.md` §3](auth-permissions.md)
 
-- [ ] **B1.** editor 的「edit」**具體含什麼**？上傳檔、commit 範本、rule-check…是否也含改 class 策略這種 **library 級**設定？
-- [ ] **B2.** 一個 editor 指派到**幾個** product？一對一還是一對多？
-- [ ] **B3.** editor 能不能**自己建新 product**，還是只能編被指派的既有 product？
-- [ ] **B4.** editor 能不能刪 product / 刪別人上傳的檔？
+- [x] **B1. 已定案（2026-06-10）：全部動作。** editor 在被指派的 product 內可：上傳/換檔、範本增刪改、match 調參、跑 rule-check、**建新 version**。（路線 1 後 library 屬於 version，無跨 product 風險。）
+- [x] **B2. 預設一對多**（一個 editor 可被指派多個 product；未被明確反對，採常理預設）。
+- [x] **B3. 已定案（2026-06-10）：建新 product 只有 admin；editor 只能在被指派的 product 下建新 version。**
+- [x] **B4. 已定案（2026-06-10）：刪 product 只有 admin。** editor 在**未畫押**的 version 內可自由刪/換檔案與範本（屬 B1 全部動作；有 audit log 兜底）。
+- [x] **B5.（新需求，2026-06-10）畫押（version sign-off）：** editor 完成所有動作後可對 version **畫押**；畫押後該 version **唯讀凍結**（範本、檔案、調參、重跑全擋），UI 顯示**誰、何時**畫押；**解畫押只有 admin 能做**，畫押/解畫押都寫 audit log。schema：`versions` 加 `signed_off_by, signed_off_at`（NULL = 編輯中）。
 
 ---
 

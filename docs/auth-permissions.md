@@ -64,11 +64,12 @@
   - 若可自管 → 維持原建議：兩張小表全放 App DB（`user_roles` + `product_editors`），能登入即 viewer。
   - 不論哪條路：離職/轉組靠 Keycloak 停用帳號自動失效（§6 第一題跟著解）。
 
-### §3 Editor 的編輯範圍（最關鍵，先定）
-- [ ] editor 的「edit」**具體包含什麼**？上傳檔、commit 範本、rule-check…是否也含改 class 策略這種 **library 級**設定？
-- [ ] 一個 editor 會被指派到**幾個** product？一對一還是一對多？
-- [ ] editor 能不能**自己建立新 product**，還是只能編被指派的既有 product？
-- [ ] editor 能不能刪 product / 刪別人上傳的檔？
+### §3 Editor 的編輯範圍（已全數定案 2026-06-10）
+- [x] **「edit」= 全部動作**：上傳/換檔、範本增刪改、match 調參、跑 rule-check、**建新 version**。（一 version 一 library 後，調參屬於該版 library，無跨 product 風險。）
+- [x] **一對多**：一個 editor 可被指派多個 product（常理預設）。
+- [x] **建新 product 只有 admin**；editor 只能在被指派的 product 下**建新 version**。
+- [x] **刪 product 只有 admin**；editor 在未畫押的 version 內可自由刪/換檔案與範本（audit log 兜底）。
+- [x] **畫押（version sign-off，新需求）**：editor 完成後可對 version 畫押 → 該版**唯讀凍結**（範本/檔案/調參/重跑全擋），UI 顯示誰、何時畫押；**解畫押僅 admin**；畫押/解畫押皆寫 audit log。schema：`versions.signed_off_by / signed_off_at`（NULL = 編輯中）。
 
 ### §4 Library / Product 拓樸（決定整個模型，先定）
 - [x] **已定案（2026-06-10）：library 跟著 product 走；同日因 versioning 精煉為「一 version 一 library」（路線 1）。** product 是 version 的容器，每個 version 1:1 擁有自己的 library（templates + match 調參）；product 之間照樣完全不共用。library 級寫入風險自然消失；**編輯鎖維持 product 級**（§7 不變，鎖住 product = 鎖住其下所有 version）。
@@ -77,7 +78,7 @@
 - [x] **已定案（2026-06-10）：不再有任何共用範本——新 product 空白開始（選項 c）。** 標準件（SMD-2T/Fiducial 等）每個 product 自己框選、match 調參自己調，不從 seed 或既有 product 複製。
   - 影響：`PRODUCT_SCOPED_CLASSES` 兩層 scope 區分**整個消失**（所有 class 一律 product 範圍）；`load_library()` 的雙 scope merge 可刪；「共用範本誰能改」一題**蒸發**（沒有共用範本了）。
   - 既有累積的 library-scoped 範本（SMD-2T 907、FiducialCircle 421）多為 dev/測試殘留，遷移時不保留為共用資產（細節留給 OpenSpec change）。
-- [ ] 不同 product 之間要**完全隔離**（editor 看不到別人 product），還是「viewer 都能看全部、只是不能編」？editor 的「看」範圍是否也全開？
+- [x] **已定案（2026-06-10）：全部可看。** 登入即可看所有 product（含版本與結果），只是不能編；editor 的「看」也全開。
 
 ### §5 Admin 與啟動
 - [ ] **第一個 admin** 怎麼產生？（隨 §2 授權層一起定）若權限自管 → **env 白名單**（如 `SMDR2_ADMIN_EMAILS=a@x,b@x`，零 bootstrap、套既有 env 慣例）；若走 A4 → admin 直接由 A4 指派，這題消失。

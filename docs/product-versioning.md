@@ -44,6 +44,11 @@
    - **match 調參跟著快照**：v2 調參不影響 v1 → 舊版結果可重現。
    - schema：`templates` / `classes` **完全不動**（本來就掛 `library_id`）；只新增 `versions(id, product_id, label, library_id, created_at)`；`files` 預計改掛 version（待 C1 末段確認）；rule 結果 `{product_id}.json` → `{version_id}.json`。
    - 編輯鎖維持 **product 級**（鎖住 product = 鎖住其下所有 version）。
+5. **畫押（version sign-off，2026-06-10 新需求）**：version 有兩態——**編輯中 → 已畫押**。
+   - editor 完成所有動作後對 version 畫押；畫押後該版**唯讀凍結**：範本、檔案、調參、重跑全擋。
+   - UI 顯示**誰、何時**畫押；**解畫押僅 admin**；畫押/解畫押皆寫 audit log。
+   - schema：`versions.signed_off_by / signed_off_at`（NULL = 編輯中）。
+   - 與 C4 疊加：未畫押=可編、已畫押=唯讀、任何版本都不可刪。
 
 ---
 
