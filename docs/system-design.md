@@ -3,6 +3,7 @@
 > 狀態:目標架構設計書,依 2026-06-10 全部定案撰寫(決策出處見 [`DISCUSSION.md`](DISCUSSION.md))。**尚未實作**。
 > 唯一未定:A4 授權系統介接(§7.2 虛線標示,等 E4b)。
 > 文件結構仿系統設計面試:問題 → 需求 → 容量 → API → 資料 → 架構 → 細部設計 → 失效 → 取捨 → 演進。
+> 完整視圖集(**C4 L1–L3、系統流程圖、DFD L0/L1、UML use case/class/sequence/state/activity**)見 [`system-diagrams.md`](system-diagrams.md)。
 
 ---
 
