@@ -20,19 +20,19 @@
 
 - [x] 3.1 `storage.py` path helper 全面改 `(version_id, file_id)` 簽名:parsed/prematch/match/layer_preview;`rule_check_path(version_id)`
 - [x] 3.2 `jobs.py`:所有 worker payload 帶 `version_id`;討論期 invariant 不變(worker 重讀 store、只碰本地路徑)
-- [ ] 3.3 `_cached_parsed` lru key 改 `(version_id, file_id, mtime_ns)`
-- [ ] 3.4 移除 startup 一次性 legacy auto-rescale 掃描(REMOVED 規格);`/api/dev/reprocess-all` 保留並改為逐 version 遍歷
+- [x] 3.3 `_cached_parsed` lru key 改 `(version_id, file_id, mtime_ns)`
+- [x] 3.4 移除 startup 一次性 legacy auto-rescale 掃描(REMOVED 規格);`/api/dev/reprocess-all` 保留並改為逐 version 遍歷
 
 ## 4. API 層
 
-- [ ] 4.1 `POST /api/products` 必填 `version_label`(422);回傳含 versions 列表;`GET /api/products[/{pid}]` 帶版本與 per-version `latest_rule_check_job`
-- [ ] 4.2 `POST /api/products/{pid}/versions`(label、clone_from 預設最新版;409 重複;400 跨 product clone_from);`GET /api/products/{pid}/versions`
-- [ ] 4.3 `POST/DELETE /api/versions/{vid}/sign-off`(身分取 `SMDR2_DEV_USER`;冪等 409;無 admin 檢查、註記待 auth)
-- [ ] 4.4 凍結守門 dependency `require_unsigned(version_id)`:掛上所有 mutating endpoint(commit、templates CRUD、strategy、上傳、side-regions、unit-override、layers、match-json save、rule-check、scan-all 寫入路徑)→ 409 含 signed_off_by/at
-- [ ] 4.5 檔案綁定endpoints:`POST /api/versions/{vid}/files`(additive、replace_file_id 換綁、skip_layer_pick、dedup-rebind per-version 處理、409 已畫押)、`DELETE /api/versions/{vid}/files/{role}`;移除 `POST /api/products/{pid}/files` 與 `files.library_id` PATCH 分支
-- [ ] 4.6 file-centric endpoints 加必填 `version_id` 參數(layers/match/commit/scan-all/prematch/match-json/side-regions/unit-override/primitives…)→ 缺參 422;以 `(vid, fid)` 解析 version_files 狀態與 artifact 路徑
-- [ ] 4.7 rule-check 移至 version:`POST/GET /api/versions/{vid}/rule-check`(202/400/409 語意照 spec);DRC bundle 端點改 version 解析
-- [ ] 4.8 移除 library 管理 API 對外語意:`/api/libraries*` CRUD 下線(內部函式保留供 version 使用)
+- [x] 4.1 `POST /api/products` 必填 `version_label`(422);回傳含 versions 列表;`GET /api/products[/{pid}]` 帶版本與 per-version `latest_rule_check_job`
+- [x] 4.2 `POST /api/products/{pid}/versions`(label、clone_from 預設最新版;409 重複;400 跨 product clone_from);`GET /api/products/{pid}/versions`
+- [x] 4.3 `POST/DELETE /api/versions/{vid}/sign-off`(身分取 `SMDR2_DEV_USER`;冪等 409;無 admin 檢查、註記待 auth)
+- [x] 4.4 凍結守門 dependency `require_unsigned(version_id)`:掛上所有 mutating endpoint(commit、templates CRUD、strategy、上傳、side-regions、unit-override、layers、match-json save、rule-check、scan-all 寫入路徑)→ 409 含 signed_off_by/at
+- [x] 4.5 檔案綁定endpoints:`POST /api/versions/{vid}/files`(additive、replace_file_id 換綁、skip_layer_pick、dedup-rebind per-version 處理、409 已畫押)、`DELETE /api/versions/{vid}/files/{role}`;移除 `POST /api/products/{pid}/files` 與 `files.library_id` PATCH 分支
+- [x] 4.6 file-centric endpoints 加必填 `version_id` 參數(layers/match/commit/scan-all/prematch/match-json/side-regions/unit-override/primitives…)→ 缺參 422;以 `(vid, fid)` 解析 version_files 狀態與 artifact 路徑
+- [x] 4.7 rule-check 移至 version:`POST/GET /api/versions/{vid}/rule-check`(202/400/409 語意照 spec);DRC bundle 端點改 version 解析
+- [x] 4.8 移除 library 管理 API 對外語意:`/api/libraries*` CRUD 下線(內部函式保留供 version 使用)
 
 ## 5. 前端
 

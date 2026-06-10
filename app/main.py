@@ -1,17 +1,15 @@
-"""SMDR2 FastAPI entry — multi-file workflow.
+"""SMDR2 FastAPI entry — versioned product workflow.
 
-Routes:
-    GET  /                           dashboard (file list + upload)
-    GET  /viewer/{file_id}           viewer page for one file
-    POST /api/files                  upload one or more DXFs
-    GET  /api/files                  list files
-    GET  /api/files/{file_id}        file metadata
-    GET  /api/jobs/{job_id}          job status
-    GET  /api/classes                template library summary
-    GET  /api/files/{file_id}/primitives
-    POST /api/files/{file_id}/match
-    POST /api/files/{file_id}/commit
-    GET  /api/files/{file_id}/scan-all
+Routes (version-aware since 2026-06-10; see openspec change
+`add-product-versioning`):
+    GET  /                            dashboard (products + versions)
+    GET  /viewer/{file_id}?version_id viewer page for one binding
+    POST /api/products                create product + first version
+    POST /api/products/{pid}/versions new version = clone of source
+    POST /api/versions/{vid}/files    upload a DXF into a role
+    POST /api/versions/{vid}/sign-off freeze the version
+    ...file-centric endpoints keep their paths but require ?version_id=
+    (artifacts and binding state key on the (version_id, file_id) pair).
 """
 
 from __future__ import annotations
@@ -46,13 +44,11 @@ from app.files import (
 from app.library import (
     CLASS_JSON_KEY,
     CLASS_VIEW_CONSTRAINTS,
-    DEFAULT_LIBRARY_ID,
     LIBRARIES,
     Template,
     build_handle_index,
     collect_entity_kinds,
     collect_entity_points,
-    is_product_scoped,
 )
 from app.matching import (
     EntityShape,
@@ -62,11 +58,13 @@ from app.matching import (
     find_matches_from_pointsets,
 )
 from app.products import PRODUCT_STORE, VALID_ROLES
+from app.versions import DuplicateLabel, VERSION_STORE, Version
 from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
 from app.storage import (
     DATA_DIR,
     layer_manifest_path,
+    layer_preview_dir,
     layer_preview_svg_path,
     layout_manifest_path,
     layout_preview_svg_path,
@@ -85,12 +83,16 @@ TEST_DXF = DATA_DIR / "test.dxf"
 # "wrong file / corrupted export" mistake without web-scale machinery.
 MAX_UPLOAD_BYTES = int(os.environ.get("SMDR2_MAX_UPLOAD_MB", "300")) * 1024 * 1024
 
+# Placeholder identity until the auth change lands: sign-off records this
+# as the signer. The auth change swaps it for the OIDC `sub`.
+DEV_USER = os.environ.get("SMDR2_DEV_USER", "dev")
+
 
 def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
     """Read a persisted pipeline-artifact JSON file, turning corruption into
     a clean HTTP 400 (with the artifact kind + path in the detail) instead of
     an uncaught JSONDecodeError → opaque 500. Matches the 400 convention used
-    by `upload_product_rule_check`.
+    by `upload_rule_check`.
 
     MUST be called at the route-handler level, NOT inside an `@lru_cache`-wrapped
     helper: `lru_cache` memoizes raised exceptions, so caching the raise would
@@ -107,6 +109,8 @@ def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
 
 
 # ---- Cached parsed-JSON + shape index ------------------------------------
+# The path embeds (version_id, file_id) since the artifact re-keying, so the
+# (path, mtime_ns) cache key is naturally version-scoped.
 @lru_cache(maxsize=4)
 def _cached_parsed(path: str, mtime_ns: int) -> dict:  # noqa: ARG001
     with open(path) as f:
@@ -121,24 +125,49 @@ def _cached_shapes(path: str, mtime_ns: int) -> tuple[dict[str, list[int]], dict
     return hi, shapes
 
 
-def _resolve_file(file_id: str, require_ready: bool = True) -> FileRecord:
-    rec = FILE_STORE.get(file_id)
+# ---- Version / binding resolution + the sign-off write guard --------------
+def _resolve_version(version_id: str) -> Version:
+    v = VERSION_STORE.get(version_id)
+    if v is None:
+        raise HTTPException(status_code=404, detail="version not found")
+    return v
+
+
+def require_unsigned(version_id: str) -> Version:
+    """Write guard: every mutating operation on a version goes through
+    here. Signed-off versions reject with 409 naming who/when. (The auth
+    change extends this chain with role / lock checks.)"""
+    v = _resolve_version(version_id)
+    if v.is_signed_off:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version signed-off",
+                "signed_off_by": v.signed_off_by,
+                "signed_off_at": v.signed_off_at,
+            },
+        )
+    return v
+
+
+def _resolve_file(version_id: str, file_id: str, require_ready: bool = True) -> FileRecord:
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
     if require_ready and rec.status not in (READY, "checking_rules", "report"):
         raise HTTPException(status_code=425, detail=f"file not ready (status={rec.status})")
     return rec
 
 
-def _shapes_for(file_id: str) -> tuple[dict[str, list[int]], dict[str, EntityShape]]:
-    pp = parsed_path(file_id)
+def _shapes_for(version_id: str, file_id: str) -> tuple[dict[str, list[int]], dict[str, EntityShape]]:
+    pp = parsed_path(version_id, file_id)
     if not pp.exists():
         raise HTTPException(status_code=500, detail="parsed file missing on disk")
     return _cached_shapes(str(pp), pp.stat().st_mtime_ns)
 
 
-def _parsed_for(file_id: str) -> dict:
-    pp = parsed_path(file_id)
+def _parsed_for(version_id: str, file_id: str) -> dict:
+    pp = parsed_path(version_id, file_id)
     if not pp.exists():
         raise HTTPException(status_code=500, detail="parsed file missing on disk")
     # Guard at the wrapper level (outside `_cached_parsed`'s lru_cache) so a
@@ -149,6 +178,16 @@ def _parsed_for(file_id: str) -> dict:
         raise HTTPException(
             status_code=400,
             detail=f"parsed file is unreadable/corrupt: {pp}: {exc}",
+        )
+
+
+def _library_for_version(v: Version):
+    try:
+        return LIBRARIES.get(v.library_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=500,
+            detail=f"library {v.library_id!r} missing for version {v.id!r}",
         )
 
 
@@ -170,37 +209,40 @@ def _ensure_test_dxf_registered() -> None:
     if not TEST_DXF.exists():
         return
     fid = _file_id_from_path(TEST_DXF)
-    # Find or create the auto-Sample product.
+    # Find or create the auto-Sample product (with its mandatory first
+    # version — C7: no version-less products).
     sample = next((p for p in PRODUCT_STORE.list_all() if p.name == "Sample"), None)
     if sample is None:
-        sample = PRODUCT_STORE.create("Sample", DEFAULT_LIBRARY_ID)
-    rec = FILE_STORE.get(fid)
-    if rec is None:
-        FILE_STORE.register(
-            fid, "test.dxf", TEST_DXF.stat().st_size,
-            library_id=sample.library_id,
-            product_id=sample.id,
-            dxf_role="BD",
-        )
-        rec = FILE_STORE.get(fid)
+        sample, version = VERSION_STORE.create_product("Sample", "v1")
+    else:
+        version = VERSION_STORE.latest_for_product(sample.id)
+        if version is None:
+            version = VERSION_STORE.create_first(sample.id, "v1")
     dst = upload_path(fid)
     if not dst.exists():
         shutil.copy2(TEST_DXF, dst)
+    FILE_STORE.register_content(fid, "test.dxf", TEST_DXF.stat().st_size)
+    rec = FILE_STORE.get(version.id, fid)
+    if rec is None:
+        FILE_STORE.bind(
+            version.id, "BD", fid,
+            dxf_view="multi", initial_status=DISCOVERING_LAYERS,
+        )
+        rec = FILE_STORE.get(version.id, fid)
     # If the parsed cache + prematch are already good, leave it alone.
     if (rec is not None
             and rec.status == READY
-            and parsed_path(fid).exists()
-            and prematch_path(fid).exists()):
+            and parsed_path(version.id, fid).exists()
+            and prematch_path(version.id, fid).exists()):
         return
     # Otherwise restart from Phase 1 — discover layers, wait for user.
-    FILE_STORE.update_status(fid, DISCOVERING_LAYERS)
-    jobs.submit_discover_layers(fid)
+    FILE_STORE.update_status(version.id, fid, DISCOVERING_LAYERS)
+    jobs.submit_discover_layers(version.id, fid)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     _ensure_test_dxf_registered()
-    _submit_unit_rescale_migration()
     yield
     jobs.shutdown()
     from app.matching import shutdown_pool
@@ -208,49 +250,6 @@ async def lifespan(_app: FastAPI):
 
 
 logger = logging.getLogger(__name__)
-
-
-def _submit_unit_rescale_migration() -> None:
-    """One-shot: re-preprocess any legacy file whose persisted INSUNITS +
-    bbox would now resolve to a non-`1.0` factor under the
-    `auto-normalize-unit-suspect-dxf` detector. Idempotent because a
-    file that was already rescaled has its bbox stored in mm, so the
-    detector returns `1.0` for it the next time around.
-
-    Match JSON invalidation rides along the standard per-file
-    re-preprocess flow in `app.jobs._on_reprocess_step_done` (which
-    delegates to `_invalidate_match_after_rescale` when the factor
-    changes), so no separate cleanup pass is needed here."""
-    import math
-    from app.dxf import detect_scale_factor
-
-    targets: set[str] = set()
-    chosen: dict[str, float] = {}
-    for rec in FILE_STORE.list_all():
-        if rec.applied_scale != 1.0:
-            continue
-        # An explicit operator override has authority over the unit; the
-        # auto-rescale migration must never re-evaluate or overwrite it
-        # (otherwise an "override to mm on a unit-suspect file" — which sits at
-        # applied_scale == 1.0 — would be re-queued and re-rescaled every boot).
-        if rec.user_unit_override is not None:
-            continue
-        if rec.bbox is None:
-            continue
-        xmin, ymin, xmax, ymax = rec.bbox
-        diag = math.hypot(max(xmax - xmin, 0.0), max(ymax - ymin, 0.0))
-        factor = detect_scale_factor(rec.insunits, diag)
-        if factor == 1.0:
-            continue
-        targets.add(rec.id)
-        chosen[rec.id] = factor
-    if not targets:
-        return
-    for fid, factor in chosen.items():
-        logger.info(
-            "unit-rescale migration: queueing file_id=%s (factor=%.6g)", fid, factor,
-        )
-    jobs.submit_reprocess_all(file_id_filter=targets, kind="unit-rescale-migration")
 
 
 app = FastAPI(title="SMDR2", lifespan=lifespan)
@@ -269,33 +268,48 @@ async def dashboard(request: Request) -> HTMLResponse:
 
 
 @app.get("/viewer/{file_id}", response_class=HTMLResponse)
-async def viewer(request: Request, file_id: str) -> HTMLResponse:
-    rec = FILE_STORE.get(file_id)
+async def viewer(request: Request, file_id: str, version_id: str) -> HTMLResponse:
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    version = _resolve_version(version_id)
+    product = PRODUCT_STORE.get(version.product_id)
     return templates.TemplateResponse(
-        request, "viewer.html", {"file_id": file_id, "file_name": rec.name}
+        request, "viewer.html", {
+            "file_id": file_id,
+            "file_name": rec.name,
+            "version_id": version_id,
+            "version_label": version.label,
+            "product_name": product.name if product else "",
+            "signed_off": version.is_signed_off,
+        }
     )
 
 
-# ---- Product API ---------------------------------------------------------
+# ---- Product / version API ------------------------------------------------
 class CreateProductRequest(BaseModel):
     name: str
-    library_id: str = DEFAULT_LIBRARY_ID
+    version_label: str
+
+
+class CreateVersionRequest(BaseModel):
+    label: str
+    clone_from: str | None = None
 
 
 def _file_payload(rec: FileRecord) -> dict:
     """`rec.to_dict()` plus the dashboard-only `has_layout_options` flag —
     true when a layout (AutoCAD-tab) picker manifest exists on disk for this
-    file, i.e. its geometry spans more than one paper-space layout so the
+    binding, i.e. its geometry spans more than one paper-space layout so the
     operator can (re-)pick which tab to load."""
     d = rec.to_dict()
-    d["has_layout_options"] = layout_manifest_path(rec.id).exists()
+    d["has_layout_options"] = layout_manifest_path(rec.version_id, rec.id).exists()
     return d
 
 
 def _group_files_by_role(files: list[FileRecord]) -> tuple[dict, dict]:
-    """Build (`files_by_role`, `files_by_role_all`) from a product's file list.
+    """Build (`files_by_role`, `files_by_role_all`) from a version's
+    binding list.
 
     `files_by_role[role]` is the primary file dict (the `multi` row if any,
     else the first split row, else None) — preserved for the existing
@@ -337,28 +351,40 @@ def _project_rule_check_job(job: dict | None) -> dict | None:
     }
 
 
+def _version_payload(v: Version) -> dict:
+    """One version's dashboard view: bindings per role, match progress,
+    rule-check readiness, and the sign-off badge fields."""
+    files = FILE_STORE.list_by_version(v.id)
+    by_role, by_role_all = _group_files_by_role(files)
+    uploaded = [f for f in files if f.dxf_role is not None]
+    return {
+        **v.to_dict(),
+        "files_by_role": by_role,
+        "files_by_role_all": by_role_all,
+        "match_progress": {
+            "saved": sum(1 for f in uploaded if f.match_saved),
+            "total": len(uploaded),
+        },
+        "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
+        "rule_check_available": rule_check_path(v.id).exists(),
+        "latest_rule_check_job": _project_rule_check_job(
+            jobs.latest_rule_check_job(v.id)
+        ),
+    }
+
+
 @app.get("/api/products")
 async def list_products() -> dict:
-    """Every product with its files (per role) and rule-check readiness."""
+    """Every product with its versions (each carrying role bindings and
+    rule-check readiness). Everyone logged in sees all products (A3)."""
     items = []
     for p in PRODUCT_STORE.list_all():
-        files = FILE_STORE.list_by_product(p.id)
-        by_role, by_role_all = _group_files_by_role(files)
-        uploaded = [f for f in files if f.dxf_role is not None]
-        ready_for_rc = bool(uploaded) and all(f.match_saved for f in uploaded)
+        versions = [
+            _version_payload(v) for v in VERSION_STORE.list_by_product(p.id)
+        ]
         items.append({
             **p.to_dict(),
-            "files_by_role": by_role,
-            "files_by_role_all": by_role_all,
-            "match_progress": {
-                "saved": sum(1 for f in uploaded if f.match_saved),
-                "total": len(uploaded),
-            },
-            "ready_for_rule_check": ready_for_rc,
-            "rule_check_available": rule_check_path(p.id).exists(),
-            "latest_rule_check_job": _project_rule_check_job(
-                jobs.latest_rule_check_job(p.id)
-            ),
+            "versions": versions,
         })
     return {"products": items}
 
@@ -368,22 +394,11 @@ async def get_product(product_id: str) -> dict:
     p = PRODUCT_STORE.get(product_id)
     if p is None:
         raise HTTPException(status_code=404, detail="product not found")
-    files = FILE_STORE.list_by_product(product_id)
-    by_role, by_role_all = _group_files_by_role(files)
-    uploaded = [f for f in files if f.dxf_role is not None]
     return {
         **p.to_dict(),
-        "files_by_role": by_role,
-        "files_by_role_all": by_role_all,
-        "match_progress": {
-            "saved": sum(1 for f in uploaded if f.match_saved),
-            "total": len(uploaded),
-        },
-        "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
-        "rule_check_available": rule_check_path(product_id).exists(),
-        "latest_rule_check_job": _project_rule_check_job(
-            jobs.latest_rule_check_job(product_id)
-        ),
+        "versions": [
+            _version_payload(v) for v in VERSION_STORE.list_by_product(p.id)
+        ],
     }
 
 
@@ -392,75 +407,145 @@ async def create_product(req: CreateProductRequest) -> dict:
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name required")
-    if not LIBRARIES.exists(req.library_id):
-        raise HTTPException(status_code=400, detail=f"unknown library {req.library_id!r}")
-    p = PRODUCT_STORE.create(name, req.library_id)
-    return p.to_dict()
+    label = req.version_label.strip()
+    if not label:
+        # Pydantic enforces presence (422 on missing field); this catches
+        # whitespace-only labels with the same status family.
+        raise HTTPException(status_code=422, detail="version_label required")
+    p, v = VERSION_STORE.create_product(name, label)
+    # Seed default classes into the new version's library.
+    LIBRARIES.get(v.library_id)
+    return {**p.to_dict(), "versions": [_version_payload(v)]}
 
 
 @app.delete("/api/products/{product_id}")
 async def delete_product(product_id: str) -> dict:
+    """Admin-only once auth lands. Cascades versions, their libraries,
+    bindings, and every version-scoped artifact dir."""
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
+    removed = VERSION_STORE.delete_for_product(product_id)
+    for v in removed:
+        LIBRARIES.evict(v.library_id)
+        for d in (
+            parsed_path(v.id, "x").parent,
+            prematch_path(v.id, "x").parent,
+            match_path(v.id, "x").parent,
+            layer_preview_dir(v.id, "x").parent,
+        ):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            rule_check_path(v.id).unlink()
+        except FileNotFoundError:
+            pass
     PRODUCT_STORE.delete(product_id)
-    return {"deleted": product_id}
+    return {"deleted": product_id, "versions_removed": len(removed)}
 
 
-@app.delete("/api/products/{product_id}/files/{file_id}", status_code=204)
-async def delete_product_file(product_id: str, file_id: str) -> Response:
-    """Detach a file from a product slot. Useful for removing a single
-    split-view file from a (role, view) without uploading a replacement.
-    The file row itself stays (so other libraries / products that may
-    reference it keep working); only the product/role/view binding clears.
-    """
+@app.get("/api/products/{product_id}/versions")
+async def list_versions(product_id: str) -> dict:
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
-    rec = FILE_STORE.get(file_id)
-    if rec is None or rec.product_id != product_id:
-        raise HTTPException(status_code=404, detail="file not found in this product")
-    with FILE_STORE.lock, FILE_STORE.conn:
-        FILE_STORE.conn.execute(
-            "UPDATE files SET product_id = NULL, dxf_role = NULL, "
-            "dxf_view = NULL, match_saved = 0 WHERE id = ?",
-            (file_id,),
-        )
-    # Drop any cached match JSON so it doesn't haunt a future product binding.
+    return {
+        "product_id": product_id,
+        "versions": [
+            _version_payload(v) for v in VERSION_STORE.list_by_product(product_id)
+        ],
+    }
+
+
+@app.post("/api/products/{product_id}/versions")
+async def create_version(product_id: str, req: CreateVersionRequest) -> dict:
+    """New version = clone of `clone_from` (default: the product's most
+    recent version): library content + role bindings. Cloned bindings
+    reset to `preprocessing` and a preprocess job is submitted for each
+    (derived artifacts are per-version and don't exist yet)."""
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    label = req.label.strip()
+    if not label:
+        raise HTTPException(status_code=422, detail="label required")
+    if req.clone_from:
+        source = VERSION_STORE.get(req.clone_from)
+        if source is None or source.product_id != product_id:
+            raise HTTPException(
+                status_code=400,
+                detail="clone_from must reference a version of this product",
+            )
+    else:
+        source = VERSION_STORE.latest_for_product(product_id)
+        if source is None:
+            raise HTTPException(status_code=500, detail="product has no versions")
     try:
-        match_path(file_id).unlink()
-    except FileNotFoundError:
-        pass
-    return Response(status_code=204)
+        ver = VERSION_STORE.create_clone(product_id, label, source)
+    except DuplicateLabel:
+        raise HTTPException(
+            status_code=409,
+            detail=f"version label {label!r} already exists for this product",
+        )
+    LIBRARIES.evict(ver.library_id)
+    LIBRARIES.get(ver.library_id)  # hydrate + seed any new default classes
+    # Recompute derived artifacts for the carried-over bindings.
+    for rec in FILE_STORE.list_by_version(ver.id):
+        jobs.submit_preprocess(
+            ver.id, rec.id,
+            library_id=ver.library_id,
+            selected_layers=rec.selected_layers,
+        )
+    return _version_payload(ver)
 
 
-@app.post("/api/products/{product_id}/files")
-async def upload_product_file(
-    product_id: str,
+@app.post("/api/versions/{version_id}/sign-off")
+async def sign_off_version(version_id: str) -> dict:
+    """Freeze the version. Identity is the dev placeholder until auth
+    lands (SMDR2_DEV_USER). Already-signed → 409."""
+    from app.versions import SignedOff
+    _resolve_version(version_id)
+    try:
+        v = VERSION_STORE.sign_off(version_id, DEV_USER)
+    except SignedOff as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version already signed-off",
+                "signed_off_by": exc.by,
+                "signed_off_at": exc.at,
+            },
+        )
+    return v.to_dict()
+
+
+@app.delete("/api/versions/{version_id}/sign-off")
+async def unsign_version(version_id: str) -> dict:
+    """Reopen a signed version. Admin-only once auth lands; unrestricted
+    in the dev window (noted in the spec)."""
+    _resolve_version(version_id)
+    v = VERSION_STORE.unsign(version_id)
+    return v.to_dict()
+
+
+# ---- Version file bindings -------------------------------------------------
+@app.post("/api/versions/{version_id}/files")
+async def upload_version_file(
+    version_id: str,
     file: UploadFile = File(...),
     dxf_role: str = Form(...),
     replace_file_id: str | None = Form(None),
     skip_layer_pick: bool = Form(False),
 ) -> dict:
-    """Upload a DXF into a product role.
+    """Upload a DXF into a version's role.
 
-    A `(product, role)` can hold any number of DXFs; this endpoint is
-    purely additive by default. To replace an existing file (the
-    common "swap this DXF" flow), pass `replace_file_id` — that file
-    is detached from the product before the new one is registered.
-    View coverage (top/bottom/side) is determined by the per-file
-    region rects set later via the side-regions endpoint; the upload
-    itself does not assign a view.
+    A `(version, role)` can hold any number of DXFs; this endpoint is
+    purely additive by default. To replace an existing binding (the
+    common "swap this DXF" flow), pass `replace_file_id` — that binding
+    is removed first (the content row stays; other versions may still
+    reference it). Bytes are content-hash deduplicated across versions.
 
-    `skip_layer_pick` is a dev-mode shortcut: when true the file
-    bypasses Phase 1 entirely (no layer manifest, no per-layer SVG
-    thumbnails, no `awaiting_layers` wait) and goes straight to
-    Phase 2 with `selected_layers=None` (keep every layer). The flag
-    is honoured unconditionally on the server — gating it as
-    "dev only" is the dashboard's responsibility, consistent with
-    the rest of the dev-overrides surface.
+    `skip_layer_pick` is a dev-mode shortcut: when true the binding
+    bypasses Phase 1 entirely and goes straight to Phase 2 with
+    `selected_layers=None` (keep every layer).
     """
-    product = PRODUCT_STORE.get(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="product not found")
+    version = require_unsigned(version_id)
     if dxf_role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"role must be one of {VALID_ROLES}")
     if not file.filename or not file.filename.lower().endswith(".dxf"):
@@ -473,7 +558,6 @@ async def upload_product_file(
     # request Content-Length covers the whole body (fields + boundaries), not
     # the single file part, and FastAPI has already buffered the part by the
     # time we get here — so len(content) is the authoritative per-file check.
-    # Bounds accidental huge uploads (wrong/corrupt export); env-tunable.
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
@@ -483,26 +567,17 @@ async def upload_product_file(
             ),
         )
 
-    # Optional targeted eviction of a specific file in this product+role.
+    # Optional targeted eviction of a specific binding in this version+role.
     if replace_file_id:
-        evictee = FILE_STORE.get(replace_file_id)
-        if (
-            evictee is None
-            or evictee.product_id != product_id
-            or evictee.dxf_role != dxf_role
-        ):
+        evictee = FILE_STORE.get(version_id, replace_file_id)
+        if evictee is None or evictee.dxf_role != dxf_role:
             raise HTTPException(
                 status_code=400,
-                detail="replace_file_id does not match a file in this product+role",
+                detail="replace_file_id does not match a file in this version+role",
             )
-        with FILE_STORE.lock, FILE_STORE.conn:
-            FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = NULL, dxf_role = NULL, "
-                "dxf_view = NULL, match_saved = 0 WHERE id = ?",
-                (replace_file_id,),
-            )
+        FILE_STORE.unbind(version_id, replace_file_id)
         try:
-            match_path(replace_file_id).unlink()
+            match_path(version_id, replace_file_id).unlink()
         except FileNotFoundError:
             pass
 
@@ -510,49 +585,48 @@ async def upload_product_file(
     dst = upload_path(fid)
     if not dst.exists():
         dst.write_bytes(content)
+    deduped_bytes = FILE_STORE.content_exists(fid)
+    FILE_STORE.register_content(fid, file.filename, len(content))
     initial_status = PREPROCESSING if skip_layer_pick else DISCOVERING_LAYERS
-    existing = FILE_STORE.get(fid)
-    if existing is None:
-        FILE_STORE.register(
-            fid, file.filename, len(content),
-            library_id=product.library_id,
-            product_id=product_id, dxf_role=dxf_role, dxf_view="multi",
-            initial_status=initial_status,
-        )
-    else:
-        # Same content hash → reuse the row, rebinding it to this product
-        # slot. Wiping selected_layers forces Phase 1 (or, on the skip
-        # path, Phase 2) to re-run with a fresh layer set.
-        with FILE_STORE.lock, FILE_STORE.conn:
-            FILE_STORE.conn.execute(
-                "UPDATE files SET product_id = ?, dxf_role = ?, dxf_view = 'multi', "
-                "library_id = ?, status = ?, match_saved = 0, "
-                "selected_layers = NULL WHERE id = ?",
-                (product_id, dxf_role, product.library_id,
-                 initial_status, fid),
-            )
+    # bind() replaces any prior binding of this (version, file) — a re-upload
+    # of identical bytes to the same version resets its lifecycle so Phase 1
+    # (or, on the skip path, Phase 2) re-runs with a fresh layer set.
+    FILE_STORE.bind(
+        version_id, dxf_role, fid,
+        dxf_view="multi", initial_status=initial_status,
+    )
     if skip_layer_pick:
-        # Dev path: no manifest rendering, no `awaiting_layers` wait.
-        # `selected_layers=None` is the worker's existing "keep every
-        # primitive" signal — no new code path inside the worker.
         job_id = jobs.submit_preprocess(
-            fid, library_id=product.library_id, selected_layers=None,
-            product_id=product.id,
+            version_id, fid,
+            library_id=version.library_id, selected_layers=None,
         )
     else:
-        job_id = jobs.submit_discover_layers(fid)
+        job_id = jobs.submit_discover_layers(version_id, fid)
     return {
         "file_id": fid,
-        "product_id": product_id,
+        "version_id": version_id,
         "dxf_role": dxf_role,
-        "library_id": product.library_id,
         "status": initial_status,
+        "deduped": deduped_bytes,
         "job_id": job_id,
     }
 
 
-class FilePatchRequest(BaseModel):
-    library_id: str
+@app.delete("/api/versions/{version_id}/files/{file_id}", status_code=204)
+async def delete_version_file(version_id: str, file_id: str) -> Response:
+    """Remove one binding from a version. The content row (and the bytes
+    under uploads/) stays — other versions may reference it."""
+    require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    FILE_STORE.unbind(version_id, file_id)
+    # Drop this version's match artifact so it doesn't haunt a future rebind.
+    try:
+        match_path(version_id, file_id).unlink()
+    except FileNotFoundError:
+        pass
+    return Response(status_code=204)
 
 
 class UnitOverrideRequest(BaseModel):
@@ -577,44 +651,18 @@ class SideRegionsRequest(BaseModel):
     side_view_rect: RectModel | None = None
 
 
-@app.patch("/api/files/{file_id}")
-async def patch_file(file_id: str, req: FilePatchRequest) -> dict:
-    """Reassign a file to a different library. Triggers re-preprocessing
-    so the pre-match overlay reflects the new library's templates. The
-    user's prior `selected_layers` (if any) is reused — no re-prompt."""
-    rec = FILE_STORE.get(file_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    if rec.status == AWAITING_LAYOUT:
-        raise HTTPException(
-            status_code=409,
-            detail="file is awaiting an AutoCAD-tab pick; choose a layout first",
-        )
-    if not LIBRARIES.exists(req.library_id):
-        raise HTTPException(status_code=400, detail=f"unknown library {req.library_id!r}")
-    if rec.library_id == req.library_id:
-        return {"file_id": file_id, "library_id": req.library_id, "unchanged": True}
-    FILE_STORE.update_library(file_id, req.library_id)
-    FILE_STORE.update_status(file_id, PREPROCESSING)
-    job_id = jobs.submit_preprocess(
-        file_id,
-        library_id=req.library_id,
-        selected_layers=rec.selected_layers,
-        product_id=rec.product_id,
-    )
-    return {"file_id": file_id, "library_id": req.library_id, "job_id": job_id}
-
-
 @app.post("/api/files/{file_id}/unit-override")
-async def post_unit_override(file_id: str, req: UnitOverrideRequest) -> JSONResponse:
-    """Apply an operator-chosen unit interpretation to a file. Enqueues
+async def post_unit_override(
+    file_id: str, req: UnitOverrideRequest, version_id: str,
+) -> JSONResponse:
+    """Apply an operator-chosen unit interpretation to a binding. Enqueues
     a background preprocess that re-runs with the new multiplier; the
-    response carries the job id and the list of products whose Match
-    JSON the recompute will invalidate (so the viewer can show the
-    confirm modal's "N products affected" line).
+    response carries the job id and the product/version whose Match
+    JSON the recompute will invalidate.
 
-    Returns 202 on success, 400 on bad `unit`, 404 on missing file,
-    409 when a preprocess for this file is already in flight."""
+    Returns 202 on success, 400 on bad `unit`, 404 on missing binding,
+    409 when a preprocess for this binding is already in flight or the
+    version is signed off."""
     from app.dxf import UNIT_TO_SCALE
 
     if req.unit not in UNIT_TO_SCALE:
@@ -622,78 +670,82 @@ async def post_unit_override(file_id: str, req: UnitOverrideRequest) -> JSONResp
             status_code=400,
             detail=f"unknown unit {req.unit!r}; expected one of {sorted(UNIT_TO_SCALE)}",
         )
-    rec = FILE_STORE.get(file_id)
+    require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
     if rec.status == AWAITING_LAYOUT:
         raise HTTPException(
             status_code=409,
             detail="file is awaiting an AutoCAD-tab pick; choose a layout first",
         )
-    inflight = jobs.find_inflight_preprocess_job(file_id)
+    inflight = jobs.find_inflight_preprocess_job(version_id, file_id)
     if inflight is not None:
         return JSONResponse(
             status_code=409,
             content={"detail": "preprocess in flight", "job_id": inflight},
         )
-    job_id = jobs.submit_unit_override_preprocess(file_id, req.unit)
-    affected = _affected_products_for_file(rec)
+    job_id = jobs.submit_unit_override_preprocess(version_id, file_id, req.unit)
     return JSONResponse(
         status_code=202,
         content={
             "file_id": file_id,
+            "version_id": version_id,
             "unit": req.unit,
             "job_id": job_id,
-            "affected_products": affected,
+            "affected_products": _affected_product_for_version(version_id),
         },
     )
 
 
-def _affected_products_for_file(rec: FileRecord) -> list[dict]:
-    """Return the products whose Match JSON will be cleared when this
-    file's `applied_scale` changes. A file row carries at most one
-    `product_id`, so the list has 0 or 1 entry today; shaping it as a
-    list keeps the API forward-compatible if file→product becomes
-    many-to-many."""
-    if not rec.product_id:
+def _affected_product_for_version(version_id: str) -> list[dict]:
+    """The product+version whose Match JSON will be cleared when this
+    binding's `applied_scale` changes — shaped as a list for forward
+    compatibility."""
+    v = VERSION_STORE.get(version_id)
+    if v is None:
         return []
-    product = PRODUCT_STORE.get(rec.product_id)
+    product = PRODUCT_STORE.get(v.product_id)
     if product is None:
         return []
-    return [{"id": product.id, "name": product.name}]
+    return [{"id": product.id, "name": product.name, "version_label": v.label}]
 
 
 @app.patch("/api/files/{file_id}/side-regions")
-async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
-    """Persist this file's top_view / bottom_view / side_view rectangles.
+async def patch_side_regions(
+    file_id: str, req: SideRegionsRequest, version_id: str,
+) -> dict:
+    """Persist this binding's top_view / bottom_view / side_view rects.
 
-    Invalidates `data/match/{file_id}.json` (rule-checker input)
-    because the saved match keys are no longer in sync with the new
-    view labels. Resets `match_saved` so the engineer re-runs Save Match
-    after redrawing regions.
+    Invalidates `data/match/{version_id}/{file_id}.json` (rule-checker
+    input) because the saved match keys are no longer in sync with the
+    new view labels. Resets `match_saved` so the engineer re-runs Save
+    Match after redrawing regions.
     """
-    rec = FILE_STORE.get(file_id)
+    require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
     top = normalise_rect(req.top_view_rect.model_dump()) if req.top_view_rect else None
     bottom = normalise_rect(req.bottom_view_rect.model_dump()) if req.bottom_view_rect else None
     side = normalise_rect(req.side_view_rect.model_dump()) if req.side_view_rect else None
-    # Each file's region rects are independent — when a (product, role)
-    # has multiple DXFs, every file may legitimately mark its own top /
+    # Each binding's region rects are independent — when a (version, role)
+    # has multiple DXFs, every binding may legitimately mark its own top /
     # bottom / side rectangles. No cross-file uniqueness check here.
-    FILE_STORE.update_side_regions(file_id, top, bottom, side)
+    FILE_STORE.update_side_regions(version_id, file_id, top, bottom, side)
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
     # rectangles. The user has to re-run Save Match to regenerate.
-    mp = match_path(file_id)
+    mp = match_path(version_id, file_id)
     try:
         mp.unlink()
     except FileNotFoundError:
         pass
-    FILE_STORE.set_match_saved(file_id, False)
+    FILE_STORE.set_match_saved(version_id, file_id, False)
 
     return {
         "file_id": file_id,
+        "version_id": version_id,
         "top_view_rect": top,
         "bottom_view_rect": bottom,
         "side_view_rect": side,
@@ -703,14 +755,15 @@ async def patch_side_regions(file_id: str, req: SideRegionsRequest) -> dict:
 
 @app.get("/api/files")
 async def list_files() -> dict:
+    """Every binding (the operational unit) — kept for debugging."""
     return {"files": [r.to_dict() for r in FILE_STORE.list_all()]}
 
 
 @app.get("/api/files/{file_id}")
-async def get_file(file_id: str) -> dict:
-    rec = FILE_STORE.get(file_id)
+async def get_file(file_id: str, version_id: str) -> dict:
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
     return rec.to_dict()
 
 
@@ -723,8 +776,8 @@ async def get_job(job_id: str) -> dict:
 
 
 # ---- Layer selection (Phase 1 -> Phase 2 gate) --------------------------
-def _read_layer_manifest(file_id: str) -> dict | None:
-    mp = layer_manifest_path(file_id)
+def _read_layer_manifest(version_id: str, file_id: str) -> dict | None:
+    mp = layer_manifest_path(version_id, file_id)
     if not mp.exists():
         return None
     with open(mp) as f:
@@ -732,17 +785,18 @@ def _read_layer_manifest(file_id: str) -> dict | None:
 
 
 @app.get("/api/files/{file_id}/layers")
-async def get_file_layers(file_id: str) -> dict:
-    """Manifest + current selection for a file. 404 if Phase 1 hasn't
+async def get_file_layers(file_id: str, version_id: str) -> dict:
+    """Manifest + current selection for a binding. 404 if Phase 1 hasn't
     finished yet (no manifest on disk)."""
-    rec = FILE_STORE.get(file_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    manifest = _read_layer_manifest(file_id)
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    manifest = _read_layer_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layer manifest not available")
     return {
         "file_id": file_id,
+        "version_id": version_id,
         "manifest": manifest,
         "selected_layers": rec.selected_layers,
         "status": rec.status,
@@ -754,14 +808,17 @@ class LayersConfirmRequest(BaseModel):
 
 
 @app.post("/api/files/{file_id}/layers")
-async def confirm_layers(file_id: str, req: LayersConfirmRequest) -> dict:
+async def confirm_layers(
+    file_id: str, req: LayersConfirmRequest, version_id: str,
+) -> dict:
     """Persist the user's chosen layer subset and kick off Phase 2."""
-    rec = FILE_STORE.get(file_id)
+    version = require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(status_code=404, detail="file not found in this version")
     if not req.layers:
         raise HTTPException(status_code=400, detail="at least one layer required")
-    manifest = _read_layer_manifest(file_id)
+    manifest = _read_layer_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layer manifest not available")
     known = {layer["name"] for layer in manifest["layers"]}
@@ -774,16 +831,17 @@ async def confirm_layers(file_id: str, req: LayersConfirmRequest) -> dict:
     # Dedupe + preserve manifest order so the persisted list is stable.
     chosen_set = set(req.layers)
     ordered = [layer["name"] for layer in manifest["layers"] if layer["name"] in chosen_set]
-    FILE_STORE.update_selected_layers(file_id, ordered)
-    FILE_STORE.update_status(file_id, PREPROCESSING)
+    FILE_STORE.update_selected_layers(version_id, file_id, ordered)
+    FILE_STORE.update_status(version_id, file_id, PREPROCESSING)
     job_id = jobs.submit_preprocess(
+        version_id,
         file_id,
-        library_id=rec.library_id,
+        library_id=version.library_id,
         selected_layers=ordered,
-        product_id=rec.product_id,
     )
     return {
         "file_id": file_id,
+        "version_id": version_id,
         "selected_layers": ordered,
         "status": PREPROCESSING,
         "job_id": job_id,
@@ -791,35 +849,39 @@ async def confirm_layers(file_id: str, req: LayersConfirmRequest) -> dict:
 
 
 @app.get("/api/files/{file_id}/layer-preview/{safe_name}.svg")
-async def get_layer_preview_svg(file_id: str, safe_name: str):
+async def get_layer_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one layer's SVG thumbnail. 404 when Phase 1 hasn't completed
-    or the requested layer isn't in the file's manifest."""
+    or the requested layer isn't in the binding's manifest."""
     from fastapi.responses import FileResponse
-    rec = FILE_STORE.get(file_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    manifest = _read_layer_manifest(file_id)
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    manifest = _read_layer_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layer manifest not available")
     valid = {layer["safe_name"] for layer in manifest["layers"]}
     if safe_name not in valid:
         raise HTTPException(status_code=404, detail="unknown layer for this file")
-    path = layer_preview_svg_path(file_id, safe_name)
+    path = layer_preview_svg_path(version_id, file_id, safe_name)
     if not path.exists():
         raise HTTPException(status_code=404, detail="preview SVG missing on disk")
     return FileResponse(path, media_type="image/svg+xml")
 
 
 @app.post("/api/files/{file_id}/discover-layers")
-async def trigger_discover_layers(file_id: str) -> dict:
-    """Re-run Phase 1 for a legacy or library-swapped file (e.g. user
-    clicked 'Edit layers' on a ready file that pre-dates the feature)."""
-    rec = FILE_STORE.get(file_id)
+async def trigger_discover_layers(file_id: str, version_id: str) -> dict:
+    """Re-run Phase 1 for a binding (e.g. user clicked 'Edit layers' on a
+    ready file)."""
+    require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    FILE_STORE.update_status(file_id, DISCOVERING_LAYERS)
-    job_id = jobs.submit_discover_layers(file_id)
-    return {"file_id": file_id, "status": DISCOVERING_LAYERS, "job_id": job_id}
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    FILE_STORE.update_status(version_id, file_id, DISCOVERING_LAYERS)
+    job_id = jobs.submit_discover_layers(version_id, file_id)
+    return {
+        "file_id": file_id, "version_id": version_id,
+        "status": DISCOVERING_LAYERS, "job_id": job_id,
+    }
 
 
 # ---- Layout selection (AutoCAD-tab gate, runs before layer selection) ---
@@ -827,8 +889,8 @@ async def trigger_discover_layers(file_id: str) -> dict:
 # empty) ever produce a layout manifest and park in `awaiting_layout`;
 # model-space and single-tab files skip this gate entirely (the parser
 # auto-resolves them). See `app.jobs._discover_layers_worker`.
-def _read_layout_manifest(file_id: str) -> dict | None:
-    mp = layout_manifest_path(file_id)
+def _read_layout_manifest(version_id: str, file_id: str) -> dict | None:
+    mp = layout_manifest_path(version_id, file_id)
     if not mp.exists():
         return None
     with open(mp) as f:
@@ -836,18 +898,19 @@ def _read_layout_manifest(file_id: str) -> dict | None:
 
 
 @app.get("/api/files/{file_id}/layouts")
-async def get_file_layouts(file_id: str) -> dict:
+async def get_file_layouts(file_id: str, version_id: str) -> dict:
     """Layout (AutoCAD-tab) picker manifest + current choice. 404 when no
-    layout picker applies to this file (geometry in model space / a single
-    tab) or discovery hasn't produced one yet."""
-    rec = FILE_STORE.get(file_id)
+    layout picker applies to this binding or discovery hasn't produced
+    one yet."""
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    manifest = _read_layout_manifest(file_id)
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    manifest = _read_layout_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layout manifest not available")
     return {
         "file_id": file_id,
+        "version_id": version_id,
         "manifest": manifest,
         "chosen_layout": rec.chosen_layout,
         "status": rec.status,
@@ -859,14 +922,17 @@ class LayoutConfirmRequest(BaseModel):
 
 
 @app.post("/api/files/{file_id}/layouts")
-async def confirm_layout(file_id: str, req: LayoutConfirmRequest) -> dict:
+async def confirm_layout(
+    file_id: str, req: LayoutConfirmRequest, version_id: str,
+) -> dict:
     """Persist the operator's chosen AutoCAD tab and re-run layer discovery
     against it (Phase 1 → the layer picker). The chosen layout is pinned on
-    the file row so every later re-preprocess renders the same tab."""
-    rec = FILE_STORE.get(file_id)
+    the binding so every later re-preprocess renders the same tab."""
+    require_unsigned(version_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    manifest = _read_layout_manifest(file_id)
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    manifest = _read_layout_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layout manifest not available")
     known = {layout["name"] for layout in manifest["layouts"]}
@@ -875,22 +941,23 @@ async def confirm_layout(file_id: str, req: LayoutConfirmRequest) -> dict:
             status_code=400,
             detail=f"unknown layout for this file: {req.layout!r}",
         )
-    FILE_STORE.set_chosen_layout(file_id, req.layout)
+    FILE_STORE.set_chosen_layout(version_id, file_id, req.layout)
     # Switching tabs swaps the entire entity set, so any saved Match JSON
     # references the OLD tab's entities. Invalidate it (mirrors
     # `patch_side_regions`) so a rule check can't run against a stale match
     # — the operator re-runs Save Match after the new tab is ready.
     if req.layout != rec.chosen_layout:
-        mp = match_path(file_id)
+        mp = match_path(version_id, file_id)
         try:
             mp.unlink()
         except FileNotFoundError:
             pass
-        FILE_STORE.set_match_saved(file_id, False)
-    FILE_STORE.update_status(file_id, DISCOVERING_LAYERS)
-    job_id = jobs.submit_discover_layers(file_id, layout_name=req.layout)
+        FILE_STORE.set_match_saved(version_id, file_id, False)
+    FILE_STORE.update_status(version_id, file_id, DISCOVERING_LAYERS)
+    job_id = jobs.submit_discover_layers(version_id, file_id, layout_name=req.layout)
     return {
         "file_id": file_id,
+        "version_id": version_id,
         "chosen_layout": req.layout,
         "status": DISCOVERING_LAYERS,
         "job_id": job_id,
@@ -898,74 +965,34 @@ async def confirm_layout(file_id: str, req: LayoutConfirmRequest) -> dict:
 
 
 @app.get("/api/files/{file_id}/layout-preview/{safe_name}.svg")
-async def get_layout_preview_svg(file_id: str, safe_name: str):
+async def get_layout_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one AutoCAD-tab SVG thumbnail for the layout picker. 404 when
-    the file has no layout manifest or the tab isn't in it."""
+    the binding has no layout manifest or the tab isn't in it."""
     from fastapi.responses import FileResponse
-    rec = FILE_STORE.get(file_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    manifest = _read_layout_manifest(file_id)
+        raise HTTPException(status_code=404, detail="file not found in this version")
+    manifest = _read_layout_manifest(version_id, file_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail="layout manifest not available")
     valid = {layout["safe_name"] for layout in manifest["layouts"]}
     if safe_name not in valid:
         raise HTTPException(status_code=404, detail="unknown layout for this file")
-    path = layout_preview_svg_path(file_id, safe_name)
+    path = layout_preview_svg_path(version_id, file_id, safe_name)
     if not path.exists():
         raise HTTPException(status_code=404, detail="preview SVG missing on disk")
     return FileResponse(path, media_type="image/svg+xml")
 
 
-# ---- Library CRUD -------------------------------------------------------
-@app.get("/api/libraries")
-async def list_libraries() -> dict:
-    return {"libraries": LIBRARIES.list_summaries(), "default_id": DEFAULT_LIBRARY_ID}
-
-
-class CreateLibraryRequest(BaseModel):
-    name: str
-
-
-@app.post("/api/libraries")
-async def create_library(req: CreateLibraryRequest) -> dict:
-    name = req.name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name required")
-    lib = LIBRARIES.create(name)
-    return {"id": lib.library_id, "name": name}
-
-
-@app.delete("/api/libraries/{library_id}")
-async def delete_library(library_id: str) -> dict:
-    if library_id == DEFAULT_LIBRARY_ID:
-        raise HTTPException(status_code=400, detail="cannot delete the default library")
-    if not LIBRARIES.exists(library_id):
-        raise HTTPException(status_code=404, detail="library not found")
-    LIBRARIES.delete(library_id)
-    return {"deleted": library_id}
-
-
-def _resolve_library_id(library_id: str | None, file_id: str | None) -> str:
-    """Resolve a library_id from explicit arg or file context, falling back to default."""
-    if library_id:
-        if not LIBRARIES.exists(library_id):
-            raise HTTPException(status_code=404, detail="library not found")
-        return library_id
-    if file_id:
-        rec = FILE_STORE.get(file_id)
-        if rec is None:
-            raise HTTPException(status_code=404, detail="file not found")
-        return rec.library_id
-    return DEFAULT_LIBRARY_ID
-
-
-# ---- Classes / templates within a library -------------------------------
-@app.get("/api/libraries/{library_id}/classes")
-async def classes_by_library(library_id: str) -> dict:
-    if not LIBRARIES.exists(library_id):
-        raise HTTPException(status_code=404, detail="library not found")
-    return {"library_id": library_id, "classes": LIBRARIES.get(library_id).summary()}
+# ---- Classes / templates within a version's library ----------------------
+@app.get("/api/versions/{version_id}/classes")
+async def classes_by_version(version_id: str) -> dict:
+    v = _resolve_version(version_id)
+    return {
+        "version_id": version_id,
+        "library_id": v.library_id,
+        "classes": _library_for_version(v).summary(),
+    }
 
 
 # Default `bbox_ratio` applied when the client sets a class to signature
@@ -979,12 +1006,11 @@ class ClassStrategyRequest(BaseModel):
     bbox_ratio: float | None = None
 
 
-@app.put("/api/libraries/{library_id}/classes/{class_name}/strategy")
+@app.put("/api/versions/{version_id}/classes/{class_name}/strategy")
 async def set_class_strategy(
-    library_id: str, class_name: str, req: ClassStrategyRequest,
+    version_id: str, class_name: str, req: ClassStrategyRequest,
 ) -> dict:
-    if not LIBRARIES.exists(library_id):
-        raise HTTPException(status_code=404, detail="library not found")
+    v = require_unsigned(version_id)
     if req.strategy not in ("chamfer", "signature"):
         raise HTTPException(
             status_code=400,
@@ -997,18 +1023,19 @@ async def set_class_strategy(
         if req.bbox_ratio is None:
             bbox_ratio = SIGNATURE_DEFAULT_BBOX_RATIO
         else:
-            v = req.bbox_ratio
-            if not math.isfinite(v) or v <= 0 or v > 1:
+            val = req.bbox_ratio
+            if not math.isfinite(val) or val <= 0 or val > 1:
                 raise HTTPException(
                     status_code=400,
                     detail="bbox_ratio must be in (0, 1] or null",
                 )
-            bbox_ratio = v
-    lib = LIBRARIES.get(library_id)
+            bbox_ratio = val
+    lib = _library_for_version(v)
     if not lib.set_strategy(class_name, req.strategy, bbox_ratio):
         raise HTTPException(status_code=404, detail="class not found")
     return {
-        "library_id": library_id,
+        "version_id": version_id,
+        "library_id": v.library_id,
         "class_name": class_name,
         "match_strategy": req.strategy,
         "bbox_ratio": bbox_ratio,
@@ -1016,31 +1043,22 @@ async def set_class_strategy(
 
 
 @app.get("/api/classes")
-async def classes_default(file_id: str | None = None,
-                          library_id: str | None = None) -> dict:
-    """Backwards-compat: returns classes for `library_id` (or the file's
-    library if `file_id` given, or the default library otherwise)."""
-    lib_id = _resolve_library_id(library_id, file_id)
-    return {"library_id": lib_id, "classes": LIBRARIES.get(lib_id).summary()}
+async def classes_for_version(version_id: str) -> dict:
+    """Class summary for one version's library (viewer toolbar source)."""
+    return await classes_by_version(version_id)
 
 
-@app.get("/api/libraries/{library_id}/templates")
-async def list_templates_for_library(library_id: str) -> dict:
-    """Library-admin view: returns ONLY library-scoped templates
-    (product_id IS NULL). Product-scoped templates (Substrate, Lid,
-    DieArea, Ball, Protrusion) are intentionally invisible here — they
-    belong to a specific product, not the library. The cached
-    `Library` instance is hydrated by `Store.load_library(library_id)`
-    with no product_id, so its `all_templates()` cache only ever
-    contains library-scoped rows."""
-    if not LIBRARIES.exists(library_id):
-        raise HTTPException(status_code=404, detail="library not found")
-    lib = LIBRARIES.get(library_id)
+@app.get("/api/versions/{version_id}/templates")
+async def list_templates_for_version(version_id: str) -> dict:
+    """The version's complete template list (it owns its library 1:1)."""
+    v = _resolve_version(version_id)
+    lib = _library_for_version(v)
     items = []
     for cls_name, idx, t in lib.all_templates():
         items.append({
             "id": t.id,
-            "library_id": library_id,
+            "version_id": version_id,
+            "library_id": v.library_id,
             "class_name": cls_name,
             "index": idx,
             "key": f"{cls_name}.{idx}",
@@ -1050,24 +1068,35 @@ async def list_templates_for_library(library_id: str) -> dict:
             "centroid": list(t.centroid),
             "entity_point_sets": t.entity_point_sets,
         })
-    return {"templates": items, "library_id": library_id}
+    return {"templates": items, "version_id": version_id, "library_id": v.library_id}
 
 
 @app.get("/api/templates")
-async def list_templates(library_id: str | None = None, file_id: str | None = None) -> dict:
-    """Backwards-compat alias for the library-scoped templates endpoint."""
-    lib_id = _resolve_library_id(library_id, file_id)
-    return await list_templates_for_library(lib_id)
+async def list_templates(version_id: str) -> dict:
+    """Alias for the version-scoped templates endpoint."""
+    return await list_templates_for_version(version_id)
+
+
+def _find_template_owner(template_id: str):
+    """Locate (library, version) owning a template id. Returns (lib, version)
+    or (None, None)."""
+    for lib_summary in LIBRARIES.list_summaries():
+        lib = LIBRARIES.get(lib_summary["id"])
+        if lib.find_template(template_id) is not None:
+            return lib, VERSION_STORE.get_by_library(lib.library_id)
+    return None, None
 
 
 @app.delete("/api/templates/{template_id}")
 async def delete_template(template_id: str) -> dict:
     # Search across all libraries — template ids are globally unique (UUIDs).
-    for lib_summary in LIBRARIES.list_summaries():
-        lib = LIBRARIES.get(lib_summary["id"])
-        if lib.delete_template(template_id):
-            return {"deleted": template_id, "library_id": lib.library_id}
-    raise HTTPException(status_code=404, detail="template not found")
+    lib, version = _find_template_owner(template_id)
+    if lib is None:
+        raise HTTPException(status_code=404, detail="template not found")
+    if version is not None:
+        require_unsigned(version.id)
+    lib.delete_template(template_id)
+    return {"deleted": template_id, "library_id": lib.library_id}
 
 
 class MoveTemplateRequest(BaseModel):
@@ -1078,22 +1107,23 @@ class MoveTemplateRequest(BaseModel):
 async def patch_template(template_id: str, req: MoveTemplateRequest) -> dict:
     if not req.class_name:
         raise HTTPException(status_code=400, detail="class_name required")
-    for lib_summary in LIBRARIES.list_summaries():
-        lib = LIBRARIES.get(lib_summary["id"])
-        if lib.find_template(template_id) is not None:
-            if req.class_name not in {c["name"] for c in lib.summary()}:
-                lib.add_class(req.class_name)
-            lib.move_template(template_id, req.class_name)
-            return {"id": template_id, "class_name": req.class_name,
-                    "library_id": lib.library_id}
-    raise HTTPException(status_code=404, detail="template not found")
+    lib, version = _find_template_owner(template_id)
+    if lib is None:
+        raise HTTPException(status_code=404, detail="template not found")
+    if version is not None:
+        require_unsigned(version.id)
+    if req.class_name not in {c["name"] for c in lib.summary()}:
+        lib.add_class(req.class_name)
+    lib.move_template(template_id, req.class_name)
+    return {"id": template_id, "class_name": req.class_name,
+            "library_id": lib.library_id}
 
 
 # ---- Per-file: primitives / match / commit / scan-all -------------------
 @app.get("/api/files/{file_id}/primitives")
-async def primitives(file_id: str) -> dict:
-    _resolve_file(file_id)
-    data = _parsed_for(file_id)
+async def primitives(file_id: str, version_id: str) -> dict:
+    _resolve_file(version_id, file_id)
+    data = _parsed_for(version_id, file_id)
     return {
         "primitives": data["primitives"],
         "bbox": data["bbox"],
@@ -1111,17 +1141,17 @@ async def primitives(file_id: str) -> dict:
 # async event loop. Viewer fires this fire-and-forget after `/primitives`
 # returns so the user's first /match scan finds the LRU cache populated.
 @app.post("/api/files/{file_id}/warm-shapes")
-def warm_shapes(file_id: str) -> dict:
-    _resolve_file(file_id)
-    _, shapes = _shapes_for(file_id)
+def warm_shapes(file_id: str, version_id: str) -> dict:
+    _resolve_file(version_id, file_id)
+    _, shapes = _shapes_for(version_id, file_id)
     return {"entity_count": len(shapes)}
 
 
 @app.get("/api/files/{file_id}/debug-radius-buckets")
-async def debug_radius_buckets(file_id: str) -> dict:
+async def debug_radius_buckets(file_id: str, version_id: str) -> dict:
     """Diagnostic dump for the single-CIRCLE radius-bucket fast path.
 
-    Compares each library/product template's recomputed-via-from_points
+    Compares each version-library template's recomputed-via-from_points
     radius with the drawing's analytical-radius bucket distribution.
     Used to chase scan-all-misses-everything bugs that don't reproduce
     on small fixtures."""
@@ -1130,8 +1160,9 @@ async def debug_radius_buckets(file_id: str) -> dict:
         _radius_bucket_key,
         EntityShape,
     )
-    rec = _resolve_file(file_id)
-    _, shapes = _shapes_for(file_id)
+    _resolve_file(version_id, file_id)
+    v = _resolve_version(version_id)
+    _, shapes = _shapes_for(version_id, file_id)
     buckets = _get_radius_buckets(shapes)
 
     drawing_circle_count = sum(1 for s in shapes.values() if s.kind == "circle")
@@ -1149,9 +1180,7 @@ async def debug_radius_buckets(file_id: str) -> dict:
                 "bucket_key": _radius_bucket_key(s.radius),
             })
 
-    classes, _, templates_by_class = LIBRARIES.store.load_library(
-        rec.library_id, product_id=rec.product_id,
-    )
+    classes, _, templates_by_class = LIBRARIES.store.load_library(v.library_id)
 
     per_class: list[dict] = []
     for cls in classes:
@@ -1180,8 +1209,8 @@ async def debug_radius_buckets(file_id: str) -> dict:
 
     return {
         "file_id": file_id,
-        "library_id": rec.library_id,
-        "product_id": rec.product_id,
+        "version_id": version_id,
+        "library_id": v.library_id,
         "drawing_circle_count": drawing_circle_count,
         "drawing_non_circle_counts": other_kind_counts,
         "drawing_bucket_count": len(buckets),
@@ -1199,18 +1228,19 @@ class MatchRequest(BaseModel):
 
 
 @app.post("/api/files/{file_id}/match")
-async def match(file_id: str, req: MatchRequest) -> dict:
+async def match(file_id: str, req: MatchRequest, version_id: str) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
-    rec = _resolve_file(file_id)
-    _, shapes = _shapes_for(file_id)
+    _resolve_file(version_id, file_id)
+    v = _resolve_version(version_id)
+    _, shapes = _shapes_for(version_id, file_id)
     missing = [h for h in req.handles if h not in shapes]
     if missing:
         raise HTTPException(status_code=400, detail=f"unknown handles: {missing[:5]}")
     strategy = "chamfer"
     bbox_ratio: float | None = None
     if req.class_name:
-        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(req.class_name)
+        strategy, bbox_ratio = _library_for_version(v).strategy_of(req.class_name)
     out = find_matches(
         req.handles, shapes,
         strategy=strategy, bbox_ratio=bbox_ratio,
@@ -1233,7 +1263,7 @@ class MatchSwapRequest(BaseModel):
 
 
 @app.post("/api/files/{file_id}/match-swap")
-async def match_swap(file_id: str, req: MatchSwapRequest) -> dict:
+async def match_swap(file_id: str, req: MatchSwapRequest, version_id: str) -> dict:
     """Diagnostic: run find_matches with pattern_a as template AND with
     pattern_b as template, and dump per-pair gate + alignment breakdown so an
     asymmetric "A finds B but B doesn't find A" outcome can be pinpointed.
@@ -1244,8 +1274,9 @@ async def match_swap(file_id: str, req: MatchSwapRequest) -> dict:
         raise HTTPException(
             status_code=400, detail="both pattern_a and pattern_b required",
         )
-    rec = _resolve_file(file_id)
-    _, shapes = _shapes_for(file_id)
+    _resolve_file(version_id, file_id)
+    v = _resolve_version(version_id)
+    _, shapes = _shapes_for(version_id, file_id)
     missing = [h for h in req.pattern_a + req.pattern_b if h not in shapes]
     if missing:
         raise HTTPException(
@@ -1254,9 +1285,7 @@ async def match_swap(file_id: str, req: MatchSwapRequest) -> dict:
     strategy = "chamfer"
     bbox_ratio: float | None = None
     if req.class_name:
-        strategy, bbox_ratio = LIBRARIES.get(rec.library_id).strategy_of(
-            req.class_name,
-        )
+        strategy, bbox_ratio = _library_for_version(v).strategy_of(req.class_name)
     return diagnose_swap(
         req.pattern_a, req.pattern_b, shapes,
         strategy=strategy, bbox_ratio=bbox_ratio,
@@ -1269,27 +1298,16 @@ class CommitRequest(BaseModel):
 
 
 @app.post("/api/files/{file_id}/commit")
-async def commit(file_id: str, req: CommitRequest) -> dict:
+async def commit(file_id: str, req: CommitRequest, version_id: str) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
-    rec = _resolve_file(file_id)
-    # Product-scoped classes need a product to land in. A file with no
-    # product binding (legacy uploads, dev fixtures) cannot commit one
-    # — fail loud rather than silently land the template at library
-    # scope where it would leak across every product.
-    if is_product_scoped(req.class_name) and rec.product_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"file is not bound to a product; cannot commit "
-                f"product-scoped class {req.class_name!r}"
-            ),
-        )
-    lib = LIBRARIES.get(rec.library_id)
+    v = require_unsigned(version_id)
+    _resolve_file(version_id, file_id)
+    lib = _library_for_version(v)
     if req.class_name not in {c["name"] for c in lib.summary()}:
         lib.add_class(req.class_name)
-    data = _parsed_for(file_id)
-    handle_index, _ = _shapes_for(file_id)
+    data = _parsed_for(version_id, file_id)
+    handle_index, _ = _shapes_for(version_id, file_id)
     missing = [h for h in req.handles if h not in handle_index]
     if missing:
         raise HTTPException(status_code=400, detail=f"unknown handles: {missing[:5]}")
@@ -1300,54 +1318,41 @@ async def commit(file_id: str, req: CommitRequest) -> dict:
         collect_entity_kinds(data["primitives"], handle_index, h) for h in req.handles
     ]
     tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
-    stored, already_existed = lib.add_template_for_file(tmpl, product_id=rec.product_id)
+    stored, already_existed = lib.add_template_for_file(tmpl)
     return {
         "template_id": stored.id,
         "class_name": stored.class_name,
-        "library_id": rec.library_id,
+        "version_id": version_id,
+        "library_id": v.library_id,
         "count": lib.count(stored.class_name),
         "already_existed": already_existed,
     }
 
 
 @app.get("/api/files/{file_id}/scan-all")
-def scan_all(file_id: str) -> dict:  # sync → FastAPI runs it in a threadpool
+def scan_all(file_id: str, version_id: str) -> dict:  # sync → threadpool
     """Overlay-only preview of "what class does each handle belong to".
 
     Runs the *same* pipeline as `save_match_json` — view split via
     `split_matches_by_side` — so the overlay's per-class colouring matches
-    what Save Match would persist to disk. Same-geometry classes that would
-    otherwise cross-fire (FiducialCircle + BGABall sharing a circle radius)
-    are disambiguated by their mutually exclusive view constraints (BGABall
-    bottom-only, FiducialCircle top-only): a match in a disallowed view is
-    dropped by `split_matches_by_side`.
+    what Save Match would persist to disk.
 
-    Response shape: `{by_class: {<display_name>: [handle, ...]}, total: N}`.
-    Front-end overlay code (`runScanAll` in `canvas.js`) reads
-    `data.by_class[cls]`.
+    Frozen versions reject (409): the sign-off contract is "results no
+    longer change", and scan-all participates in the editing loop.
 
     Declared **sync** on purpose: the body is CPU-bound with no `await`, so as
     an `async def` it would run on the event loop and block every other request
-    for the whole scan (the "user stuck behind one drawing's scan" symptom). A
-    plain `def` path operation is dispatched to Starlette's threadpool, keeping
-    the event loop free for other files' requests.
+    for the whole scan. A plain `def` path operation is dispatched to
+    Starlette's threadpool, keeping the event loop free.
     """
-    rec = _resolve_file(file_id)
-    # Scope-aware load: merge library-scoped templates with this file's
-    # product-scoped templates. Bypass the cached `Library` (LIBRARIES.get)
-    # because that cache is hydrated once at library scope only and would
-    # not see product-scoped Substrate/Lid/DieArea/Ball templates committed
-    # by other files in the same product. The cache is intentionally
-    # library-only for admin views (`/api/libraries/{id}/templates`); the
-    # matcher reads through this fresh Store call instead.
-    if LIBRARIES.get(rec.library_id) is None:
-        raise HTTPException(
-            status_code=404, detail=f"library {rec.library_id!r} not registered"
-        )
+    v = require_unsigned(version_id)
+    rec = _resolve_file(version_id, file_id)
+    # Fresh store read (not the cached Library) so templates committed by
+    # other files of this version since hydration are visible.
     classes, configs_by_class, templates_by_class = LIBRARIES.store.load_library(
-        rec.library_id, product_id=rec.product_id
+        v.library_id
     )
-    _, shapes = _shapes_for(file_id)
+    _, shapes = _shapes_for(version_id, file_id)
 
     # View-rect dispatch (mirror of save_match_json). Used by
     # split_matches_by_side and by the skip-when-impossible gate below.
@@ -1358,16 +1363,15 @@ def scan_all(file_id: str) -> dict:  # sync → FastAPI runs it in a threadpool
     }
 
     # Prefixed-key dict, same shape save_match_json builds before
-    # persistence. BGABall/FiducialCircle are disambiguated by the view
-    # constraints applied in split_matches_by_side below — no arbitration step.
+    # persistence.
     out: dict[str, list[list[str]]] = {}
 
     for cls_name in classes:
         # Skip-when-impossible: class is view-constrained and none of
-        # its allowed view rects is set on the file → every match would
+        # its allowed view rects is set on the binding → every match would
         # be dropped by split_matches_by_side anyway. Pure perf gate.
         allowed = CLASS_VIEW_CONSTRAINTS.get(cls_name)
-        if allowed is not None and not any(rect_for[v] is not None for v in allowed):
+        if allowed is not None and not any(rect_for[v_] is not None for v_ in allowed):
             continue
         cfg = configs_by_class.get(cls_name, {})
         strategy = cfg.get("match_strategy") or "chamfer"
@@ -1385,14 +1389,12 @@ def scan_all(file_id: str) -> dict:  # sync → FastAPI runs it in a threadpool
                 rec.top_view_rect, rec.bottom_view_rect, rec.side_view_rect,
                 class_name=cls_name,
             )
-            for k, v in grouped.items():
-                out.setdefault(k, []).extend(v)
+            for k, vv in grouped.items():
+                out.setdefault(k, []).extend(vv)
 
     # Collapse prefixed-keys back to the flat {display_name: handles}
-    # shape the overlay expects. Reverse-map snake_case → display name
-    # via CLASS_JSON_KEY (classes without a snake override use the
-    # snake name as their display name via .get fallback).
-    display_by_snake = {v: k for k, v in CLASS_JSON_KEY.items()}
+    # shape the overlay expects.
+    display_by_snake = {v_: k for k, v_ in CLASS_JSON_KEY.items()}
     by_class_sets: dict[str, set[str]] = {}
     for key, instance_lists in out.items():
         parsed = parse_match_key(key)
@@ -1404,20 +1406,20 @@ def scan_all(file_id: str) -> dict:  # sync → FastAPI runs it in a threadpool
         for hl in instance_lists:
             bucket.update(hl)
 
-    by_class = {k: sorted(v) for k, v in by_class_sets.items()}
+    by_class = {k: sorted(vv) for k, vv in by_class_sets.items()}
     return {
         "by_class": by_class,
-        "total": sum(len(v) for v in by_class.values()),
+        "total": sum(len(vv) for vv in by_class.values()),
     }
 
 
 # ---- Pre-match cache (written by preprocess worker) ---------------------
 @app.get("/api/files/{file_id}/prematch")
-async def prematch(file_id: str) -> dict:
-    _resolve_file(file_id)
-    pp = prematch_path(file_id)
+async def prematch(file_id: str, version_id: str) -> dict:
+    _resolve_file(version_id, file_id)
+    pp = prematch_path(version_id, file_id)
     if not pp.exists():
-        # The worker didn't get to this step (older DB row) — return empty.
+        # The worker didn't get to this step yet — return empty.
         return {"by_class": {}, "total": 0, "stale": True}
     return _load_json_or_http(pp, kind="prematch")
 
@@ -1425,59 +1427,46 @@ async def prematch(file_id: str) -> dict:
 # ---- Match JSON ----------------------------------------------------------
 # Format the downstream rule-checker expects:
 #   { "<view>.<class_snake>.<template_index>": [[handle, ...], ...], ... }
-# Class portion is the snake_case form (substrate, smd_2t, bga_ball, ...)
-# from CLASS_JSON_KEY; the view prefix is omitted when no side region
-# contains the instance. Each inner list is one match occurrence,
-# containing the DXF entity handles that make up that occurrence.
-#
 # The endpoint is async: it submits a `save_match` job to the worker
-# pool and returns 202 + {job_id, file_id} immediately. The result
-# (template_keys / total_matches / side_counts / saved_to) lives on
-# `GET /api/jobs/{job_id}` under `result` once the
-# job reaches status=done; `file.match_saved` flips at that point too.
+# pool and returns 202 + {job_id, file_id} immediately. The result lives
+# on `GET /api/jobs/{job_id}` once the job reaches status=done;
+# `match_saved` flips at that point too.
 @app.post("/api/files/{file_id}/match-json")
-async def save_match_json(file_id: str) -> JSONResponse:
-    rec = _resolve_file(file_id)
-    if LIBRARIES.get(rec.library_id) is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"library {rec.library_id!r} not registered",
-        )
-    if not parsed_path(file_id).exists():
+async def save_match_json(file_id: str, version_id: str) -> JSONResponse:
+    require_unsigned(version_id)
+    _resolve_file(version_id, file_id)
+    if not parsed_path(version_id, file_id).exists():
         raise HTTPException(
             status_code=500, detail="parsed file missing on disk",
         )
-    job_id = jobs.submit_save_match(file_id)
+    job_id = jobs.submit_save_match(version_id, file_id)
     return JSONResponse(
         status_code=202,
-        content={"job_id": job_id, "file_id": file_id},
+        content={"job_id": job_id, "file_id": file_id, "version_id": version_id},
     )
 
 
 @app.get("/api/files/{file_id}/match-json")
-async def get_match_json(file_id: str) -> dict:
-    _resolve_file(file_id)
-    mp = match_path(file_id)
+async def get_match_json(file_id: str, version_id: str) -> dict:
+    _resolve_file(version_id, file_id)
+    mp = match_path(version_id, file_id)
     if not mp.exists():
         raise HTTPException(status_code=404, detail="match JSON not yet generated")
     return _load_json_or_http(mp, kind="match")
 
 
-# ---- Rule checking (product-scoped, cross-DXF) --------------------------
-@app.post("/api/products/{product_id}/rule-check")
-async def run_product_rule_check(product_id: str) -> JSONResponse:
-    """Submit a product-scoped DRC job. Returns 202 + `{job_id}`; the
+# ---- Rule checking (version-scoped bundle, product-keyed rules) ----------
+@app.post("/api/versions/{version_id}/rule-check")
+async def run_rule_check(version_id: str) -> JSONResponse:
+    """Submit a version's DRC job. Returns 202 + `{job_id}`; the
     front-end polls `GET /api/jobs/{job_id}` for completion. Every
-    file's `match_saved` must be true; otherwise we 400 with a list of
-    missing roles. The worker materialises the DRC handoff bundle on
-    disk and hands the directory to the external rule function — see
-    `app.jobs._rule_check_worker`."""
-    product = PRODUCT_STORE.get(product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="product not found")
-    files = [f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role]
+    binding's `match_saved` must be true; otherwise we 400 with a list
+    of missing roles. Signed-off versions reject (409) — frozen results
+    must not change."""
+    version = require_unsigned(version_id)
+    files = [f for f in FILE_STORE.list_by_version(version_id) if f.dxf_role]
     if not files:
-        raise HTTPException(status_code=400, detail="no DXFs uploaded to this product yet")
+        raise HTTPException(status_code=400, detail="no DXFs uploaded to this version yet")
     missing = [f.dxf_role for f in files if not f.match_saved]
     if missing:
         raise HTTPException(
@@ -1485,13 +1474,11 @@ async def run_product_rule_check(product_id: str) -> JSONResponse:
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
 
-    # Validate that every role-attached file's Match JSON and DXF
-    # exist on disk before submitting — the worker materialises a
-    # handoff bundle from these and would fail late otherwise. No
-    # parsed-JSON read happens here; the bundle ships DXF + Match
-    # JSON only, no `parsed/{file_id}.json` involvement.
+    # Validate that every role-bound file's Match JSON and DXF exist on
+    # disk before submitting — the worker materialises a handoff bundle
+    # from these and would fail late otherwise.
     for f in files:
-        mp = match_path(f.id)
+        mp = match_path(version_id, f.id)
         if not mp.exists():
             raise HTTPException(
                 status_code=400,
@@ -1503,24 +1490,31 @@ async def run_product_rule_check(product_id: str) -> JSONResponse:
                 detail=f"{f.dxf_role}: source DXF missing at {f.id}.dxf",
             )
 
-    job_id = jobs.submit_rule_check(product_id, [f.id for f in files])
+    job_id = jobs.submit_rule_check(
+        version.product_id, version_id, [f.id for f in files]
+    )
     return JSONResponse(
         status_code=202,
-        content={"job_id": job_id, "product_id": product_id},
+        content={
+            "job_id": job_id,
+            "product_id": version.product_id,
+            "version_id": version_id,
+        },
     )
 
 
-@app.get("/api/products/{product_id}/rule-check")
-async def get_product_rule_check(product_id: str) -> dict:
-    if PRODUCT_STORE.get(product_id) is None:
-        raise HTTPException(status_code=404, detail="product not found")
-    rp = rule_check_path(product_id)
+@app.get("/api/versions/{version_id}/rule-check")
+async def get_rule_check(version_id: str) -> dict:
+    """The version's most recently persisted rule-check result — readable
+    indefinitely, signed-off or not (C4: old versions stay reviewable)."""
+    version = _resolve_version(version_id)
+    rp = rule_check_path(version_id)
     if not rp.exists():
         raise HTTPException(status_code=404, detail="rule check not yet run")
     result = _load_json_or_http(rp, kind="rule-check")
     # Re-validate the persisted payload against the envelope contract so a
-    # structurally-corrupt-but-parseable file surfaces loudly (400) instead of
-    # producing silent wrong pass/fail counts. Mirrors upload_product_rule_check.
+    # structurally-corrupt-but-parseable file surfaces loudly (400) instead
+    # of producing silent wrong pass/fail counts.
     from app.rule_check import RuleCheckOutputError, _validate_envelope
     try:
         _validate_envelope(result)
@@ -1531,7 +1525,8 @@ async def get_product_rule_check(product_id: str) -> dict:
         )
     n_pass = sum(1 for v in result.values() if v.get("pass"))
     return {
-        "product_id": product_id,
+        "product_id": version.product_id,
+        "version_id": version_id,
         "results": result,
         "rule_count": len(result),
         "pass_count": n_pass,
@@ -1539,17 +1534,15 @@ async def get_product_rule_check(product_id: str) -> dict:
     }
 
 
-@app.post("/api/products/{product_id}/rule-check/upload")
-async def upload_product_rule_check(product_id: str, request: Request) -> dict:
+@app.post("/api/versions/{version_id}/rule-check/upload")
+async def upload_rule_check(version_id: str, request: Request) -> dict:
     """Dev-only: accept a hand-crafted RuleChecking JSON, validate it
     against the envelope contract, and persist it as if the worker had
     written it. Lets the external team iterate on output shape without
-    running their pipeline. Hidden in the UI unless dev mode is on; the
-    endpoint itself is always reachable (single-user dev tool)."""
+    running their pipeline."""
     from app.rule_check import RuleCheckOutputError, _validate_envelope
 
-    if PRODUCT_STORE.get(product_id) is None:
-        raise HTTPException(status_code=404, detail="product not found")
+    require_unsigned(version_id)
     try:
         payload = await request.json()
     except json.JSONDecodeError as exc:
@@ -1558,11 +1551,12 @@ async def upload_product_rule_check(product_id: str, request: Request) -> dict:
         _validate_envelope(payload)
     except RuleCheckOutputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    rp = rule_check_path(product_id)
+    rp = rule_check_path(version_id)
+    rp.parent.mkdir(parents=True, exist_ok=True)
     rp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     n_pass = sum(1 for v in payload.values() if v.get("pass"))
     return {
-        "product_id": product_id,
+        "version_id": version_id,
         "saved_to": str(rp),
         "rule_count": len(payload),
         "pass_count": n_pass,
@@ -1571,26 +1565,24 @@ async def upload_product_rule_check(product_id: str, request: Request) -> dict:
 
 
 # ---- DRC handoff bundle (external rule-check team consumes this) --------
-@app.get("/api/products/{product_id}/drc-bundle")
-async def get_drc_bundle(product_id: str) -> Response:
-    """Return a zip bundle of every role-attached DXF + per-file Match
+@app.get("/api/versions/{version_id}/drc-bundle")
+async def get_drc_bundle(version_id: str) -> Response:
+    """Return a zip bundle of every role-bound DXF + per-file Match
     JSON + a manifest the external rule-checking team consumes. Each
     DXF stays in its own coordinate space; every Match JSON ships with
     raw DXF handles.
 
-    Preconditions match `POST .../rule-check`: 404 on unknown product,
-    400 when no role-attached DXFs exist or any file still needs Save
-    Match. The bundle format itself is pinned by
-    `openspec/specs/design-rule-checking/drc-manifest.schema.json`.
-    """
-    product = PRODUCT_STORE.get(product_id)
+    Preconditions match `POST .../rule-check` minus the freeze guard —
+    exporting a signed-off version's bundle is a read."""
+    version = _resolve_version(version_id)
+    product = PRODUCT_STORE.get(version.product_id)
     if product is None:
-        raise HTTPException(status_code=404, detail="product not found")
-    files = [f for f in FILE_STORE.list_by_product(product_id) if f.dxf_role]
+        raise HTTPException(status_code=500, detail="owning product missing")
+    files = [f for f in FILE_STORE.list_by_version(version_id) if f.dxf_role]
     if not files:
         raise HTTPException(
             status_code=400,
-            detail="no DXFs uploaded to this product yet",
+            detail="no DXFs uploaded to this version yet",
         )
     missing = [f.dxf_role for f in files if not f.match_saved]
     if missing:
@@ -1598,7 +1590,7 @@ async def get_drc_bundle(product_id: str) -> Response:
             status_code=400,
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
-    zip_bytes, filename = build_bundle(product, files)
+    zip_bytes, filename = build_bundle(product, version, files)
     return Response(
         content=zip_bytes,
         media_type="application/zip",
