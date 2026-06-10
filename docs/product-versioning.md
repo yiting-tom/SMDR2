@@ -78,19 +78,15 @@ templates + match 調參隨版本走（= 該版的 library，見 §2.4）。file
 ### Q7. ~~新 product 的第一版~~ **已定案（2026-06-10）**
 建 product 時 **user 必須輸入版號**——不自動取名 `v1`、也不存在「無版本」的空 product；第一版隨 product 建立一起生（空白開始，見拓樸定案）。
 
-### Q8. 與權限模型的關係（連動 `auth-permissions.md`）
-auth 規劃裡 **editor 綁特定 product**。版本上線後：
-- editor 是綁到 **product**（能改所有版本）還是綁到**特定版本**？
-- 既有的 product 級編輯鎖（pessimistic lock）要不要下放到版本級？
+### Q8. ~~與權限模型的關係~~ **已定案（2026-06-10）**
+editor 綁 **product**（能改其下所有版本）；編輯鎖維持 **product 級**，不下放到版本。
 
-### Q9. 既有資料遷移
-目前已有的 product / templates / files / rule 結果都沒有版本。上線時：
-- 把既有資料**全部歸到一個預設版（如 `v1`）**嗎？
-- rule 結果檔 `{product_id}.json` → `{version_id}.json` 的搬遷由 migration 自動處理？
+### Q9. ~~既有資料遷移~~ **已定案（2026-06-10）：不用遷移**
+現有資料全是開發期產物，不保留。schema 直接上新模型，舊資料砍掉重練（dev DB 本來就被測試殘留灌爆，見 DISCUSSION.md 附註）。
 
 ---
 
 ## 4. 下一步
 
-- §3 各題定案 → 收斂成 OpenSpec change（schema 變更 + 遷移 + API + UI）。
-- 在那之前**不動 code**。
+- **§3 全部定案（2026-06-10）✅** —— versioning 設計面完整收斂，可開 OpenSpec change（拓樸轉換 + versioning 一起、一次 schema 到位；無資料遷移負擔）。
+- change 範圍預估：`versions` 表 + `version_files` junction、刪兩層 scope（`PRODUCT_SCOPED_CLASSES`/雙 scope merge）、衍生 artifact 改 `(version_id, file_id)` keying、product 建立流程加必填版號、版本切換 UI、clone-on-new-version 流程。
