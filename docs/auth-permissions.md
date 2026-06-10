@@ -49,14 +49,20 @@
 ## 待釐清問題（帶去討論）
 
 ### §1 身分與 SSO（Keycloak）
-- [ ] Keycloak 的**唯一識別**用哪個？`sub`（穩定不可讀）vs `email` / `preferred_username`（可讀但可能變）。
+- [x] **已定案（2026-06-10）：唯一識別用 `sub`**（穩定不可變）；`email` / `preferred_username` 只做顯示。隨 §2「App DB 存權限」模型一起定。
 - [ ] 用**現有 realm** 還是新開一個給這工具？client 註冊要走什麼流程？
 - [ ] 有沒有強制 **MFA / session timeout / 登出**規範要遵守？
 - [ ] token 過期續期（refresh）由工具自管還是靠 Keycloak session？
 
 ### §2 角色歸屬（誰存權限）
-- [ ] 角色放 **App DB** 還是 **Keycloak**？（per-product editor 放 Keycloak 會很痛）
-- [ ] 公司有沒有「權限必須集中在 Keycloak / IAM 管、不能應用自管」的政策？
+- [x] **已定案（2026-06-10）：Keycloak 只提供登入（authentication），不管授權。**
+- [ ] **授權層待定：公司有自有 Authorization 系統（A4 系統）**，App DB 自管 vs 接 A4 尚未定。要先釐清三件事：
+  1. **政策**：內部工具**強制**走 A4 管權限，還是可自管？
+  2. **介接方式**：A4 是 API 即時查？定期同步？還是往 token 裡塞 claim？
+  3. **粒度**：A4 能不能表達「**per-product editor**」這種資源級指派，還是只有粗角色（admin/editor/viewer）？
+  - 若 A4 只有粗角色 → 建議**混合制**：A4 管粗角色，App DB 留 `product_editors(product_id, user_sub)` 管細指派（這張表本來就最適合放 app 端）。
+  - 若可自管 → 維持原建議：兩張小表全放 App DB（`user_roles` + `product_editors`），能登入即 viewer。
+  - 不論哪條路：離職/轉組靠 Keycloak 停用帳號自動失效（§6 第一題跟著解）。
 
 ### §3 Editor 的編輯範圍（最關鍵，先定）
 - [ ] editor 的「edit」**具體包含什麼**？上傳檔、commit 範本、rule-check…是否也含改 class 策略這種 **library 級**設定？
@@ -71,7 +77,7 @@
 - [ ] 不同 product 之間要**完全隔離**（editor 看不到別人 product），還是「viewer 都能看全部、只是不能編」？editor 的「看」範圍是否也全開？
 
 ### §5 Admin 與啟動
-- [ ] **第一個 admin** 怎麼產生？env 白名單 email vs Keycloak 一個 `admin` role（bootstrap）。
+- [ ] **第一個 admin** 怎麼產生？（隨 §2 授權層一起定）若權限自管 → **env 白名單**（如 `SMDR2_ADMIN_EMAILS=a@x,b@x`，零 bootstrap、套既有 env 慣例）；若走 A4 → admin 直接由 A4 指派，這題消失。
 - [ ] admin 除了指派 editor，要不要能**撤銷** editor、**改別人**的 product 指派、查誰有什麼權限？
 - [ ] 需不需要**多個 admin**？admin 能不能指派其他 admin？
 

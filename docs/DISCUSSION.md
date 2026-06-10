@@ -79,11 +79,12 @@
 ## §E. 身分 / SSO / 角色歸屬
 > 細節：[`auth-permissions.md` §1、§2、§5](auth-permissions.md)
 
-- [ ] **E1.** Keycloak 唯一識別用 `sub`（穩定不可讀）vs `email`／`preferred_username`（可讀但可能變）？
-- [ ] **E2.** 用**現有 realm** 還是新開一個給這工具？client 註冊流程？
-- [ ] **E3.** 有無強制 **MFA / session timeout / 登出**規範？token 續期由工具自管還是靠 Keycloak session？
-- [ ] **E4.** 角色放 **App DB** 還是 **Keycloak**？（per-product editor 放 Keycloak 會很痛。）公司有無「權限必須集中在 IAM、不能應用自管」政策？
-- [ ] **E5.** **第一個 admin** 怎麼產生？env 白名單 email vs Keycloak `admin` role bootstrap。
+- [x] **E1. 已定案（2026-06-10）：** 唯一識別用 `sub`；email/username 只做顯示。
+- [ ] **E2.** 用**現有 realm** 還是新開一個給這工具？client 註冊流程？（問 infra）
+- [ ] **E3.** 有無強制 **MFA / session timeout / 登出**規範？token 續期由工具自管還是靠 Keycloak session？（問 infra）
+- [x] **E4a. 已定案（2026-06-10）：Keycloak 只提供登入（authentication），不管授權。**
+- [ ] **E4b.（新增）授權層：公司有自有 Authorization 系統「A4」**，App DB 自管 vs 接 A4 待定。要問：①政策上強制走 A4 嗎？②介接方式（API 即時查／同步／token claim）？③A4 撐不撐得起 per-product editor 粒度？若 A4 只有粗角色 → 建議混合制：A4 管粗角色、App DB 留 `product_editors` 細指派。
+- [ ] **E5.** 第一個 admin 怎麼產生？若權限自管 → env 白名單（`SMDR2_ADMIN_EMAILS`）；若走 A4 → admin 直接由 A4 給，這題消失。（隨 E4b 定）
 - [ ] **E6.** 要**多個 admin** 嗎？admin 能否指派其他 admin？能否撤銷 editor / 改別人的 product 指派 / 查誰有什麼權限？
 
 ---
@@ -91,7 +92,7 @@
 ## §F. 營運 / 邊界
 > 細節：[`auth-permissions.md` §6](auth-permissions.md)
 
-- [ ] **F1.** **離職 / 轉組**：權限怎麼收？靠 Keycloak 停用帳號自動失效，還是 App 要另外清？
+- [x] **F1. 已隨 E4 定案：** 靠 Keycloak 停用帳號自動失效（登不進來 = 權限死），App 不用另外清。
 - [ ] **F2.** 要不要 **audit log**（誰在何時改了什麼）？合規上是否必要？
 - [ ] **F3.** **未登入**怎麼處理——直接導去 Keycloak，還是保留公開唯讀頁？
 - [ ] **F4.** 內網 vs 外網存取限制？只能公司網段用嗎？
