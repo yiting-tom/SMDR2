@@ -2,9 +2,9 @@
 
 ## 1. 測試隔離與基礎設施(先做,後面每步都靠它驗證)
 
-- [ ] 1.1 新增 `SMDR2_DATA_DIR` env:`app/storage.py` 與三個 store 的路徑來源改由 env 解析(預設 `data/`,行為不變)
-- [ ] 1.2 pytest fixture:`tmp_path` 注入 `SMDR2_DATA_DIR`,app/store singleton 可重建;既有測試跑在隔離 DB 上(不再寫 `data/library.sqlite`)
-- [ ] 1.3 新增 `scripts/reset_dev_data.py`:清空 sqlite + `data/` 衍生目錄
+- [x] 1.1 新增 `SMDR2_DATA_DIR` env:`app/storage.py` 與三個 store 的路徑來源改由 env 解析(預設 `data/`,行為不變)
+- [x] 1.2 pytest fixture:`tmp_path` 注入 `SMDR2_DATA_DIR`,app/store singleton 可重建;既有測試跑在隔離 DB 上(不再寫 `data/library.sqlite`)
+- [x] 1.3 新增 `scripts/reset_dev_data.py`:清空 sqlite + `data/` 衍生目錄
 
 ## 2. Schema 與 store 層
 

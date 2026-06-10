@@ -7,12 +7,23 @@ test.dxf use the `test_dxf_path` fixture.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Point the whole data tree at a session tmp dir BEFORE any test module
+# imports app.* — storage.py reads SMDR2_DATA_DIR once at import, and the
+# store singletons (FILE_STORE / LIBRARIES / PRODUCT_STORE) derive their
+# SQLite path from it. Without this, TestClient tests write into the real
+# data/library.sqlite (2026-06-10: 2500+ stale test products found there).
+os.environ.setdefault(
+    "SMDR2_DATA_DIR", tempfile.mkdtemp(prefix="smdr2-test-data-")
+)
 
 
 @pytest.fixture

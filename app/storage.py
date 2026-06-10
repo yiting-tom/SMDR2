@@ -15,10 +15,15 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+# SMDR2_DATA_DIR re-points the whole data tree (the test suite sets it to a
+# tmp dir before any app import so runs never touch the real data/). Read
+# once at import — every store singleton derives its path from these
+# constants.
+DATA_DIR = Path(os.environ.get("SMDR2_DATA_DIR", str(PROJECT_ROOT / "data")))
 UPLOADS_DIR = DATA_DIR / "uploads"
 PARSED_DIR = DATA_DIR / "parsed"
 PREMATCH_DIR = DATA_DIR / "prematch"
