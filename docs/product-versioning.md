@@ -51,9 +51,14 @@
 
 > 以下每題都會影響 schema / UI / 遷移，請逐題拍板。
 
-### Q1.（已被路線 1 收窄，剩末段待確認）
-templates + match 調參已定隨版本走（= 該版的 library，見 §2.4）。剩下確認一件事：
-- **role-bound DXF files（SBT/BD/POD/RING/LID）也綁 version** 對吧？（每版有自己的圖紙 → `files.product_id` 改掛 `version_id`）
+### Q1. ~~版本到底換掉什麼？~~ **已定案（2026-06-10）**
+templates + match 調參隨版本走（= 該版的 library，見 §2.4）。files 的關鍵情境（user 提供）：**新版可能 SBT、BD 沿用前一版，只有 POD 是新文件** → files 必須**可跨版共用**，不能硬複製。
+
+結構推導：
+- **role 綁定從 `files` 表抽出，改用 junction：`version_files(version_id, role, file_id, …per-version 狀態)`**。`files` 退化為純內容儲存（content-hash 去重本來就支援多處引用，bytes 零重複）。
+- 建新版 = clone 上一版的 library **+ 複製上一版的 role 綁定**；user 只替換有改的角色（如 POD），其餘沿用。
+- per-version 狀態（selected_layers、rect、unit override 等目前長在 `files` 列上的東西）要跟著搬進 junction——同一份 bytes 在不同版本可有不同選層。
+- ⚠️ **衍生 artifact 必須版本化**：`parsed/match/prematch` 目前以 `{file_id}` 為 key；v1/v2 共用同一 SBT file 但 templates 不同 → match 結果不同。若仍以 file_id 為 key，v2 重跑會**覆蓋 v1 的結果、毀掉舊版可重現性**。→ 改以 `(version_id, file_id)` 為 key（如 `match/{version_id}/{file_id}.json`）；rule 結果同理 `{version_id}.json`。精確 keying 留給 OpenSpec design。
 
 ### Q2. ~~library-scoped 標準件（共用件）確定版本無關？~~ **已蒸發（2026-06-10）**
 拓樸定案「一 product 一 library、無任何共用範本、新 product 空白開始」（見 `auth-permissions.md` §4）→ 不再有 library-scoped 層 → **版本快照涵蓋整個 product library，無例外**。本題不存在了。

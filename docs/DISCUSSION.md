@@ -55,7 +55,7 @@
 ## §C. Product 版本管理
 > 細節：[`product-versioning.md` §3](product-versioning.md)
 
-- [ ] **C1.（已被路線 1 收窄）** templates + match 調參已定隨版本走（= 該版的 library）。剩下確認：**role-bound DXF files（SBT/BD/POD/RING/LID）也綁 version** 對吧（每版有自己的圖紙）？→ `files.product_id` 改掛 `version_id`。
+- [x] **C1. 已定案（2026-06-10）：** templates + match 調參 = 該版 library；files **可跨版共用**（實例：新版 SBT/BD 沿用前版、只換 POD）→ role 綁定抽成 junction `version_files(version_id, role, file_id, …per-version 狀態)`，`files` 退化為純內容儲存（content-hash 天然去重）。建新版 = clone library + 複製綁定，只換有改的角色。⚠️ 衍生 artifact（parsed/match/prematch/rule_check）改以 `(version_id, file_id)` 為 key，否則 v2 重跑會覆蓋 v1 結果。細節見 [`product-versioning.md` Q1](product-versioning.md)。
 - [x] **C2. 已隨 A1b 蒸發：** 不再有 library-scoped 共用件 → 版本快照涵蓋**整個 version library**，無例外層。
 - [ ] **C3.** 版號格式與輸入規則：自由輸入 vs 固定格式？自動遞增 vs 人工？同 product 內**可否重複**？
 - [ ] **C4.** 舊版生命週期：永久保留 vs 留最近 N 版？可否刪？要能**回看舊版的 match / rule 結果**嗎？
