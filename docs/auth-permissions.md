@@ -90,7 +90,7 @@
 - [x] **已定案（2026-06-10）：要 audit log。** 至少涵蓋 **library 內容的增刪改**：哪個 editor、在哪個 product（含版本）、對 templates / match 調參做了 add / delete / modify。雛形：`audit_log(id, ts, user_sub, product_id, version_id, action, target_type, target_id, detail)`。admin 強制解鎖已定要留 audit（§7），寫同一張表。是否擴及其他動作（上傳檔、建 product、rule-check 觸發…）實作時再議，表結構先留通用。
 - [x] **已定案（2026-06-10）：未登入一律導去 Keycloak SSO login**，強制先登入，不留公開頁。
 - [x] **已定案（2026-06-10）：全封閉網路部署**，無外網存取考量（TLS/暴露面不在 app 範圍）。
-- [ ] 上線權限後，**既有資料**（現在無隔離）要不要回溯指派 owner / product 歸屬？
+- [x] **已隨 C9 蒸發（2026-06-10）：** 既有資料全是開發期產物、不遷移不保留 → 無回溯指派問題。
 
 ### §7 多用戶併發與編輯鎖定
 
