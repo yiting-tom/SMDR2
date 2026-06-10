@@ -84,7 +84,8 @@ function persistHiddenLayers() {
     sessionStorage.setItem(VIS_STORAGE_KEY, JSON.stringify([...hiddenLayers]));
   } catch { /* ignore */ }
 }
-const $productContext = document.getElementById("product-context");
+// #product-context ("{product} / {version}") is rendered server-side in
+// viewer.html — read-only; version switching happens on the product page.
 const $roleSwitcher = document.getElementById("role-switcher");
 
 // Rule-check focus state — populated when the viewer is opened with
@@ -108,73 +109,120 @@ document.querySelectorAll(".floating-collapse[data-panel]").forEach((b) => {
 const ctx = $canvas.getContext("2d");
 
 const FILE_ID = document.body.dataset.fileId;
+// Version context — injected by the server into the page (the viewer URL
+// itself is /viewer/{file_id}?version_id=...). Every file-centric API
+// call MUST carry ?version_id= or the server 422s.
+const VERSION_ID = document.body.dataset.versionId
+  || new URLSearchParams(location.search).get("version_id")
+  || "";
+const VERSION_LABEL = document.body.dataset.versionLabel || "";
+const PRODUCT_NAME = document.body.dataset.productName || "";
+// True when the version is signed off (frozen / read-only). Server-side
+// 409 guards are authoritative; these client-side gates are UX.
+const SIGNED_OFF = document.body.dataset.signedOff === "1";
+
+// Append the version scope to a URL, regardless of whether it already
+// has a query string.
+function withVersion(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}version_id=${encodeURIComponent(VERSION_ID)}`;
+}
+
 const API = {
-  primitives:    () => `/api/files/${FILE_ID}/primitives`,
-  warmShapes:    () => `/api/files/${FILE_ID}/warm-shapes`,
-  fileInfo:      () => `/api/files/${FILE_ID}`,
-  match:         () => `/api/files/${FILE_ID}/match`,
-  commit:        () => `/api/files/${FILE_ID}/commit`,
-  scanAll:       () => `/api/files/${FILE_ID}/scan-all`,
-  prematch:      () => `/api/files/${FILE_ID}/prematch`,
-  matchJson:     () => `/api/files/${FILE_ID}/match-json`,
-  sideRegions:   () => `/api/files/${FILE_ID}/side-regions`,
-  // Classes/templates are file-scoped via the ?file_id= query — the server
-  // resolves to the file's library.
-  classes:       () => `/api/classes?file_id=${FILE_ID}`,
-  templates:     () => `/api/templates?file_id=${FILE_ID}`,
+  primitives:    () => withVersion(`/api/files/${FILE_ID}/primitives`),
+  warmShapes:    () => withVersion(`/api/files/${FILE_ID}/warm-shapes`),
+  fileInfo:      () => withVersion(`/api/files/${FILE_ID}`),
+  match:         () => withVersion(`/api/files/${FILE_ID}/match`),
+  commit:        () => withVersion(`/api/files/${FILE_ID}/commit`),
+  scanAll:       () => withVersion(`/api/files/${FILE_ID}/scan-all`),
+  prematch:      () => withVersion(`/api/files/${FILE_ID}/prematch`),
+  matchJson:     () => withVersion(`/api/files/${FILE_ID}/match-json`),
+  sideRegions:   () => withVersion(`/api/files/${FILE_ID}/side-regions`),
+  // Classes/templates are version-scoped — the version owns its library 1:1.
+  classes:       () => `/api/classes?version_id=${encodeURIComponent(VERSION_ID)}`,
+  templates:     () => `/api/templates?version_id=${encodeURIComponent(VERSION_ID)}`,
   templateOne:   (id) => `/api/templates/${id}`,
 };
 
-const $librarySwitcher = document.getElementById("library-switcher");
+function fmtSignedAt(ts) {
+  if (ts == null) return "—";
+  try { return new Date(ts * 1000).toLocaleString(); }
+  catch { return String(ts); }
+}
+
+// Mutating calls on a signed-off version come back HTTP 409 with
+// detail {error: "version signed-off", signed_off_by, signed_off_at}.
+// Returns true when the response was that 409 (and was surfaced).
+async function handleSignedOff409(res) {
+  if (res.status !== 409) return false;
+  let detail = null;
+  try { detail = (await res.clone().json())?.detail; } catch { /* not JSON */ }
+  if (detail && detail.error === "version signed-off") {
+    alert(`此版本已由 ${detail.signed_off_by} 於 ${fmtSignedAt(detail.signed_off_at)} 畫押,無法修改。`);
+    return true;
+  }
+  return false;
+}
+
+const SIGNED_MSG = "版本已畫押(唯讀)— 無法修改";
 
 // Returned from loadFileInfo so the bootstrap can run the focused-rule
-// fetch only when the file lives inside a product.
+// fetch only when the binding carries a role.
 let currentFileInfo = null;
 
+// The version payload for VERSION_ID (files_by_role / files_by_role_all /
+// match flags). There is no GET /api/versions/{vid} endpoint, so we locate
+// it inside GET /api/products (the viewer needs the role-sibling lists
+// anyway). Cached here; refreshed by refreshRoleSwitcher().
+let currentVersionInfo = null;
+
+async function fetchVersionContext() {
+  try {
+    const res = await fetch("/api/products");
+    if (!res.ok) return null;
+    const data = await res.json();
+    for (const p of data.products ?? []) {
+      const v = (p.versions ?? []).find(x => x.id === VERSION_ID);
+      if (v) return v;
+    }
+  } catch (e) {
+    console.warn("fetchVersionContext failed:", e);
+  }
+  return null;
+}
+
 async function loadFileInfo() {
-  const [fileRes, libsRes] = await Promise.all([
-    fetch(API.fileInfo()),
-    fetch("/api/libraries"),
-  ]);
-  if (!fileRes.ok || !libsRes.ok) return;
+  const fileRes = await fetch(API.fileInfo());
+  if (!fileRes.ok) return;
   const file = await fileRes.json();
   currentFileInfo = file;
   // Restore persisted view rectangles so the overlay is visible on load.
   sideRects.top_view = file.top_view_rect ?? null;
   sideRects.bottom_view = file.bottom_view_rect ?? null;
   sideRects.side_view = file.side_view_rect ?? null;
-  const libs = (await libsRes.json()).libraries;
-  $librarySwitcher.innerHTML = "";
-  for (const lib of libs) {
-    const opt = document.createElement("option");
-    opt.value = lib.id;
-    opt.textContent = lib.name;
-    if (lib.id === file.library_id) opt.selected = true;
-    $librarySwitcher.appendChild(opt);
-  }
 
-  // Product context + sibling-DXF switcher.
-  if (file.product_id) {
-    const pRes = await fetch(`/api/products/${file.product_id}`);
-    if (pRes.ok) {
-      const p = await pRes.json();
-      $productContext.textContent = `${p.name} / ${file.dxf_role}`;
-      renderRoleSwitcher(p, file);
-      // Stash the product name on the file object so the unit-picker's
-      // confirm modal can show "Clear saved Match JSON for <name>"
-      // without re-fetching products.
-      file.product_name = p.name;
-    }
+  // Version context (role-sibling switcher). The product / version label
+  // itself is rendered server-side in #product-context — read-only;
+  // switching versions happens on the product page.
+  currentVersionInfo = await fetchVersionContext();
+  if (currentVersionInfo) {
+    renderRoleSwitcher(currentVersionInfo, file);
   } else {
-    $productContext.textContent = "";
     closeRoleMenu();
     $roleSwitcher.innerHTML = "";
   }
+  // Stash the product name on the file object so the unit-picker's
+  // confirm modal can show "Clear saved Match JSON for <name>"
+  // without re-fetching products.
+  file.product_name = PRODUCT_NAME || null;
 
   // Bootstrap the unit-override picker now that the file payload (and
-  // optional product context) is loaded. Recompute completions reload
-  // the page so the canvas re-reads the new geometry from /primitives.
+  // version context) is loaded. Recompute completions reload the page
+  // so the canvas re-reads the new geometry from /primitives. On a
+  // signed-off version the picker is display-only.
   initUnitPicker(file, {
+    versionId: VERSION_ID,
+    readOnly: SIGNED_OFF,
     onComplete: () => window.location.reload(),
   });
 }
@@ -194,15 +242,15 @@ function closeRoleMenu() {
   openRoleMenu = null;
 }
 
-function renderRoleSwitcher(product, file) {
+function renderRoleSwitcher(version, file) {
   closeRoleMenu();
   $roleSwitcher.innerHTML = "";
   for (const role of ["SBT", "BD", "POD"]) {
-    $roleSwitcher.appendChild(renderRoleSlot(product, file, role));
+    $roleSwitcher.appendChild(renderRoleSlot(version, file, role));
   }
   // 4th position: split RING | LID pair — both halves render
   // independently and may both be populated.
-  $roleSwitcher.appendChild(renderRingLidPair(product, file));
+  $roleSwitcher.appendChild(renderRingLidPair(version, file));
 }
 
 // A role is "matched" once every sibling DXF under it has had its match
@@ -227,25 +275,20 @@ function notReadyTitle(sib, role) {
   return `${role} 尚未完成 preprocess`;  // discovering_layers / preprocessing
 }
 
-// Re-pull the product payload so the role switcher reflects fresh
+// Re-pull the version payload so the role switcher reflects fresh
 // `match_saved` flags. Callers: after Save Match JSON succeeds, and after
-// a region edit clears match_saved server-side. No-op outside a product
-// context (the switcher is hidden in that case).
+// a region edit clears match_saved server-side.
 async function refreshRoleSwitcher() {
-  if (!currentFileInfo?.product_id) return;
-  try {
-    const r = await fetch(`/api/products/${currentFileInfo.product_id}`);
-    if (!r.ok) return;
-    const p = await r.json();
-    renderRoleSwitcher(p, currentFileInfo);
-  } catch (e) {
-    console.warn("refreshRoleSwitcher failed:", e);
-  }
+  if (!currentFileInfo) return;
+  const v = await fetchVersionContext();
+  if (!v) return;
+  currentVersionInfo = v;
+  renderRoleSwitcher(v, currentFileInfo);
 }
 
-function renderRoleSlot(product, file, role, opts = {}) {
+function renderRoleSlot(version, file, role, opts = {}) {
   const { disabledReason = null } = opts;
-  const siblings = product.files_by_role_all?.[role] ?? [];
+  const siblings = version.files_by_role_all?.[role] ?? [];
   const isCurrentRole = role === file.dxf_role;
 
   if (siblings.length === 0) {
@@ -270,7 +313,7 @@ function renderRoleSlot(product, file, role, opts = {}) {
     if (sibling.id === file.id) {
       btn.classList.add("current");
     } else if (isSibViewable(sibling)) {
-      btn.href = `/viewer/${sibling.id}`;
+      btn.href = withVersion(`/viewer/${sibling.id}`);
     } else {
       btn.classList.add("disabled");
       btn.title = notReadyTitle(sibling, role);
@@ -283,11 +326,11 @@ function renderRoleSlot(product, file, role, opts = {}) {
 
 // 4th position: render RING and LID side-by-side. Each half is an
 // independent role slot — both may be populated concurrently.
-function renderRingLidPair(product, file) {
+function renderRingLidPair(version, file) {
   const wrap = document.createElement("span");
   wrap.className = "role-btn-pair";
-  wrap.appendChild(renderRoleSlot(product, file, "RING"));
-  wrap.appendChild(renderRoleSlot(product, file, "LID"));
+  wrap.appendChild(renderRoleSlot(version, file, "RING"));
+  wrap.appendChild(renderRoleSlot(version, file, "LID"));
   return wrap;
 }
 
@@ -321,7 +364,7 @@ function buildRoleDropdown(role, siblings, isCurrentRole, currentFileId) {
     } else if (isSibViewable(sib)) {
       item = document.createElement("a");
       item.className = "role-menu__item";
-      item.href = `/viewer/${sib.id}`;
+      item.href = withVersion(`/viewer/${sib.id}`);
     } else {
       item = document.createElement("span");
       item.className = "role-menu__item role-menu__item--disabled";
@@ -370,36 +413,8 @@ window.addEventListener("keydown", (e) => {
   e.stopPropagation();
 }, true);
 
-$librarySwitcher.addEventListener("change", async () => {
-  const newLibId = $librarySwitcher.value;
-  if (!confirm("Switching libraries will re-process this file against the new library's templates. Continue?")) {
-    // revert UI
-    await loadFileInfo();
-    return;
-  }
-  $librarySwitcher.disabled = true;
-  setBaseStatus("switching library — re-processing…");
-  try {
-    const res = await fetch(API.fileInfo(), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ library_id: newLibId }),
-    });
-    if (!res.ok) {
-      console.error(await res.text());
-      setBaseStatus(`switch failed: ${res.status}`);
-      $librarySwitcher.disabled = false;
-      return;
-    }
-    // The file is back in `preprocessing`; reload viewer so prematch + classes
-    // refresh against the new library once it finishes.
-    window.location.reload();
-  } catch (e) {
-    console.error(e);
-    setBaseStatus(`switch error: ${e.message}`);
-    $librarySwitcher.disabled = false;
-  }
-});
+// (Library switching is gone — one version owns one library; the
+// equivalent operation is switching versions on the product page.)
 
 const view = { cx: 0, cy: 0, zoom: 1 };
 let primitives = [];
@@ -1666,17 +1681,15 @@ function setOpenedRules(s) {
   sessionStorage.setItem(RULE_OPEN_KEY, JSON.stringify([...s]));
 }
 
-let currentProductInfo = null;     // /api/products/{id} response cached for sibling links
-let currentRuleResults = null;     // /api/products/{id}/rule-check response cached
+let currentProductInfo = null;     // version payload cached for sibling links (files_by_role*)
+let currentRuleResults = null;     // /api/versions/{vid}/rule-check response cached
 
-async function loadRuleSidebar(productId, role) {
+async function loadRuleSidebar(role) {
   $rulesBtn.hidden = false;
-  // Fetch the product (for sibling files_by_role) and the rule check together.
-  const [pRes, rRes] = await Promise.all([
-    fetch(`/api/products/${productId}`),
-    fetch(`/api/products/${productId}/rule-check`),
-  ]);
-  if (pRes.ok) currentProductInfo = await pRes.json();
+  // The version payload (sibling files_by_role) was loaded by loadFileInfo;
+  // fetch the version's rule check alongside.
+  currentProductInfo = currentVersionInfo ?? await fetchVersionContext();
+  const rRes = await fetch(`/api/versions/${encodeURIComponent(VERSION_ID)}/rule-check`);
   if (!rRes.ok) {
     // No rule check yet — keep the button visible but the sidebar empty.
     currentRuleResults = null;
@@ -1704,7 +1717,7 @@ function renderRuleSidebar(role) {
   if (!currentRuleResults) {
     $ruleSidebarSummary.textContent = "";
     $ruleSidebarBody.innerHTML =
-      `<div class="empty-msg">No rule check yet for this product. ` +
+      `<div class="empty-msg">No rule check yet for this version. ` +
       `Run it from the dashboard.</div>`;
     return;
   }
@@ -1840,7 +1853,7 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
       focusSubRule(ruleName, idx, rulePass, sub);
       highlightFocusedInSidebar();
     } else if (targetFile) {
-      location.href = `/viewer/${targetFile.id}?rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
+      location.href = `/viewer/${targetFile.id}?version_id=${encodeURIComponent(VERSION_ID)}&rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
     }
   });
   return li;
@@ -2494,9 +2507,8 @@ async function fetchClasses() {
 }
 
 async function editClassStrategy(cls) {
-  const libId = window.__libraryId || null;
-  if (!libId) {
-    setBaseStatus("library id unknown; can't edit strategy");
+  if (SIGNED_OFF) {
+    setBaseStatus(SIGNED_MSG);
     return;
   }
   const currentStrategy = cls.match_strategy || "chamfer";
@@ -2532,13 +2544,14 @@ async function editClassStrategy(cls) {
       body.bbox_ratio = v;
     }
   }
-  const url = `/api/libraries/${encodeURIComponent(libId)}/classes/${encodeURIComponent(cls.name)}/strategy`;
+  const url = `/api/versions/${encodeURIComponent(VERSION_ID)}/classes/${encodeURIComponent(cls.name)}/strategy`;
   const res = await fetch(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    if (await handleSignedOff409(res)) return;
     setBaseStatus(`set strategy failed: ${res.status}`);
     return;
   }
@@ -2714,6 +2727,7 @@ function renderClassToolbar() {
 }
 
 function enterAddMode(className) {
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }  // commit path is frozen
   if (measureMode) return;  // mutually exclusive with measure mode
   if (addModeClass === className) {
     // toggle off
@@ -2772,6 +2786,7 @@ async function scanCurrentSelection() {
 }
 
 async function commitCurrentTemplate() {
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }
   if (!addModeClass || !selection.size) return;
   try {
     const res = await fetch(API.commit(), {
@@ -2780,6 +2795,7 @@ async function commitCurrentTemplate() {
       body: JSON.stringify({ class_name: addModeClass, handles: [...selection] }),
     });
     if (!res.ok) {
+      if (await handleSignedOff409(res)) return;
       const err = await res.text();
       console.error("commit failed:", err);
       setBaseStatus(`commit error: ${res.status}`);
@@ -2904,6 +2920,7 @@ $scanAllBtn.addEventListener("click", toggleScanAll);
 // `saveMatchInFlight` holds the active job_id until the poll resolves,
 // so a second click while saving is a no-op.
 async function saveMatchJson() {
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }
   if (saveMatchInFlight) return;
   const t0 = performance.now();
   $saveMatchBtn.disabled = true;
@@ -2912,6 +2929,7 @@ async function saveMatchJson() {
   try {
     const res = await fetch(API.matchJson(), { method: "POST" });
     if (!res.ok) {
+      if (await handleSignedOff409(res)) { $saveMatchBtn.disabled = false; return; }
       const err = await res.text();
       console.error("save-match submit failed:", err);
       setBaseStatus(`save-match error: ${res.status}`);
@@ -3004,7 +3022,9 @@ async function renderLibrary() {
   }
   const data = await res.json();
   const templates = data.templates;
-  $librarySummary.textContent = `${templates.length} template${templates.length === 1 ? "" : "s"}`;
+  $librarySummary.textContent =
+    `${templates.length} template${templates.length === 1 ? "" : "s"}`
+    + (SIGNED_OFF ? " · 已畫押(唯讀)" : "");
 
   if (templates.length === 0) {
     $libraryBody.innerHTML =
@@ -3090,11 +3110,12 @@ function buildTemplateCard(t) {
     `${t.vertex_count}v · ${small.toFixed(3)}×${big.toFixed(3)} mm</span>`;
   card.appendChild(meta);
 
-  // Actions: move dropdown + delete
+  // Actions: move dropdown + delete. Both mutate the version's library —
+  // rendered disabled when the version is signed off (server enforces 409).
   const actions = document.createElement("div");
   actions.className = "actions";
   const moveSelect = document.createElement("select");
-  moveSelect.title = "Move to another class";
+  moveSelect.title = SIGNED_OFF ? "版本已畫押(唯讀)— 無法移動範本" : "Move to another class";
   for (const c of classes) {
     const opt = document.createElement("option");
     opt.value = c.name;
@@ -3102,6 +3123,7 @@ function buildTemplateCard(t) {
     if (c.name === t.class_name) opt.selected = true;
     moveSelect.appendChild(opt);
   }
+  moveSelect.disabled = SIGNED_OFF;
   moveSelect.addEventListener("change", async () => {
     moveSelect.disabled = true;
     try {
@@ -3111,13 +3133,14 @@ function buildTemplateCard(t) {
         body: JSON.stringify({ class_name: moveSelect.value }),
       });
       if (!res.ok) {
-        console.error(await res.text());
+        if (!(await handleSignedOff409(res))) console.error(await res.text());
+        await renderLibrary();  // revert the dropdown to the stored class
       } else {
         await refreshClassCounts();
         await renderLibrary();
       }
     } finally {
-      moveSelect.disabled = false;
+      moveSelect.disabled = SIGNED_OFF;
     }
   });
   actions.appendChild(moveSelect);
@@ -3126,19 +3149,21 @@ function buildTemplateCard(t) {
   delBtn.type = "button";
   delBtn.className = "delete-btn";
   delBtn.textContent = "Delete";
+  delBtn.disabled = SIGNED_OFF;
+  if (SIGNED_OFF) delBtn.title = "版本已畫押(唯讀)— 無法刪除範本";
   delBtn.addEventListener("click", async () => {
     if (!confirm(`Delete template ${t.key}?`)) return;
     delBtn.disabled = true;
     try {
       const res = await fetch(API.templateOne(t.id), { method: "DELETE" });
       if (!res.ok) {
-        console.error(await res.text());
+        if (!(await handleSignedOff409(res))) console.error(await res.text());
       } else {
         await refreshClassCounts();
         await renderLibrary();
       }
     } finally {
-      delBtn.disabled = false;
+      delBtn.disabled = SIGNED_OFF;
     }
   });
   actions.appendChild(delBtn);
@@ -3534,6 +3559,7 @@ function drawSideRegionLabels() {
 }
 
 function enterMarkMode(queue) {
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return false; }
   if (addModeClass || measureMode) return false;
   // Snapshot pre-session sideRects so Esc can revert any provisional drags.
   sideRectsSnapshot = { ...sideRects };
@@ -3573,6 +3599,7 @@ function toggleMarkMode() {
 }
 
 async function patchSideRegions() {
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return false; }
   const body = {
     top_view_rect: sideRects.top_view,
     bottom_view_rect: sideRects.bottom_view,
@@ -3585,6 +3612,7 @@ async function patchSideRegions() {
       body: JSON.stringify(body),
     });
     if (!res.ok) {
+      if (await handleSignedOff409(res)) return false;
       setBaseStatus(`save sides failed: ${res.status}`);
       return false;
     }
@@ -3605,6 +3633,7 @@ function clearSpecificView(view) {
   // Clear one view's rectangle and persist immediately. Works inside or
   // outside mark mode; when called during mark mode the snapshot is also
   // cleared so Esc cannot restore what the user explicitly deleted.
+  if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }
   if (!sideRects[view]) return;
   sideRects[view] = null;
   if (sideRectsSnapshot) sideRectsSnapshot[view] = null;
@@ -3647,6 +3676,7 @@ if ($sidesMenu) {
     } else if (action === "top_view" || action === "bottom_view" || action === "side_view") {
       enterMarkMode([action]);
     } else if (action === "clear") {
+      if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }
       sideRects.top_view = null;
       sideRects.bottom_view = null;
       sideRects.side_view = null;
@@ -3833,10 +3863,23 @@ async function load() {
   // automatically so user sees library coverage on arrival.
   await loadPrematch();
   // Populate the rule-check sidebar (and apply ?rule=&idx= focus if any).
-  if (currentFileInfo?.product_id && currentFileInfo?.dxf_role) {
-    await loadRuleSidebar(currentFileInfo.product_id, currentFileInfo.dxf_role);
+  if (VERSION_ID && currentFileInfo?.dxf_role) {
+    await loadRuleSidebar(currentFileInfo.dxf_role);
   } else {
     $rulesBtn.hidden = true;
+  }
+}
+
+// Signed-off version: pre-disable every mutating affordance in the
+// toolbar (server-side 409 guards stay authoritative). Viewing, pan,
+// zoom, measure, scan-all, and rule results all keep working.
+if (SIGNED_OFF) {
+  $saveMatchBtn.disabled = true;
+  $saveMatchBtn.title = "版本已畫押(唯讀)— 無法重存 Match JSON";
+  const sidesBtnEl = document.getElementById("sides-btn");
+  if (sidesBtnEl) {
+    sidesBtnEl.disabled = true;
+    sidesBtnEl.title = "版本已畫押(唯讀)— 無法標記視圖區域";
   }
 }
 

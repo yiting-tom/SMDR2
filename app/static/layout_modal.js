@@ -8,6 +8,7 @@
 //   import { openLayoutModal } from "./layout_modal.js";
 //   await openLayoutModal({
 //     fileId: "abc123",
+//     versionId: "v-456",  // required — file endpoints are version-scoped
 //     onConfirm: async (layoutName) => { ... },  // called after POST 200
 //   });
 //
@@ -43,7 +44,7 @@ function renderEmpty(bodyEl, message) {
   bodyEl.innerHTML = `<p class="layer-empty">${escapeHtml(message)}</p>`;
 }
 
-function renderCards(bodyEl, fileId, layouts, chosenName) {
+function renderCards(bodyEl, fileId, versionId, layouts, chosenName) {
   bodyEl.innerHTML = "";
   const grid = document.createElement("div");
   grid.className = "layer-grid";
@@ -53,7 +54,7 @@ function renderCards(bodyEl, fileId, layouts, chosenName) {
     const space = layout.is_paperspace ? "paper space" : "model space";
     card.innerHTML =
       `<div class="layer-thumb">` +
-        `<img src="/api/files/${fileId}/layout-preview/${encodeURIComponent(layout.safe_name)}.svg" ` +
+        `<img src="/api/files/${fileId}/layout-preview/${encodeURIComponent(layout.safe_name)}.svg?version_id=${encodeURIComponent(versionId)}" ` +
         `alt="${escapeHtml(layout.name)}" loading="lazy" />` +
       `</div>` +
       `<div class="layer-row">` +
@@ -88,12 +89,14 @@ function recomputeFooter(modal) {
  *
  * @param {object} opts
  * @param {string} opts.fileId
+ * @param {string} opts.versionId  version scoping every /api/files call
  * @param {string} [opts.fileName]  optional, for the title row
  * @param {(layout: string) => Promise<void>} [opts.onConfirm]  called after
  *        POST /layouts succeeds; the modal closes on resolve.
  */
 export async function openLayoutModal(opts) {
-  const { fileId, fileName, onConfirm } = opts;
+  const { fileId, versionId, fileName, onConfirm } = opts;
+  const vq = `version_id=${encodeURIComponent(versionId)}`;
   const modal = $("layout-modal");
   if (!modal) throw new Error("layout-modal markup missing on this page");
   const titleEl = modal.querySelector("[data-layout-title]");
@@ -141,7 +144,7 @@ export async function openLayoutModal(opts) {
 
     (async () => {
       try {
-        const res = await fetch(`/api/files/${fileId}/layouts`);
+        const res = await fetch(`/api/files/${fileId}/layouts?${vq}`);
         if (!res.ok) {
           renderEmpty(bodyEl, `Views not available yet (HTTP ${res.status}).`);
           return;
@@ -154,7 +157,7 @@ export async function openLayoutModal(opts) {
         }
         // Default: existing choice if any, else the first (richest) tab.
         const chosenName = data.chosen_layout ?? layouts[0].name;
-        renderCards(bodyEl, fileId, layouts, chosenName);
+        renderCards(bodyEl, fileId, versionId, layouts, chosenName);
         const recompute = () => recomputeFooter(modal);
         recompute();
         for (const rb of bodyEl.querySelectorAll('input[type="radio"][data-layout]')) {
@@ -167,7 +170,7 @@ export async function openLayoutModal(opts) {
           confirmBtn.textContent = "Loading…";
           inFlight = true;
           try {
-            const r = await fetch(`/api/files/${fileId}/layouts`, {
+            const r = await fetch(`/api/files/${fileId}/layouts?${vq}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ layout: chosen }),

@@ -4,6 +4,7 @@
 //   import { openLayerModal } from "./layer_modal.js";
 //   await openLayerModal({
 //     fileId: "abc123",
+//     versionId: "v-456",  // required — file endpoints are version-scoped
 //     onConfirm: async (selectedLayers) => { ... },  // called after POST 200
 //   });
 //
@@ -42,7 +43,7 @@ function renderEmpty(bodyEl, message) {
   bodyEl.innerHTML = `<p class="layer-empty">${escapeHtml(message)}</p>`;
 }
 
-function renderCards(bodyEl, fileId, layers, selectedSet) {
+function renderCards(bodyEl, fileId, versionId, layers, selectedSet) {
   bodyEl.innerHTML = "";
   const grid = document.createElement("div");
   grid.className = "layer-grid";
@@ -51,7 +52,7 @@ function renderCards(bodyEl, fileId, layers, selectedSet) {
     card.className = "layer-card";
     card.innerHTML =
       `<div class="layer-thumb">` +
-        `<img src="/api/files/${fileId}/layer-preview/${encodeURIComponent(layer.safe_name)}.svg" ` +
+        `<img src="/api/files/${fileId}/layer-preview/${encodeURIComponent(layer.safe_name)}.svg?version_id=${encodeURIComponent(versionId)}" ` +
         `alt="${escapeHtml(layer.name)}" loading="lazy" />` +
       `</div>` +
       `<div class="layer-row">` +
@@ -84,6 +85,7 @@ function recomputeFooter(modal, total) {
  *
  * @param {object} opts
  * @param {string} opts.fileId
+ * @param {string} opts.versionId  version scoping every /api/files call
  * @param {string} [opts.fileName]  optional, for the title row
  * @param {boolean} [opts.triggerDiscovery]  POST /discover-layers first
  *        and wait for the manifest before rendering. Default: false.
@@ -91,7 +93,8 @@ function recomputeFooter(modal, total) {
  *        after the POST /layers succeeds; the modal closes on resolve.
  */
 export async function openLayerModal(opts) {
-  const { fileId, fileName, triggerDiscovery = false, onConfirm } = opts;
+  const { fileId, versionId, fileName, triggerDiscovery = false, onConfirm } = opts;
+  const vq = `version_id=${encodeURIComponent(versionId)}`;
   const modal = $("layer-modal");
   if (!modal) throw new Error("layer-modal markup missing on this page");
   const titleEl = modal.querySelector("[data-layer-title]");
@@ -129,17 +132,17 @@ export async function openLayerModal(opts) {
     (async () => {
       try {
         if (triggerDiscovery) {
-          const r = await fetch(`/api/files/${fileId}/discover-layers`, { method: "POST" });
+          const r = await fetch(`/api/files/${fileId}/discover-layers?${vq}`, { method: "POST" });
           if (!r.ok) throw new Error(`discover-layers failed: ${r.status}`);
           // Poll until the manifest is on disk (Phase 1 finishes).
           for (let i = 0; i < 200; i++) {
-            const probe = await fetch(`/api/files/${fileId}/layers`);
+            const probe = await fetch(`/api/files/${fileId}/layers?${vq}`);
             if (probe.ok) break;
             if (probe.status !== 404) throw new Error(`layers fetch failed: ${probe.status}`);
             await new Promise(r => setTimeout(r, 300));
           }
         }
-        const res = await fetch(`/api/files/${fileId}/layers`);
+        const res = await fetch(`/api/files/${fileId}/layers?${vq}`);
         if (!res.ok) {
           renderEmpty(bodyEl, `Layers not available yet (HTTP ${res.status}).`);
           return;
@@ -153,7 +156,7 @@ export async function openLayerModal(opts) {
         // Default selection: existing selection if any, else all layers.
         const initial = data.selected_layers ?? layers.map(l => l.name);
         const selectedSet = new Set(initial);
-        renderCards(bodyEl, fileId, layers, selectedSet);
+        renderCards(bodyEl, fileId, versionId, layers, selectedSet);
         const recompute = () => recomputeFooter(modal, layers.length);
         recompute();
         for (const cb of bodyEl.querySelectorAll('input[type="checkbox"][data-layer]')) {
@@ -172,7 +175,7 @@ export async function openLayerModal(opts) {
           if (!chosen.length) return;
           confirmBtn.disabled = true;
           confirmBtn.textContent = "Saving…";
-          const r = await fetch(`/api/files/${fileId}/layers`, {
+          const r = await fetch(`/api/files/${fileId}/layers?${vq}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ layers: chosen }),

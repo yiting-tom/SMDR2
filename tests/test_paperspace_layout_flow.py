@@ -1,6 +1,10 @@
 """End-to-end + unit coverage for the AutoCAD-tab (paper-space layout)
 picker flow: upload → (awaiting_layout) → pick tab → awaiting_layers →
 ready_to_match, plus the discover-worker gate and chosen_layout persistence.
+
+Migrated to the product-versioning model (2026-06-10, openspec
+add-product-versioning): bindings are per (version_id, file_id) and file
+endpoints require ?version_id=.
 """
 
 from __future__ import annotations
@@ -67,11 +71,19 @@ def _single_paperspace_dxf(tmp_path: Path) -> Path:
 
 
 # ---- helpers (mirror test_layer_preview.py) ------------------------------
-def _poll_status(client, file_id, target, *, timeout_s=20.0):
+def _new_version(client, name: str) -> tuple[str, str]:
+    """Create a product + first version; return (pid, vid)."""
+    r = client.post("/api/products", json={"name": name, "version_label": "v1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["id"], body["versions"][0]["id"]
+
+
+def _poll_status(client, version_id, file_id, target, *, timeout_s=20.0):
     start = time.monotonic()
     data = None
     while time.monotonic() - start < timeout_s:
-        r = client.get(f"/api/files/{file_id}")
+        r = client.get(f"/api/files/{file_id}", params={"version_id": version_id})
         if r.status_code < 400:
             data = r.json()
             if data["status"] == target:
@@ -83,15 +95,24 @@ def _poll_status(client, file_id, target, *, timeout_s=20.0):
     raise AssertionError(f"file {file_id} never reached {target!r} (last={last})")
 
 
-def _upload(client, product_id, dxf_path, role="BD"):
+def _upload(client, version_id, dxf_path, role="BD"):
     with open(dxf_path, "rb") as f:
         r = client.post(
-            f"/api/products/{product_id}/files",
+            f"/api/versions/{version_id}/files",
             files={"file": (dxf_path.name, f, "image/x-dxf")},
             data={"dxf_role": role},
         )
     assert r.status_code < 400, r.text
     return r.json()
+
+
+def _version_payload(client, pid, vid) -> dict:
+    g = client.get(f"/api/products/{pid}")
+    assert g.status_code == 200, g.text
+    for v in g.json()["versions"]:
+        if v["id"] == vid:
+            return v
+    raise AssertionError(f"version {vid} not in product {pid}")
 
 
 # ---- discover-worker gate (unit, no process pool) ------------------------
@@ -160,53 +181,61 @@ def test_filestore_round_trips_chosen_layout(tmp_path):
     from app.files import FileStore
 
     fs = FileStore(tmp_path / "lib.sqlite")
-    fs.register("f1", "a.dxf", 10)
-    assert fs.get("f1").chosen_layout is None
-    fs.set_chosen_layout("f1", "Layout2")
-    assert fs.get("f1").chosen_layout == "Layout2"
-    assert fs.get("f1").to_dict()["chosen_layout"] == "Layout2"
-    fs.set_chosen_layout("f1", None)
-    assert fs.get("f1").chosen_layout is None
+    fs.register_content("f1", "a.dxf", 10)
+    fs.bind("v1", "BD", "f1")
+    assert fs.get("v1", "f1").chosen_layout is None
+    fs.set_chosen_layout("v1", "f1", "Layout2")
+    assert fs.get("v1", "f1").chosen_layout == "Layout2"
+    assert fs.get("v1", "f1").to_dict()["chosen_layout"] == "Layout2"
+    fs.set_chosen_layout("v1", "f1", None)
+    assert fs.get("v1", "f1").chosen_layout is None
 
 
-def test_filestore_migrates_legacy_db_without_chosen_layout(tmp_path):
-    """A pre-feature `files` table (every column except chosen_layout) must
-    gain it on open and read back as None for legacy rows. Built by dropping
-    the column from a real schema so the rest of the row stays realistic."""
+def test_pre_versioning_db_is_rebuilt_from_scratch(tmp_path):
+    """The column-by-column legacy migration (chosen_layout ADD COLUMN)
+    died with the versioned schema: decision C9 (openspec
+    add-product-versioning, 2026-06-10) rebuilds pre-versioning DBs from
+    scratch, preserving no data. chosen_layout is part of the
+    version_files base schema now (round-trip covered above); this test
+    locks in the rebuild path."""
     import sqlite3
 
-    from app.files import FILES_SCHEMA, FileStore
+    from app.files import FileStore
 
     db = tmp_path / "legacy.sqlite"
-    # Derive a pre-feature schema from the real one: drop SQL comments, then
-    # remove the chosen_layout column clause (and its trailing comma). This
-    # keeps every other (realistic) column so _row_to_record's direct reads
-    # still work, exercising only the chosen_layout ADD-COLUMN migration.
-    no_comments = "\n".join(
-        l for l in FILES_SCHEMA.splitlines() if not l.strip().startswith("--")
-    )
-    legacy_schema = no_comments.replace(
-        "    dxf_recover_notes TEXT,\n    chosen_layout TEXT\n",
-        "    dxf_recover_notes TEXT\n",
-    )
-    assert "chosen_layout" not in legacy_schema
     conn = sqlite3.connect(str(db))
-    conn.executescript(legacy_schema)
+    # Minimal pre-versioning shape: files carries product_id/dxf_role.
+    conn.executescript("""
+        CREATE TABLE files (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            size        INTEGER NOT NULL,
+            uploaded_at REAL NOT NULL,
+            status      TEXT NOT NULL,
+            product_id  TEXT,
+            dxf_role    TEXT
+        );
+    """)
     conn.execute(
-        "INSERT INTO files (id, name, size, uploaded_at, status) "
-        "VALUES ('old', 'o.dxf', 1, 1.0, 'ready_to_match')"
+        "INSERT INTO files (id, name, size, uploaded_at, status, product_id, dxf_role) "
+        "VALUES ('old', 'o.dxf', 1, 1.0, 'ready_to_match', 'p1', 'SBT')"
     )
     conn.commit()
     conn.close()
 
-    # Re-open via FileStore → migration adds the column; legacy row reads None.
+    # Re-open via FileStore → the dbschema guard drops the legacy tables and
+    # the versioned shape is created fresh.
     fs = FileStore(db)
-    rec = fs.get("old")
-    assert rec is not None
-    assert rec.chosen_layout is None
-    # And the migrated column is writable.
-    fs.set_chosen_layout("old", "Layout1")
-    assert fs.get("old").chosen_layout == "Layout1"
+    assert not fs.content_exists("old"), "legacy rows must not survive C9 rebuild"
+    file_cols = {r[1] for r in fs.conn.execute("PRAGMA table_info(files)")}
+    assert "product_id" not in file_cols
+    vf_cols = {r[1] for r in fs.conn.execute("PRAGMA table_info(version_files)")}
+    assert "chosen_layout" in vf_cols
+    # And the rebuilt store is writable per binding.
+    fs.register_content("new", "n.dxf", 1)
+    fs.bind("v1", "BD", "new")
+    fs.set_chosen_layout("v1", "new", "Layout1")
+    assert fs.get("v1", "new").chosen_layout == "Layout1"
 
 
 # ---- full pipeline through the API (process pool) ------------------------
@@ -218,15 +247,13 @@ def test_multi_layout_upload_drives_layout_then_layer_pickers(tmp_path):
 
     dxf = _multi_paperspace_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products", json={"name": "t-layout", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-layout")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
+            fid = _upload(client, vid, dxf)["file_id"]
             # Geometry in >1 paper-space layout → park for a tab pick.
-            _poll_status(client, fid, "awaiting_layout")
+            _poll_status(client, vid, fid, "awaiting_layout")
 
-            r = client.get(f"/api/files/{fid}/layouts")
+            r = client.get(f"/api/files/{fid}/layouts", params={"version_id": vid})
             assert r.status_code < 400, r.text
             payload = r.json()
             names = {L["name"] for L in payload["manifest"]["layouts"]}
@@ -235,32 +262,43 @@ def test_multi_layout_upload_drives_layout_then_layer_pickers(tmp_path):
 
             # Thumbnails served.
             safe = payload["manifest"]["layouts"][0]["safe_name"]
-            svg = client.get(f"/api/files/{fid}/layout-preview/{safe}.svg")
+            svg = client.get(
+                f"/api/files/{fid}/layout-preview/{safe}.svg",
+                params={"version_id": vid},
+            )
             assert svg.status_code == 200
             assert svg.text.startswith("<svg")
 
             # Pick Layout2 → chains into layer discovery.
-            r = client.post(f"/api/files/{fid}/layouts", json={"layout": "Layout2"})
+            r = client.post(
+                f"/api/files/{fid}/layouts", json={"layout": "Layout2"},
+                params={"version_id": vid},
+            )
             assert r.status_code < 400, r.text
             assert r.json()["chosen_layout"] == "Layout2"
 
-            _poll_status(client, fid, "awaiting_layers")
-            layers = client.get(f"/api/files/{fid}/layers").json()
+            _poll_status(client, vid, fid, "awaiting_layers")
+            layers = client.get(
+                f"/api/files/{fid}/layers", params={"version_id": vid},
+            ).json()
             assert layers["manifest"]["layers"], "Layout2 must expose layers"
 
             # Confirm layers → ready.
             chosen_layers = [l["name"] for l in layers["manifest"]["layers"]]
-            client.post(f"/api/files/{fid}/layers", json={"layers": chosen_layers})
-            _poll_status(client, fid, "ready_to_match")
+            client.post(
+                f"/api/files/{fid}/layers", json={"layers": chosen_layers},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "ready_to_match")
 
-            rec = FILE_STORE.get(fid)
+            rec = FILE_STORE.get(vid, fid)
             assert rec.chosen_layout == "Layout2"
-            parsed = json.loads(parsed_path(fid).read_text())
+            parsed = json.loads(parsed_path(vid, fid).read_text())
             assert parsed["source_layout"] == "Layout2"
 
-            # has_layout_options surfaces in the product payload for re-pick.
-            prod = client.get(f"/api/products/{pid}").json()
-            file_dict = prod["files_by_role"]["BD"]
+            # has_layout_options surfaces in the version payload for re-pick.
+            v = _version_payload(client, pid, vid)
+            file_dict = v["files_by_role"]["BD"]
             assert file_dict["has_layout_options"] is True
             assert file_dict["chosen_layout"] == "Layout2"
         finally:
@@ -278,62 +316,68 @@ def test_layout_repick_invalidates_saved_match(tmp_path):
 
     dxf = _multi_paperspace_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products", json={"name": "t-repick", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-repick")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layout")
-            client.post(f"/api/files/{fid}/layouts", json={"layout": "Layout1"})
-            _poll_status(client, fid, "awaiting_layers")
-            layers = client.get(f"/api/files/{fid}/layers").json()
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layout")
+            client.post(
+                f"/api/files/{fid}/layouts", json={"layout": "Layout1"},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "awaiting_layers")
+            layers = client.get(
+                f"/api/files/{fid}/layers", params={"version_id": vid},
+            ).json()
             names = [l["name"] for l in layers["manifest"]["layers"]]
-            client.post(f"/api/files/{fid}/layers", json={"layers": names})
-            _poll_status(client, fid, "ready_to_match")
+            client.post(
+                f"/api/files/{fid}/layers", json={"layers": names},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "ready_to_match")
 
             # Simulate a completed Save Match on Layout1.
-            match_path(fid).write_text("{}")
-            FILE_STORE.set_match_saved(fid, True)
-            assert FILE_STORE.get(fid).match_saved is True
+            mp = match_path(vid, fid)
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            mp.write_text("{}")
+            FILE_STORE.set_match_saved(vid, fid, True)
+            assert FILE_STORE.get(vid, fid).match_saved is True
 
             # Re-pick a DIFFERENT tab → the stale match must be dropped.
-            r = client.post(f"/api/files/{fid}/layouts", json={"layout": "Layout2"})
+            r = client.post(
+                f"/api/files/{fid}/layouts", json={"layout": "Layout2"},
+                params={"version_id": vid},
+            )
             assert r.status_code < 400, r.text
-            assert FILE_STORE.get(fid).match_saved is False
-            assert not match_path(fid).exists()
+            assert FILE_STORE.get(vid, fid).match_saved is False
+            assert not mp.exists()
         finally:
             client.delete(f"/api/products/{pid}")
 
 
-def test_awaiting_layout_blocks_patch_and_unit_override(tmp_path):
-    """patch_file (library swap) and unit-override must refuse a file that
-    hasn't picked its tab yet, mirroring reprocess-all's skip — otherwise
-    they auto-resolve a tab the operator never chose."""
+def test_awaiting_layout_blocks_unit_override(tmp_path):
+    """unit-override must refuse a binding that hasn't picked its tab yet,
+    mirroring reprocess-all's skip — otherwise it auto-resolves a tab the
+    operator never chose. (The old library-swap PATCH /api/files/{fid}
+    guard is gone — library CRUD removed 2026-06-10, openspec
+    add-product-versioning.)"""
     from fastapi.testclient import TestClient
     from app.main import app
 
     dxf = _multi_paperspace_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products", json={"name": "t-guard", "library_id": "default"},
-        ).json()["id"]
-        other = client.post(
-            "/api/libraries", json={"name": "guard-target"}
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-guard")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layout")
-            assert client.patch(
-                f"/api/files/{fid}", json={"library_id": other}
-            ).status_code == 409
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layout")
             assert client.post(
-                f"/api/files/{fid}/unit-override", json={"unit": "mm"}
+                f"/api/files/{fid}/unit-override", json={"unit": "mm"},
+                params={"version_id": vid},
             ).status_code == 409
             # Still parked, nothing auto-resolved.
-            assert client.get(f"/api/files/{fid}").json()["status"] == "awaiting_layout"
+            g = client.get(f"/api/files/{fid}", params={"version_id": vid})
+            assert g.json()["status"] == "awaiting_layout"
         finally:
             client.delete(f"/api/products/{pid}")
-            client.delete(f"/api/libraries/{other}")
 
 
 def test_single_layout_upload_skips_layout_picker(tmp_path):
@@ -343,25 +387,30 @@ def test_single_layout_upload_skips_layout_picker(tmp_path):
 
     dxf = _single_paperspace_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products", json={"name": "t-single", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-single")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
+            fid = _upload(client, vid, dxf)["file_id"]
             # Single content layout → auto-fallback, straight to layer pick.
-            _poll_status(client, fid, "awaiting_layers")
+            _poll_status(client, vid, fid, "awaiting_layers")
             # No layout picker manifest.
-            assert client.get(f"/api/files/{fid}/layouts").status_code == 404
+            assert client.get(
+                f"/api/files/{fid}/layouts", params={"version_id": vid},
+            ).status_code == 404
 
-            layers = client.get(f"/api/files/{fid}/layers").json()
+            layers = client.get(
+                f"/api/files/{fid}/layers", params={"version_id": vid},
+            ).json()
             chosen_layers = [l["name"] for l in layers["manifest"]["layers"]]
-            client.post(f"/api/files/{fid}/layers", json={"layers": chosen_layers})
-            _poll_status(client, fid, "ready_to_match")
+            client.post(
+                f"/api/files/{fid}/layers", json={"layers": chosen_layers},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "ready_to_match")
 
             # Auto-resolved tab is stamped so the badge shows it.
-            rec = FILE_STORE.get(fid)
+            rec = FILE_STORE.get(vid, fid)
             assert rec.chosen_layout == "Layout1"
-            prod = client.get(f"/api/products/{pid}").json()
-            assert prod["files_by_role"]["BD"]["has_layout_options"] is False
+            v = _version_payload(client, pid, vid)
+            assert v["files_by_role"]["BD"]["has_layout_options"] is False
         finally:
             client.delete(f"/api/products/{pid}")

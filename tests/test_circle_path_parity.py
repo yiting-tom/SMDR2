@@ -30,7 +30,6 @@ Why these tests, specifically:
 
 from __future__ import annotations
 
-import math
 
 import pytest
 

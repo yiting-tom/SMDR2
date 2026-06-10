@@ -1,6 +1,9 @@
 """Unit + integration tests for the layer-preview / filter feature.
 
 Covers tasks 8.1–8.6 (8.7 is a browser smoke test outside pytest's scope).
+Migrated to the product-versioning model (2026-06-10, openspec
+add-product-versioning): artifact paths key on (version_id, file_id) and
+file endpoints require ?version_id=.
 """
 
 from __future__ import annotations
@@ -110,10 +113,19 @@ def _build_synth_dxf(tmp_path: Path) -> Path:
     return path
 
 
-def _poll_status(client, file_id: str, target: str, *, timeout_s: float = 20.0):
+def _new_version(client, name: str) -> tuple[str, str]:
+    """Create a product + first version; return (pid, vid)."""
+    r = client.post("/api/products", json={"name": name, "version_label": "v1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["id"], body["versions"][0]["id"]
+
+
+def _poll_status(client, version_id: str, file_id: str, target: str,
+                 *, timeout_s: float = 20.0):
     start = time.monotonic()
     while time.monotonic() - start < timeout_s:
-        r = client.get(f"/api/files/{file_id}")
+        r = client.get(f"/api/files/{file_id}", params={"version_id": version_id})
         if r.status_code < 400:
             data = r.json()
             if data["status"] == target:
@@ -131,10 +143,10 @@ def _poll_status(client, file_id: str, target: str, *, timeout_s: float = 20.0):
     )
 
 
-def _upload(client, product_id: str, dxf_path: Path, role: str = "BD"):
+def _upload(client, version_id: str, dxf_path: Path, role: str = "BD"):
     with open(dxf_path, "rb") as f:
         r = client.post(
-            f"/api/products/{product_id}/files",
+            f"/api/versions/{version_id}/files",
             files={"file": (dxf_path.name, f, "image/x-dxf")},
             data={"dxf_role": role},
         )
@@ -150,23 +162,20 @@ def test_phase1_emits_manifest_and_svgs(tmp_path):
 
     dxf = _build_synth_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products",
-            json={"name": "t-phase1", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-phase1")
         try:
-            up = _upload(client, pid, dxf)
+            up = _upload(client, vid, dxf)
             fid = up["file_id"]
             assert up["status"] == "discovering_layers"
 
-            _poll_status(client, fid, "awaiting_layers")
-            manifest = json.loads(layer_manifest_path(fid).read_text())
+            _poll_status(client, vid, fid, "awaiting_layers")
+            manifest = json.loads(layer_manifest_path(vid, fid).read_text())
             names = {l["name"] for l in manifest["layers"]}
             # ezdxf always emits the implicit "0" layer; that's fine —
             # we expect BD / SMD / SILK to be present alongside it.
             assert {"BD", "SMD", "SILK"}.issubset(names)
             for layer in manifest["layers"]:
-                p = layer_preview_svg_path(fid, layer["safe_name"])
+                p = layer_preview_svg_path(vid, fid, layer["safe_name"])
                 assert p.exists(), f"missing svg for {layer['name']!r}"
                 assert p.read_text().startswith("<svg"), p.read_text()[:80]
         finally:
@@ -181,22 +190,20 @@ def test_phase2_filters_parsed_and_prematch(tmp_path):
 
     dxf = _build_synth_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products",
-            json={"name": "t-phase2", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-phase2")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layers")
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layers")
 
             r = client.post(
                 f"/api/files/{fid}/layers",
                 json={"layers": ["BD", "SMD"]},
+                params={"version_id": vid},
             )
             assert r.status_code < 400, r.text
-            _poll_status(client, fid, "ready_to_match")
+            _poll_status(client, vid, fid, "ready_to_match")
 
-            parsed = json.loads(parsed_path(fid).read_text())
+            parsed = json.loads(parsed_path(vid, fid).read_text())
             assert parsed["selected_layers"] == ["BD", "SMD"]
             present = {p.get("layer") or "0" for p in parsed["primitives"]}
             assert "SILK" not in present
@@ -211,28 +218,33 @@ def test_confirm_rejects_empty_and_unknown_layers(tmp_path):
 
     dxf = _build_synth_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products",
-            json={"name": "t-rejects", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-rejects")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layers")
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layers")
 
             assert client.post(
-                f"/api/files/{fid}/layers", json={"layers": []}
+                f"/api/files/{fid}/layers", json={"layers": []},
+                params={"version_id": vid},
             ).status_code == 400
             assert client.post(
-                f"/api/files/{fid}/layers", json={"layers": ["NOPE"]}
+                f"/api/files/{fid}/layers", json={"layers": ["NOPE"]},
+                params={"version_id": vid},
             ).status_code == 400
-            # File still in awaiting_layers — not advanced.
-            assert client.get(f"/api/files/{fid}").json()["status"] == "awaiting_layers"
+            # Binding still in awaiting_layers — not advanced.
+            g = client.get(f"/api/files/{fid}", params={"version_id": vid})
+            assert g.json()["status"] == "awaiting_layers"
         finally:
             client.delete(f"/api/products/{pid}")
 
 
-# ---- 8.5: library swap reuses selection ---------------------------------
-def test_library_swap_reuses_selected_layers(tmp_path):
+# ---- 8.5: version clone reuses selection ---------------------------------
+# The library-reassign flow (PATCH /api/files/{fid} with a library_id) died
+# with library CRUD (removed 2026-06-10, openspec add-product-versioning).
+# The closest behavior in the versioned model: cloning a version carries
+# `selected_layers` onto the new binding and re-preprocesses with it —
+# the operator is NOT re-prompted for layers.
+def test_version_clone_reuses_selected_layers(tmp_path):
     from fastapi.testclient import TestClient
     from app.main import app
     from app.files import FILE_STORE
@@ -240,39 +252,36 @@ def test_library_swap_reuses_selected_layers(tmp_path):
 
     dxf = _build_synth_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products",
-            json={"name": "t-swap", "library_id": "default"},
-        ).json()["id"]
-        other_lib = client.post(
-            "/api/libraries", json={"name": "swap-target"}
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-clone-swap")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layers")
-            client.post(f"/api/files/{fid}/layers", json={"layers": ["BD"]})
-            _poll_status(client, fid, "ready_to_match")
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layers")
+            client.post(
+                f"/api/files/{fid}/layers", json={"layers": ["BD"]},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "ready_to_match")
 
-            # PATCH library — should reuse selected_layers, NOT re-prompt.
-            r = client.patch(f"/api/files/{fid}", json={"library_id": other_lib})
+            # Clone into v2 — should reuse selected_layers, NOT re-prompt.
+            r = client.post(f"/api/products/{pid}/versions", json={"label": "v2"})
             assert r.status_code < 400, r.text
-            _poll_status(client, fid, "ready_to_match")
+            vid2 = r.json()["id"]
+            _poll_status(client, vid2, fid, "ready_to_match")
 
-            rec = FILE_STORE.get(fid)
+            rec = FILE_STORE.get(vid2, fid)
             assert rec.selected_layers == ["BD"]
             assert rec.status != "awaiting_layers"
 
-            parsed = json.loads(parsed_path(fid).read_text())
+            parsed = json.loads(parsed_path(vid2, fid).read_text())
             present = {p.get("layer") or "0" for p in parsed["primitives"]}
             assert "SILK" not in present and "SMD" not in present
         finally:
             client.delete(f"/api/products/{pid}")
-            client.delete(f"/api/libraries/{other_lib}")
 
 
-# ---- 8.6: legacy file backward-compat ------------------------------------
+# ---- 8.6: legacy binding backward-compat ----------------------------------
 def test_legacy_file_with_null_selected_layers_still_loads(tmp_path):
-    """A file already in `ready_to_match` with `selected_layers = NULL`
+    """A binding already in `ready_to_match` with `selected_layers = NULL`
     and no manifest on disk MUST stay accessible — every read endpoint
     works, status doesn't auto-flip, and `GET /layers` 404s (the viewer
     UI uses that as a signal to trigger discovery)."""
@@ -280,42 +289,46 @@ def test_legacy_file_with_null_selected_layers_still_loads(tmp_path):
     from app.main import app
     from app.files import FILE_STORE, READY
     from app.storage import (
-        layer_manifest_path, layer_preview_dir, parsed_path, upload_path,
+        layer_manifest_path, layer_preview_dir, parsed_path,
     )
 
     dxf = _build_synth_dxf(tmp_path)
     with TestClient(app) as client:
-        pid = client.post(
-            "/api/products",
-            json={"name": "t-legacy", "library_id": "default"},
-        ).json()["id"]
+        pid, vid = _new_version(client, "t-legacy")
         try:
-            fid = _upload(client, pid, dxf)["file_id"]
-            _poll_status(client, fid, "awaiting_layers")
-            client.post(f"/api/files/{fid}/layers", json={"layers": ["BD"]})
-            _poll_status(client, fid, "ready_to_match")
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layers")
+            client.post(
+                f"/api/files/{fid}/layers", json={"layers": ["BD"]},
+                params={"version_id": vid},
+            )
+            _poll_status(client, vid, fid, "ready_to_match")
 
-            # Simulate a legacy file: wipe selected_layers and remove the
+            # Simulate a legacy binding: wipe selected_layers and remove the
             # on-disk manifest, then re-confirm everything still works.
-            FILE_STORE.clear_selected_layers(fid)
-            shutil.rmtree(layer_preview_dir(fid), ignore_errors=True)
-            assert not layer_manifest_path(fid).exists()
-            assert parsed_path(fid).exists()  # parsed cache untouched
+            FILE_STORE.clear_selected_layers(vid, fid)
+            shutil.rmtree(layer_preview_dir(vid, fid), ignore_errors=True)
+            assert not layer_manifest_path(vid, fid).exists()
+            assert parsed_path(vid, fid).exists()  # parsed cache untouched
 
-            rec = FILE_STORE.get(fid)
+            rec = FILE_STORE.get(vid, fid)
             assert rec.status == READY
             assert rec.selected_layers is None
 
             # GET layers must 404 — UI uses this to know "trigger discovery".
-            r = client.get(f"/api/files/{fid}/layers")
+            r = client.get(f"/api/files/{fid}/layers", params={"version_id": vid})
             assert r.status_code == 404
 
             # Discover endpoint kicks off Phase 1 and lands us back in
             # awaiting_layers with all layers selectable.
-            r = client.post(f"/api/files/{fid}/discover-layers")
+            r = client.post(
+                f"/api/files/{fid}/discover-layers", params={"version_id": vid},
+            )
             assert r.status_code < 400, r.text
-            _poll_status(client, fid, "awaiting_layers")
-            manifest = client.get(f"/api/files/{fid}/layers").json()
+            _poll_status(client, vid, fid, "awaiting_layers")
+            manifest = client.get(
+                f"/api/files/{fid}/layers", params={"version_id": vid},
+            ).json()
             names = {l["name"] for l in manifest["manifest"]["layers"]}
             assert {"BD", "SMD", "SILK"}.issubset(names)
             assert manifest["selected_layers"] is None  # legacy

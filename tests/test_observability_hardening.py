@@ -8,6 +8,10 @@ Covers:
 - ERR-004: rule-check envelope re-validation on read (bad envelope -> 400)
 - SEC-001: upload size limit (oversized -> 413)
 - D7:      no worker entrypoint references the LIBRARIES cache
+
+Migrated to the product-versioning model (2026-06-10, openspec
+add-product-versioning): jobs and artifacts key on (version_id, file_id),
+rule-check persists per version.
 """
 
 from __future__ import annotations
@@ -21,11 +25,20 @@ from pathlib import Path
 
 # ---- helpers -------------------------------------------------------------
 
-def _register_preprocess_job(job_id: str, file_id: str) -> dict:
+def _new_version(client, name: str) -> tuple[str, str]:
+    """Create a product + first version; return (pid, vid)."""
+    r = client.post("/api/products", json={"name": name, "version_label": "v1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["id"], body["versions"][0]["id"]
+
+
+def _register_preprocess_job(job_id: str, version_id: str, file_id: str) -> dict:
     """Insert a minimal running preprocess job into jobs._jobs and return it."""
     from app import jobs
     job = {
         "id": job_id,
+        "version_id": version_id,
         "file_id": file_id,
         "kind": "preprocess",
         "status": "running",
@@ -57,7 +70,7 @@ def test_preprocess_success_emits_info_log(monkeypatch, caplog):
     monkeypatch.setattr(jobs, "_maybe_clear_redundant_unit_override", lambda *a, **k: None)
     monkeypatch.setattr(jobs, "_invalidate_match_after_rescale", lambda *a, **k: None)
 
-    _register_preprocess_job("obs-job-info", "obs-file-info")
+    _register_preprocess_job("obs-job-info", "obs-ver-info", "obs-file-info")
     fut = _done_future({
         "primitive_count": 42,
         "bbox": [0, 0, 1, 1],
@@ -85,7 +98,7 @@ def test_preprocess_callback_exception_marks_error_not_done(monkeypatch, caplog)
     # Make the post-result FILE_STORE mutation throw.
     monkeypatch.setattr(FILE_STORE, "update_parsed", _boom)
 
-    _register_preprocess_job("obs-job-crash", "obs-file-crash")
+    _register_preprocess_job("obs-job-crash", "obs-ver-crash", "obs-file-crash")
     fut = _done_future({
         "primitive_count": 7,
         "bbox": [0, 0, 1, 1],
@@ -113,13 +126,16 @@ def test_corrupt_parsed_json_returns_400_then_recovers(monkeypatch):
     from app.storage import parsed_path
 
     fid = "obs-corrupt-parsed"
-    FILE_STORE.register(fid, f"{fid}.dxf", 1, initial_status=READY)
-    pp = parsed_path(fid)
-    pp.parent.mkdir(parents=True, exist_ok=True)
-    pp.write_text("{ this is not valid json")
 
     with TestClient(app) as client:
-        r = client.get(f"/api/files/{fid}/primitives")
+        _, vid = _new_version(client, "obs-corrupt-parsed-prod")
+        FILE_STORE.register_content(fid, f"{fid}.dxf", 1)
+        FILE_STORE.bind(vid, "BD", fid, initial_status=READY)
+        pp = parsed_path(vid, fid)
+        pp.parent.mkdir(parents=True, exist_ok=True)
+        pp.write_text("{ this is not valid json")
+
+        r = client.get(f"/api/files/{fid}/primitives", params={"version_id": vid})
         assert r.status_code == 400, r.text
         assert fid in r.text or "parsed" in r.text.lower()
 
@@ -128,7 +144,7 @@ def test_corrupt_parsed_json_returns_400_then_recovers(monkeypatch):
         pp.write_text(json.dumps({
             "primitives": [], "bbox": [0, 0, 1, 1], "background": "#fff",
         }))
-        r2 = client.get(f"/api/files/{fid}/primitives")
+        r2 = client.get(f"/api/files/{fid}/primitives", params={"version_id": vid})
         assert r2.status_code == 200, r2.text
         assert r2.json()["count"] == 0
 
@@ -141,19 +157,14 @@ def test_rule_check_bad_envelope_rejected_on_read():
     from app.storage import rule_check_path
 
     with TestClient(app) as client:
-        cr = client.post(
-            "/api/products",
-            json={"name": "obs-drc-badenv", "library_id": "default"},
-        )
-        assert cr.status_code == 200, cr.text
-        pid = cr.json()["id"]
+        _, vid = _new_version(client, "obs-drc-badenv")
 
-        rp = rule_check_path(pid)
+        rp = rule_check_path(vid)
         rp.parent.mkdir(parents=True, exist_ok=True)
         # Parses as JSON, but violates the envelope (rule payload missing keys).
         rp.write_text(json.dumps({"R1": {"not_pass": True}}))
 
-        r = client.get(f"/api/products/{pid}/rule-check")
+        r = client.get(f"/api/versions/{vid}/rule-check")
         assert r.status_code == 400, r.text
 
 
@@ -163,18 +174,13 @@ def test_rule_check_corrupt_json_returns_400():
     from app.storage import rule_check_path
 
     with TestClient(app) as client:
-        cr = client.post(
-            "/api/products",
-            json={"name": "obs-drc-corrupt", "library_id": "default"},
-        )
-        assert cr.status_code == 200, cr.text
-        pid = cr.json()["id"]
+        _, vid = _new_version(client, "obs-drc-corrupt")
 
-        rp = rule_check_path(pid)
+        rp = rule_check_path(vid)
         rp.parent.mkdir(parents=True, exist_ok=True)
         rp.write_text("{ broken json")
 
-        r = client.get(f"/api/products/{pid}/rule-check")
+        r = client.get(f"/api/versions/{vid}/rule-check")
         assert r.status_code == 400, r.text
 
 
@@ -189,21 +195,16 @@ def test_oversized_upload_rejected_with_413(monkeypatch):
     monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 8)
 
     with TestClient(main.app) as client:
-        cr = client.post(
-            "/api/products",
-            json={"name": "obs-upload-413", "library_id": "default"},
-        )
-        assert cr.status_code == 200, cr.text
-        pid = cr.json()["id"]
+        _, vid = _new_version(client, "obs-upload-413")
 
         before = len(client.get("/api/files").json()["files"])
         r = client.post(
-            f"/api/products/{pid}/files",
+            f"/api/versions/{vid}/files",
             files={"file": ("big.dxf", b"0123456789ABCDEF", "application/dxf")},
             data={"dxf_role": "BD"},
         )
         assert r.status_code == 413, r.text
-        # No file row registered for the rejected upload.
+        # No binding registered for the rejected upload.
         after = len(client.get("/api/files").json()["files"])
         assert after == before
 
@@ -217,13 +218,9 @@ def test_under_limit_upload_not_rejected_for_size(monkeypatch):
     monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 10_000_000)
 
     with TestClient(main.app) as client:
-        cr = client.post(
-            "/api/products",
-            json={"name": "obs-upload-ok", "library_id": "default"},
-        )
-        pid = cr.json()["id"]
+        _, vid = _new_version(client, "obs-upload-ok")
         r = client.post(
-            f"/api/products/{pid}/files",
+            f"/api/versions/{vid}/files",
             files={"file": ("small.dxf", b"tiny dxf bytes", "application/dxf")},
             data={"dxf_role": "BD"},
         )

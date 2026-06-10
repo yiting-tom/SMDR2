@@ -44,11 +44,11 @@
 
 ## 6. 測試
 
-- [ ] 6.1 version 生命週期:建料號必填版號、409 重複 label、無 delete 路由、product cascade
-- [ ] 6.2 clone:templates/調參/綁定複製、clone_from 指舊版、跨 product 400、改 clone 不動 source
-- [ ] 6.3 凍結守門:已畫押後 commit/上傳/調參/rule-check/scan-all 全 409;讀取 200;unsign 後恢復
-- [ ] 6.4 keying:`(vid, fid)` artifact 隔離(v2 重跑不動 v1)、共用檔案 bytes 單份、per-version 選層/rects 獨立
-- [ ] 6.5 既有測試遷移:product-files/dxf-pipeline/template-library 系列改 version 綁定模型;刪除兩層 scope 相關測試
+- [x] 6.1 version 生命週期:建料號必填版號、409 重複 label、無 delete 路由、product cascade
+- [x] 6.2 clone:templates/調參/綁定複製、clone_from 指舊版、跨 product 400、改 clone 不動 source
+- [x] 6.3 凍結守門:已畫押後 commit/上傳/調參/rule-check/scan-all 全 409;讀取 200;unsign 後恢復
+- [x] 6.4 keying:`(vid, fid)` artifact 隔離(v2 重跑不動 v1)、共用檔案 bytes 單份、per-version 選層/rects 獨立
+- [x] 6.5 既有測試遷移:product-files/dxf-pipeline/template-library 系列改 version 綁定模型;刪除兩層 scope 相關測試
 - [ ] 6.6 全量 `pytest` 綠燈 + `ruff` 乾淨
 
 ## 7. 收尾

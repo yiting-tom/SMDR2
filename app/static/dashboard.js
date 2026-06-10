@@ -1,6 +1,7 @@
-// Dashboard: product cards with per-role DXF slots. Rule check is
-// product-scoped and only available once every uploaded file has had its
-// Match JSON saved.
+// Dashboard: product cards with per-role DXF slots, scoped to the
+// selected VERSION of each product. Rule check is version-scoped and
+// only available once every uploaded file of that version has had its
+// Match JSON saved. Libraries are version internals — never shown here.
 
 import { openLayerModal } from "./layer_modal.js";
 import { openLayoutModal } from "./layout_modal.js";
@@ -15,26 +16,36 @@ const SINGLE_ROLES = ["SBT", "BD", "POD"];
 const $list = document.getElementById("product-list");
 const $empty = document.getElementById("empty-msg");
 const $status = document.getElementById("status");
-const $librarySelect = document.getElementById("library-select");
-const $newLibraryBtn = document.getElementById("new-library-btn");
 const $newProductBtn = document.getElementById("new-product-btn");
 const $modal = document.getElementById("product-modal");
 const $newProductName = document.getElementById("new-product-name");
-const $newProductLibrary = document.getElementById("new-product-library");
+const $newProductVersionLabel = document.getElementById("new-product-version-label");
 const $newProductCreate = document.getElementById("new-product-create");
 const $fileInput = document.getElementById("file-input");
 const $devModeToggle = document.getElementById("dev-mode-toggle");
 
-let libraries = [];
 let products = [];
 let pollTimer = null;
-let pendingSlot = null;   // when user clicks a slot or picks file: { productId, role }
-// product_id -> { jobId, name } for in-flight rule-check jobs. Used to
+let pendingSlot = null;   // when user clicks a slot or picks file: { versionId, role }
+// version_id -> { jobId, name } for in-flight rule-check jobs. Used to
 // disable the button and to re-enable it on done/error from the
 // existing dashboard tick. Hydrated on every refresh from each
-// product's `latest_rule_check_job` so a user who navigates away
+// version's `latest_rule_check_job` so a user who navigates away
 // during a run still sees the result on return.
 const ruleCheckJobs = new Map();
+
+// product_id -> version_id the user picked in the card's version
+// switcher. Absent (or stale) entries fall back to the latest version
+// (last in the versions array). In-memory only — a reload snaps back
+// to latest, which is the spec'd default.
+const selectedVersions = new Map();
+
+function selectedVersionOf(p) {
+  const versions = p.versions || [];
+  if (!versions.length) return null;
+  const wanted = selectedVersions.get(p.id);
+  return versions.find(v => v.id === wanted) ?? versions[versions.length - 1];
+}
 
 // Persists which finished rule-check job_ids the user has already been
 // notified about, so navigating back to the dashboard doesn't re-pop
@@ -89,7 +100,7 @@ function setSkipLayerPick(on) {
 
 // Generic browser-side download: wraps a Blob in a transient <a download>,
 // clicks it, and revokes the object URL. Used by both the per-file Match
-// JSON download and the per-product DRC bundle download so the filename
+// JSON download and the per-version DRC bundle download so the filename
 // is controlled uniformly (browsers would otherwise render JSON inline).
 function downloadAsFile(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -114,21 +125,32 @@ function fmtSize(b) {
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(2)} MB`;
 }
-function libraryName(id) {
-  const l = libraries.find(x => x.id === id);
-  return l ? l.name : id;
+function fmtSignedAt(ts) {
+  if (ts == null) return "—";
+  try { return new Date(ts * 1000).toLocaleString(); }
+  catch { return String(ts); }
+}
+
+// Every mutating call on a signed-off version returns HTTP 409 with
+// detail {error: "version signed-off", signed_off_by, signed_off_at}.
+// Surface that uniformly; returns true when the response WAS that 409
+// (i.e., handled here), false otherwise.
+async function handleSignedOff409(res) {
+  if (res.status !== 409) return false;
+  let detail = null;
+  try { detail = (await res.clone().json())?.detail; } catch { /* not JSON */ }
+  if (detail && detail.error === "version signed-off") {
+    alert(`此版本已由 ${detail.signed_off_by} 於 ${fmtSignedAt(detail.signed_off_at)} 畫押,無法修改。`);
+    return true;
+  }
+  return false;
 }
 
 // ---- modal -----------------------------------------------------------------
 function openModal() {
-  $newProductLibrary.innerHTML = "";
-  for (const lib of libraries) {
-    const opt = document.createElement("option");
-    opt.value = lib.id; opt.textContent = lib.name;
-    if (lib.id === $librarySelect.value) opt.selected = true;
-    $newProductLibrary.appendChild(opt);
-  }
   $newProductName.value = "";
+  $newProductVersionLabel.value = "";
+  $newProductVersionLabel.classList.remove("input-error");
   $modal.hidden = false;
   setTimeout(() => $newProductName.focus(), 0);
 }
@@ -136,15 +158,24 @@ function closeModal() { $modal.hidden = true; }
 $newProductBtn.addEventListener("click", openModal);
 $modal.addEventListener("click", (e) => { if (e.target.matches("[data-close]")) closeModal(); });
 window.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$modal.hidden) closeModal(); });
+$newProductVersionLabel.addEventListener("input", () => {
+  $newProductVersionLabel.classList.remove("input-error");
+});
 
 $newProductCreate.addEventListener("click", async () => {
   const name = $newProductName.value.trim();
   if (!name) { $newProductName.focus(); return; }
-  const libId = $newProductLibrary.value;
+  // version_label is REQUIRED — block client-side and highlight the field.
+  const versionLabel = $newProductVersionLabel.value.trim();
+  if (!versionLabel) {
+    $newProductVersionLabel.classList.add("input-error");
+    $newProductVersionLabel.focus();
+    return;
+  }
   const res = await fetch("/api/products", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, library_id: libId }),
+    body: JSON.stringify({ name, version_label: versionLabel }),
   });
   if (!res.ok) {
     $status.textContent = `create failed: ${res.status}`;
@@ -152,38 +183,6 @@ $newProductCreate.addEventListener("click", async () => {
   }
   closeModal();
   await refresh();
-});
-
-// ---- library bar ---------------------------------------------------------
-async function loadLibraries() {
-  const res = await fetch("/api/libraries");
-  if (!res.ok) return;
-  const data = await res.json();
-  libraries = data.libraries;
-  const prev = sessionStorage.getItem("smdr2.dashboard.selectedLibrary") || data.default_id;
-  $librarySelect.innerHTML = "";
-  for (const lib of libraries) {
-    const opt = document.createElement("option");
-    opt.value = lib.id; opt.textContent = lib.name;
-    $librarySelect.appendChild(opt);
-  }
-  $librarySelect.value = libraries.some(l => l.id === prev) ? prev : data.default_id;
-}
-$librarySelect.addEventListener("change", () => {
-  sessionStorage.setItem("smdr2.dashboard.selectedLibrary", $librarySelect.value);
-});
-$newLibraryBtn.addEventListener("click", async () => {
-  const name = prompt("New library name:");
-  if (!name || !name.trim()) return;
-  const res = await fetch("/api/libraries", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
-  });
-  if (!res.ok) { $status.textContent = `create library failed: ${res.status}`; return; }
-  const data = await res.json();
-  await loadLibraries();
-  $librarySelect.value = data.id;
 });
 
 // ---- product list --------------------------------------------------------
@@ -196,113 +195,72 @@ async function refresh() {
   renderProducts();
 }
 
-// For each product, reconcile the in-memory `ruleCheckJobs` Map (and
-// "seen" set) against the server-reported `latest_rule_check_job`.
+// For each product version, reconcile the in-memory `ruleCheckJobs` Map
+// (and "seen" set) against the server-reported `latest_rule_check_job`.
 // This is what lets the dashboard pick up a job kicked off in a prior
 // browser session: while we were on the viewer, the worker finished
-// and persisted `rule_check.json`; on return, we surface the result
-// (and auto-open the modal once) instead of leaving the user staring
-// at a stale "Re-run Rule Check" button.
+// and persisted the result; on return, we surface it (and auto-open
+// the modal once) instead of leaving the user staring at a stale
+// "Re-run Rule Check" button.
 async function _syncRuleCheckJobsFromProducts() {
   if (!products.length) return;
-  const completedThisSync = [];  // [{product, summary}]
+  const completedThisSync = [];  // [{product, version, summary}]
   for (const p of products) {
-    const lj = p.latest_rule_check_job;
-    if (!lj || !lj.job_id) continue;
+    for (const v of (p.versions || [])) {
+      const lj = v.latest_rule_check_job;
+      if (!lj || !lj.job_id) continue;
 
-    if (lj.status === "queued" || lj.status === "running") {
-      // Server still has a live job for this product — make sure we're
-      // tracking it so the next tick polls and the button shows
-      // "Running…". No-op if we already started it from this tab.
-      if (!ruleCheckJobs.has(p.id)) {
-        ruleCheckJobs.set(p.id, { jobId: lj.job_id, name: p.name });
-        startPollingIfBusy();
+      if (lj.status === "queued" || lj.status === "running") {
+        // Server still has a live job for this version — make sure we're
+        // tracking it so the next tick polls and the button shows
+        // "Running…". No-op if we already started it from this tab.
+        if (!ruleCheckJobs.has(v.id)) {
+          ruleCheckJobs.set(v.id, { jobId: lj.job_id, name: `${p.name} / ${v.label}` });
+          startPollingIfBusy();
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (lj.status === "done") {
-      // Cleanup any stale tracking entry for this product (e.g. the
-      // job we kicked off has just finished server-side).
-      if (ruleCheckJobs.has(p.id)) ruleCheckJobs.delete(p.id);
-      if (!seenRuleCheckJobs.has(lj.job_id)) {
-        _markRuleCheckJobSeen(lj.job_id);
-        completedThisSync.push({ product: p, summary: lj.result || {} });
+      if (lj.status === "done") {
+        // Cleanup any stale tracking entry for this version (e.g. the
+        // job we kicked off has just finished server-side).
+        if (ruleCheckJobs.has(v.id)) ruleCheckJobs.delete(v.id);
+        if (!seenRuleCheckJobs.has(lj.job_id)) {
+          _markRuleCheckJobSeen(lj.job_id);
+          completedThisSync.push({ product: p, version: v, summary: lj.result || {} });
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (lj.status === "error") {
-      if (ruleCheckJobs.has(p.id)) ruleCheckJobs.delete(p.id);
-      if (!seenRuleCheckJobs.has(lj.job_id)) {
-        _markRuleCheckJobSeen(lj.job_id);
-        $status.textContent =
-          `Rule check on "${p.name}" failed: ${lj.error || "(no detail)"}`;
+      if (lj.status === "error") {
+        if (ruleCheckJobs.has(v.id)) ruleCheckJobs.delete(v.id);
+        if (!seenRuleCheckJobs.has(lj.job_id)) {
+          _markRuleCheckJobSeen(lj.job_id);
+          $status.textContent =
+            `Rule check on "${p.name} / ${v.label}" failed: ${lj.error || "(no detail)"}`;
+        }
+        continue;
       }
-      continue;
     }
   }
 
   // For any completed-while-away jobs, fetch the persisted result and
   // pop the modal once. Sequential to keep the modal stack sane.
-  for (const { product, summary } of completedThisSync) {
+  for (const { product, version, summary } of completedThisSync) {
     try {
-      const r = await fetch(`/api/products/${product.id}/rule-check`);
+      const r = await fetch(`/api/versions/${version.id}/rule-check`);
       if (!r.ok) continue;
       const data = await r.json();
       data.roles_covered = summary.roles_covered || [];
       $status.textContent =
-        `Rule check on "${product.name}": ` +
+        `Rule check on "${product.name} / ${version.label}": ` +
         `${data.pass_count}/${data.rule_count} pass ` +
         `(roles: ${data.roles_covered.join(", ")})`;
-      showRuleResults(product, data);
+      showRuleResults(product, version, data);
     } catch (e) {
       console.error("failed to load persisted rule check", e);
     }
   }
-}
-
-// ---- customer fold state -------------------------------------------------
-// Dashboard groups product cards by library_id (== customer). Fold state is
-// stored as the set of *folded* library_ids so brand-new libraries default
-// to folded without us having to write at registration time. Absence of the
-// key in sessionStorage means "every section folded" (first-load default).
-const FOLD_KEY = "smdr2.dashboard.foldedCustomers";
-
-function loadFoldedSet() {
-  try {
-    const raw = sessionStorage.getItem(FOLD_KEY);
-    if (raw == null) return null;  // null = "no record yet" → treat as all-folded
-    const arr = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr : []);
-  } catch {
-    return new Set();
-  }
-}
-function saveFoldedSet(set) {
-  sessionStorage.setItem(FOLD_KEY, JSON.stringify([...set]));
-}
-
-function groupProductsByLibrary(prods) {
-  const byLib = new Map();
-  for (const p of prods) {
-    if (!byLib.has(p.library_id)) byLib.set(p.library_id, []);
-    byLib.get(p.library_id).push(p);
-  }
-  const groups = [];
-  for (const [lid, items] of byLib) {
-    const lib = libraries.find(l => l.id === lid) ?? { id: lid, name: lid };
-    groups.push({ library: lib, products: items });
-  }
-  // Alphabetical (case-insensitive) by library name; library_id as deterministic tiebreak.
-  groups.sort((a, b) => {
-    const an = (a.library.name || "").toLowerCase();
-    const bn = (b.library.name || "").toLowerCase();
-    if (an < bn) return -1;
-    if (an > bn) return 1;
-    return a.library.id < b.library.id ? -1 : a.library.id > b.library.id ? 1 : 0;
-  });
-  return groups;
 }
 
 function renderProducts() {
@@ -312,68 +270,133 @@ function renderProducts() {
     return;
   }
   $empty.hidden = true;
+  // Flat list — no customer/library grouping (libraries are version
+  // internals now).
+  for (const p of products) $list.appendChild(productCard(p));
+}
 
-  const stored = loadFoldedSet();
-  const groups = groupProductsByLibrary(products);
-  for (const g of groups) {
-    // First-load default (no sessionStorage record) → fold every section.
-    const folded = stored === null ? true : stored.has(g.library.id);
-    $list.appendChild(customerSection(g.library, g.products, folded));
+// ---- version bar ----------------------------------------------------------
+// Per-card switcher: a <select> of version labels (latest is the default),
+// the sign-off badge / buttons, and the "新增版本" (clone) action.
+function versionBar(p, version) {
+  const bar = document.createElement("div");
+  bar.className = "version-bar";
+
+  const label = document.createElement("span");
+  label.className = "version-bar__label";
+  label.textContent = "版本:";
+  bar.appendChild(label);
+
+  const select = document.createElement("select");
+  select.className = "version-select";
+  select.title = "切換此產品的版本(整張卡片會切到該版本的內容)";
+  for (const v of p.versions) {
+    const opt = document.createElement("option");
+    opt.value = v.id;
+    opt.textContent = v.signed_off_by ? `${v.label} 🔒` : v.label;
+    if (version && v.id === version.id) opt.selected = true;
+    select.appendChild(opt);
   }
-}
-
-function customerSection(lib, prods, folded) {
-  const section = document.createElement("section");
-  section.className = "customer-section";
-  section.dataset.libraryId = lib.id;
-  section.dataset.folded = folded ? "true" : "false";
-
-  const header = document.createElement("header");
-  header.className = "customer-section__header";
-  header.setAttribute("role", "button");
-  header.setAttribute("tabindex", "0");
-  header.setAttribute("aria-expanded", folded ? "false" : "true");
-  const countLabel = prods.length === 1 ? "1 product" : `${prods.length} products`;
-  header.innerHTML =
-    `<span class="customer-section__chevron">${folded ? "▸" : "▾"}</span>` +
-    `<span class="customer-section__name">${escapeHtml(lib.name || lib.id)}</span>` +
-    `<span class="customer-section__count">(${countLabel})</span>`;
-  header.addEventListener("click", () => toggleCustomerFold(section));
-  header.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();  // Space would otherwise scroll the page
-      toggleCustomerFold(section);
-    }
+  select.addEventListener("change", () => {
+    selectedVersions.set(p.id, select.value);
+    renderProducts();
   });
-  section.appendChild(header);
+  bar.appendChild(select);
 
-  const body = document.createElement("div");
-  body.className = "customer-section__body";
-  for (const p of prods) body.appendChild(productCard(p));
-  section.appendChild(body);
+  if (version?.signed_off_by) {
+    const badge = document.createElement("span");
+    badge.className = "signed-badge";
+    badge.textContent =
+      `已畫押 by ${version.signed_off_by} @ ${fmtSignedAt(version.signed_off_at)}`;
+    badge.title = "此版本已凍結為唯讀;規則檢查結果仍可查看。";
+    bar.appendChild(badge);
+  }
 
-  return section;
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  bar.appendChild(spacer);
+
+  if (version) {
+    if (version.signed_off_by) {
+      // Admin affordance: unlock the version. Server-side admin check
+      // lands with the auth change; the button is exposed per spec.
+      const unsignBtn = document.createElement("button");
+      unsignBtn.type = "button";
+      unsignBtn.className = "version-action-btn";
+      unsignBtn.textContent = "解除畫押";
+      unsignBtn.title = "管理者操作:解除畫押,版本恢復可編輯";
+      unsignBtn.addEventListener("click", () => unsignVersion(p, version));
+      bar.appendChild(unsignBtn);
+    } else {
+      const signBtn = document.createElement("button");
+      signBtn.type = "button";
+      signBtn.className = "version-action-btn";
+      signBtn.textContent = "畫押";
+      signBtn.title = "凍結此版本(畫押後唯讀,僅管理者可解除)";
+      signBtn.addEventListener("click", () => signOffVersion(p, version));
+      bar.appendChild(signBtn);
+    }
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.type = "button";
+  newBtn.className = "version-action-btn";
+  newBtn.textContent = "新增版本";
+  newBtn.title = "以目前選取的版本為基礎建立新版本(複製範本、比對設定與檔案綁定)";
+  newBtn.addEventListener("click", () => createNewVersion(p, version));
+  bar.appendChild(newBtn);
+
+  return bar;
 }
 
-function toggleCustomerFold(section) {
-  const isFolded = section.dataset.folded === "true";
-  const next = !isFolded;
-  section.dataset.folded = next ? "true" : "false";
-  const header = section.querySelector(".customer-section__header");
-  header.setAttribute("aria-expanded", next ? "false" : "true");
-  header.querySelector(".customer-section__chevron").textContent = next ? "▸" : "▾";
+async function createNewVersion(p, sourceVersion) {
+  const label = prompt(`新版本標籤(將複製 "${sourceVersion ? sourceVersion.label : "最新版"}" 的內容):`);
+  if (label === null) return;
+  const trimmed = label.trim();
+  if (!trimmed) { $status.textContent = "版本標籤不可為空"; return; }
+  const body = { label: trimmed };
+  if (sourceVersion) body.clone_from = sourceVersion.id;
+  const res = await fetch(`/api/products/${p.id}/versions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 409) {
+    alert(`版本標籤 "${trimmed}" 已存在於此產品,請換一個標籤。`);
+    return;
+  }
+  if (!res.ok) {
+    $status.textContent = `create version failed: ${res.status}`;
+    return;
+  }
+  const created = await res.json();
+  selectedVersions.set(p.id, created.id);
+  $status.textContent = `已建立版本 "${created.label}"(複製自 ${sourceVersion ? sourceVersion.label : "最新版"})`;
+  await refresh();
+  startPollingIfBusy();  // cloned bindings re-preprocess in the background
+}
 
-  // Persist: load whatever is there (null → empty set, which will then
-  // imply the *other* sections become expanded; we want to write an
-  // explicit set so future loads stop defaulting all-folded).
-  const stored = loadFoldedSet() ?? new Set(
-    [...$list.querySelectorAll(".customer-section")]
-      .filter(s => s !== section && s.dataset.folded === "true")
-      .map(s => s.dataset.libraryId)
-  );
-  if (next) stored.add(section.dataset.libraryId);
-  else stored.delete(section.dataset.libraryId);
-  saveFoldedSet(stored);
+async function signOffVersion(p, version) {
+  if (!confirm(`確定要畫押 "${p.name} / ${version.label}" 嗎?\n畫押後此版本凍結為唯讀(上傳、比對、規則檢查皆停用)。`)) return;
+  const res = await fetch(`/api/versions/${version.id}/sign-off`, { method: "POST" });
+  if (!res.ok) {
+    if (await handleSignedOff409(res)) { await refresh(); return; }
+    $status.textContent = `sign-off failed: ${res.status}`;
+    return;
+  }
+  $status.textContent = `已畫押 "${p.name} / ${version.label}"`;
+  await refresh();
+}
+
+async function unsignVersion(p, version) {
+  if (!confirm(`確定要解除 "${p.name} / ${version.label}" 的畫押嗎?(管理者操作)`)) return;
+  const res = await fetch(`/api/versions/${version.id}/sign-off`, { method: "DELETE" });
+  if (!res.ok) {
+    $status.textContent = `unsign failed: ${res.status}`;
+    return;
+  }
+  $status.textContent = `已解除畫押 "${p.name} / ${version.label}"`;
+  await refresh();
 }
 
 function productCard(p) {
@@ -381,24 +404,36 @@ function productCard(p) {
   card.className = "product-card";
   card.dataset.productId = p.id;
 
+  const version = selectedVersionOf(p);
+  const signed = !!version?.signed_off_by;
+
   const header = document.createElement("header");
   header.innerHTML =
     `<span class="product-name">${escapeHtml(p.name)}</span>` +
-    `<span class="product-library">${escapeHtml(libraryName(p.library_id))}</span>` +
     `<span class="spacer"></span>` +
     `<button class="product-delete" type="button" title="Delete this product">Delete</button>`;
   header.querySelector(".product-delete").addEventListener("click", () => deleteProduct(p));
   card.appendChild(header);
 
+  card.appendChild(versionBar(p, version));
+
+  if (!version) {
+    const none = document.createElement("p");
+    none.className = "empty";
+    none.textContent = "此產品沒有任何版本(資料異常)";
+    card.appendChild(none);
+    return card;
+  }
+
   const grid = document.createElement("div");
   grid.className = "slot-grid";
-  for (const role of SINGLE_ROLES) grid.appendChild(slotCell(p, role));
-  grid.appendChild(ringLidPairCell(p));
+  for (const role of SINGLE_ROLES) grid.appendChild(slotCell(p, version, role));
+  grid.appendChild(ringLidPairCell(p, version));
   card.appendChild(grid);
 
   const footer = document.createElement("div");
   footer.className = "product-footer";
-  const prog = p.match_progress;
+  const prog = version.match_progress;
   footer.innerHTML =
     `<span class="match-progress">Match: <strong>${prog.saved}</strong>/${prog.total} saved</span>` +
     `<span class="spacer"></span>`;
@@ -406,16 +441,18 @@ function productCard(p) {
   const rcBtn = document.createElement("button");
   rcBtn.type = "button";
   rcBtn.className = "rule-check-btn";
-  const jobInFlight = ruleCheckJobs.has(p.id);
-  rcBtn.disabled = !p.ready_for_rule_check || jobInFlight;
+  const jobInFlight = ruleCheckJobs.has(version.id);
+  rcBtn.disabled = !version.ready_for_rule_check || jobInFlight || signed;
   if (jobInFlight) {
     rcBtn.textContent = "Running…";
   } else {
-    rcBtn.textContent = p.rule_check_available && p.ready_for_rule_check
+    rcBtn.textContent = version.rule_check_available && version.ready_for_rule_check
       ? "Re-run Rule Check"
       : "Rule Check";
   }
-  if (!p.ready_for_rule_check) {
+  if (signed) {
+    rcBtn.title = "版本已畫押(唯讀)— 結果仍可由 Check Result 查看";
+  } else if (!version.ready_for_rule_check) {
     const remaining = prog.total === 0
       ? "upload at least one DXF first"
       : `${prog.total - prog.saved} file(s) still need Save Match`;
@@ -423,7 +460,7 @@ function productCard(p) {
   } else if (jobInFlight) {
     rcBtn.title = "Rule check is running — see status bar.";
   }
-  rcBtn.addEventListener("click", () => runRuleCheck(p));
+  rcBtn.addEventListener("click", () => runRuleCheck(p, version));
   footer.appendChild(rcBtn);
 
   // "Check Result" re-opens the persisted rule-check result modal on
@@ -431,26 +468,28 @@ function productCard(p) {
   // on the first dashboard re-entry after it), so this gives a standing
   // entry point whenever a result exists. Hidden while a job is in flight —
   // the in-flight run will auto-pop the fresh result on completion.
-  if (p.rule_check_available && !jobInFlight) {
+  // Stays available on signed versions: results remain viewable.
+  if (version.rule_check_available && !jobInFlight) {
     const resBtn = document.createElement("button");
     resBtn.type = "button";
     resBtn.className = "rule-check-btn";
     resBtn.textContent = "Check Result";
     resBtn.title = "Show the latest rule-check result";
-    resBtn.addEventListener("click", () => showRuleCheckResult(p));
+    resBtn.addEventListener("click", () => showRuleCheckResult(p, version));
     footer.appendChild(resBtn);
   }
   // Dev mode: Download All Match — the DRC handoff bundle (zip of
   // every role-attached DXF + per-file Match JSON + manifest.json).
-  // Disabled (not hidden) when the product isn't ready_for_rule_check
+  // Disabled (not hidden) when the version isn't ready_for_rule_check
   // so dev users see the affordance with an explanatory tooltip.
+  // Bundle export is a read — allowed on signed versions too.
   if (getDevMode()) {
     const dlAll = document.createElement("button");
     dlAll.type = "button";
     dlAll.className = "rule-check-btn";
     dlAll.textContent = "Download All Match";
-    dlAll.disabled = !p.ready_for_rule_check;
-    if (!p.ready_for_rule_check) {
+    dlAll.disabled = !version.ready_for_rule_check;
+    if (!version.ready_for_rule_check) {
       const remaining = prog.total === 0
         ? "upload at least one DXF first"
         : `${prog.total - prog.saved} file(s) still need Save Match`;
@@ -458,21 +497,23 @@ function productCard(p) {
     } else {
       dlAll.title = "Download every DXF + Match JSON + manifest.json as a zip";
     }
-    dlAll.addEventListener("click", () => downloadAllMatch(p));
+    dlAll.addEventListener("click", () => downloadAllMatch(p, version));
     footer.appendChild(dlAll);
 
     // Dev mode: upload a hand-crafted RuleChecking JSON to simulate
     // an external rule-check result. Persists straight to
-    // data/rule_check/{pid}.json after envelope validation; lets the
+    // data/rule_check/{vid}.json after envelope validation; lets the
     // external team iterate on output shape without running their
-    // pipeline.
-    const upBtn = document.createElement("button");
-    upBtn.type = "button";
-    upBtn.className = "rule-check-btn";
-    upBtn.textContent = "📤 Upload Rule JSON";
-    upBtn.title = "Upload a RuleChecking JSON to test the envelope and preview rendering";
-    upBtn.addEventListener("click", () => uploadRuleJson(p));
-    footer.appendChild(upBtn);
+    // pipeline. Mutates the version → blocked when signed.
+    if (!signed) {
+      const upBtn = document.createElement("button");
+      upBtn.type = "button";
+      upBtn.className = "rule-check-btn";
+      upBtn.textContent = "📤 Upload Rule JSON";
+      upBtn.title = "Upload a RuleChecking JSON to test the envelope and preview rendering";
+      upBtn.addEventListener("click", () => uploadRuleJson(p, version));
+      footer.appendChild(upBtn);
+    }
   }
   card.appendChild(footer);
 
@@ -483,7 +524,7 @@ function productCard(p) {
 async function downloadMatchJson(file) {
   $status.textContent = `downloading match JSON for ${file.name}…`;
   try {
-    const r = await fetch(`/api/files/${file.id}/match-json`);
+    const r = await fetch(`/api/files/${file.id}/match-json?version_id=${encodeURIComponent(file.version_id)}`);
     if (!r.ok) {
       $status.textContent = `download failed: ${r.status}`;
       return;
@@ -498,14 +539,14 @@ async function downloadMatchJson(file) {
 // Dev mode: prompt for a JSON file, POST it to the upload endpoint.
 // Surfaces envelope-validation errors inline (400 detail) so the user
 // can fix the JSON and try again.
-async function uploadRuleJson(product) {
+async function uploadRuleJson(product, version) {
   const picker = document.createElement("input");
   picker.type = "file";
   picker.accept = "application/json,.json";
   picker.addEventListener("change", async () => {
     const file = picker.files?.[0];
     if (!file) return;
-    $status.textContent = `uploading "${file.name}" for "${product.name}"…`;
+    $status.textContent = `uploading "${file.name}" for "${product.name} / ${version.label}"…`;
     let body;
     try {
       body = await file.text();
@@ -516,12 +557,13 @@ async function uploadRuleJson(product) {
       return;
     }
     try {
-      const r = await fetch(`/api/products/${product.id}/rule-check/upload`, {
+      const r = await fetch(`/api/versions/${version.id}/rule-check/upload`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body,
       });
       if (!r.ok) {
+        if (await handleSignedOff409(r)) return;
         let detail = `${r.status}`;
         try {
           const j = await r.json();
@@ -533,7 +575,7 @@ async function uploadRuleJson(product) {
       }
       const summary = await r.json();
       $status.textContent =
-        `Uploaded for "${product.name}": ` +
+        `Uploaded for "${product.name} / ${version.label}": ` +
         `${summary.pass_count}/${summary.rule_count} pass ` +
         `(${summary.fail_count} fail)`;
       await refresh();  // rule_check_available flips, "Rule Check" → "Re-run"
@@ -544,10 +586,10 @@ async function uploadRuleJson(product) {
   picker.click();
 }
 
-async function downloadAllMatch(product) {
-  $status.textContent = `building DRC bundle for "${product.name}"…`;
+async function downloadAllMatch(product, version) {
+  $status.textContent = `building DRC bundle for "${product.name} / ${version.label}"…`;
   try {
-    const r = await fetch(`/api/products/${product.id}/drc-bundle`);
+    const r = await fetch(`/api/versions/${version.id}/drc-bundle`);
     if (!r.ok) {
       let msg = `bundle download failed: ${r.status}`;
       try {
@@ -557,37 +599,37 @@ async function downloadAllMatch(product) {
       $status.textContent = msg;
       return;
     }
-    downloadAsFile(await r.blob(), `drc-bundle-${product.id}.zip`);
-    $status.textContent = `downloaded drc-bundle-${product.id}.zip`;
+    downloadAsFile(await r.blob(), `drc-bundle-${version.id}.zip`);
+    $status.textContent = `downloaded drc-bundle-${version.id}.zip`;
   } catch (e) {
     $status.textContent = `bundle download failed: ${e.message}`;
   }
 }
 
-function slotCell(product, role, opts = {}) {
+function slotCell(product, version, role, opts = {}) {
   const { disabledReason = null } = opts;
+  const signed = !!version.signed_off_by;
   const cell = document.createElement("div");
   cell.className = "slot";
   cell.dataset.role = role;
-  cell.dataset.productId = product.id;
+  cell.dataset.versionId = version.id;
 
-  const allFiles = (product.files_by_role_all && product.files_by_role_all[role]) || [];
+  const allFiles = (version.files_by_role_all && version.files_by_role_all[role]) || [];
   cell.innerHTML = `<span class="role-label">${role}</span>`;
 
   if (!allFiles.length) {
     cell.classList.add("empty");
-    if (disabledReason) {
-      // RING/LID pair: this half is locked because its opposite role
-      // already holds a file. Render a non-interactive placeholder
-      // matching the viewer-ui spec's `slot.empty.disabled`.
+    if (disabledReason || signed) {
+      // Disabled either because the opposite RING/LID half holds a file,
+      // or because the version is signed off (uploads frozen).
       cell.classList.add("disabled");
-      cell.title = disabledReason;
-      cell.innerHTML += `<span class="file-name">unavailable</span>`;
+      cell.title = disabledReason || "版本已畫押(唯讀)— 無法上傳";
+      cell.innerHTML += `<span class="file-name">${signed && !disabledReason ? "已畫押(唯讀)" : "unavailable"}</span>`;
       return cell;
     }
     cell.innerHTML += `<span class="file-name">+ Drop or click</span>`;
-    cell.addEventListener("click", () => pickFile(product.id, role));
-    wireDragAndDrop(cell, product.id, role);
+    cell.addEventListener("click", () => pickFile(version.id, role));
+    wireDragAndDrop(cell, version.id, role);
     return cell;
   }
 
@@ -596,8 +638,8 @@ function slotCell(product, role, opts = {}) {
     // (file name + status + Open/Layers/Replace) and adds a small
     // "+ Add file" affordance so the user can grow into multi-file mode
     // without having to delete-and-re-upload.
-    renderSingleFileSlot(cell, product, role, allFiles[0]);
-    cell.appendChild(buildAddButton(product, role));
+    renderSingleFileSlot(cell, version, role, allFiles[0]);
+    if (!signed) cell.appendChild(buildAddButton(version, role));
     return cell;
   }
 
@@ -605,35 +647,35 @@ function slotCell(product, role, opts = {}) {
   const filesContainer = document.createElement("div");
   filesContainer.className = "slot-files";
   for (const f of allFiles) {
-    filesContainer.appendChild(slotFileRow(product, role, f, /*compact=*/true));
+    filesContainer.appendChild(slotFileRow(version, role, f, /*compact=*/true));
   }
   cell.appendChild(filesContainer);
-  cell.appendChild(buildAddButton(product, role));
+  if (!signed) cell.appendChild(buildAddButton(version, role));
   return cell;
 }
 
 // The 4th grid cell is one container holding two adjacent `slotCell`
 // halves — RING on the left, LID on the right — each rendered as an
 // independent single-role slot. Both halves may be filled.
-function ringLidPairCell(product) {
+function ringLidPairCell(product, version) {
   const cell = document.createElement("div");
   cell.className = "slot-pair";
-  cell.appendChild(slotCell(product, "RING"));
-  cell.appendChild(slotCell(product, "LID"));
+  cell.appendChild(slotCell(product, version, "RING"));
+  cell.appendChild(slotCell(product, version, "LID"));
   return cell;
 }
 
-function buildAddButton(product, role) {
+function buildAddButton(version, role) {
   const btn = document.createElement("button");
   btn.className = "replace-btn slot-add";
   btn.type = "button";
   btn.textContent = "+ Add file";
   btn.title = "Upload another DXF into this role";
-  btn.addEventListener("click", () => pickFile(product.id, role));
+  btn.addEventListener("click", () => pickFile(version.id, role));
   return btn;
 }
 
-function renderSingleFileSlot(cell, product, role, f) {
+function renderSingleFileSlot(cell, version, role, f) {
   // Inlined "old" rendering: file-name + status + actions directly on
   // the cell, no per-row wrapping.
   const { statusColor, statusLabel, matchBadge } = fileStatusBits(f);
@@ -641,10 +683,10 @@ function renderSingleFileSlot(cell, product, role, f) {
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
   appendUnitScaleAnnotation(cell.querySelector(".slot-status"), f);
-  cell.appendChild(buildFileActions(product, role, f, /*compact=*/false));
+  cell.appendChild(buildFileActions(version, role, f, /*compact=*/false));
 }
 
-function slotFileRow(product, role, f, compact) {
+function slotFileRow(version, role, f, compact) {
   const row = document.createElement("div");
   row.className = "slot-file";
   row.dataset.fileId = f.id;
@@ -653,7 +695,7 @@ function slotFileRow(product, role, f, compact) {
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
   appendUnitScaleAnnotation(row.querySelector(".slot-status"), f);
-  row.appendChild(buildFileActions(product, role, f, compact));
+  row.appendChild(buildFileActions(version, role, f, compact));
   return row;
 }
 
@@ -690,12 +732,12 @@ function appendUnitScaleAnnotation(parent, f) {
     const badge = document.createElement("span");
     badge.className = warnNonMm ? "warn-badge" : "unit-badge";
     badge.textContent = warnNonMm
-      ? `⚠ 單位 ${f.unit_label}（非 mm）`
+      ? `⚠ 單位 ${f.unit_label}(非 mm)`
       : `單位 ${f.unit_label}`;
     badge.title = warnNonMm
-      ? `來源 $INSUNITS = ${f.unit_label}，非 mm。目前直接以 mm 處理；` +
-        `若實際單位不同，請在檢視器手動指定單位以換算。`
-      : `單位：${f.unit_label}`;
+      ? `來源 $INSUNITS = ${f.unit_label},非 mm。目前直接以 mm 處理;` +
+        `若實際單位不同,請在檢視器手動指定單位以換算。`
+      : `單位:${f.unit_label}`;
     parent.appendChild(badge);
   }
 
@@ -703,12 +745,12 @@ function appendUnitScaleAnnotation(parent, f) {
   if (adjusted && f.applied_scale_label) {
     const pill = document.createElement("span");
     pill.className = "rescaled-pill";
-    const override = f.user_unit_override ? "（手動指定）" : "";
+    const override = f.user_unit_override ? "(手動指定)" : "";
     const post = bboxDiagonal(f.bbox);
     const pre = post != null && f.applied_scale ? post / f.applied_scale : null;
     const beforeAfter =
       pre != null
-        ? `：對角線 ${fmtLen(pre)} ${f.unit_label} → ${fmtLen(post)} mm`
+        ? `:對角線 ${fmtLen(pre)} ${f.unit_label} → ${fmtLen(post)} mm`
         : "";
     pill.textContent = `ℹ 已調整 ${f.applied_scale_label}${override}${beforeAfter}`;
     pill.title = f.unit_scale_warning_detail || "";
@@ -764,10 +806,11 @@ function fileStatusBits(f) {
   return { statusColor, statusLabel, matchBadge };
 }
 
-function buildFileActions(product, role, f, compact) {
+function buildFileActions(version, role, f, compact) {
+  const signed = !!version.signed_off_by;
   const actions = document.createElement("div");
   actions.className = "slot-actions";
-  if (f.status === "awaiting_layout") {
+  if (f.status === "awaiting_layout" && !signed) {
     const pickBtn = document.createElement("button");
     pickBtn.className = "primary action-btn";
     pickBtn.type = "button";
@@ -775,7 +818,7 @@ function buildFileActions(product, role, f, compact) {
     pickBtn.title = "This DXF's geometry is in AutoCAD layout tabs — pick which one to load";
     pickBtn.addEventListener("click", () => promptLayoutSelection(f));
     actions.appendChild(pickBtn);
-  } else if (f.status === "awaiting_layers") {
+  } else if (f.status === "awaiting_layers" && !signed) {
     const pickBtn = document.createElement("button");
     pickBtn.className = "primary action-btn";
     pickBtn.type = "button";
@@ -783,8 +826,13 @@ function buildFileActions(product, role, f, compact) {
     pickBtn.addEventListener("click", () => promptLayerSelection(f));
     actions.appendChild(pickBtn);
   } else if (f.status === "ready_to_match") {
-    actions.innerHTML = `<a class="open-link" href="/viewer/${f.id}">Open →</a>`;
+    actions.innerHTML =
+      `<a class="open-link" href="/viewer/${f.id}?version_id=${encodeURIComponent(version.id)}">Open →</a>`;
   }
+  // Editing affordances (re-pick view/layers, replace, delete) mutate the
+  // version — render none of them when signed off. Viewing stays.
+  if (signed) return actions;
+
   // Re-pick the AutoCAD tab when this file went through the layout picker
   // (a manifest exists) and isn't mid-discovery / errored / already at the
   // pick-view gate.
@@ -820,7 +868,7 @@ function buildFileActions(product, role, f, compact) {
   replace.type = "button";
   replace.textContent = "Replace";
   replace.title = "Replace this DXF";
-  replace.addEventListener("click", () => pickFile(product.id, role, f.id));
+  replace.addEventListener("click", () => pickFile(version.id, role, f.id));
   actions.appendChild(replace);
   // Dev mode: Download Match JSON. Hidden entirely unless dev mode is on
   // AND the file has a saved Match JSON to download (endpoint would 404
@@ -844,12 +892,12 @@ function buildFileActions(product, role, f, compact) {
   del.type = "button";
   del.textContent = "✕";
   del.title = "Remove this DXF from the role";
-  del.addEventListener("click", () => deleteProductFile(product, role, f));
+  del.addEventListener("click", () => deleteVersionFile(version, role, f));
   actions.appendChild(del);
   return actions;
 }
 
-function wireDragAndDrop(cell, productId, role) {
+function wireDragAndDrop(cell, versionId, role) {
   cell.addEventListener("dragover", (e) => { e.preventDefault(); cell.classList.add("dragover"); });
   cell.addEventListener("dragleave", () => cell.classList.remove("dragover"));
   cell.addEventListener("drop", (e) => {
@@ -857,14 +905,14 @@ function wireDragAndDrop(cell, productId, role) {
     cell.classList.remove("dragover");
     const file = [...(e.dataTransfer?.files ?? [])]
       .find(f => f.name.toLowerCase().endsWith(".dxf"));
-    if (file) uploadFile(productId, role, file);
+    if (file) uploadFile(versionId, role, file);
   });
 }
 
 // `replaceFileId` is the id of the file this upload should evict before
 // landing the new one (the "Replace" button path). Omit for additive uploads.
-function pickFile(productId, role, replaceFileId = null) {
-  pendingSlot = { productId, role, replaceFileId };
+function pickFile(versionId, role, replaceFileId = null) {
+  pendingSlot = { versionId, role, replaceFileId };
   $fileInput.click();
 }
 $fileInput.addEventListener("change", () => {
@@ -872,7 +920,7 @@ $fileInput.addEventListener("change", () => {
   $fileInput.value = "";
   if (f && pendingSlot) {
     uploadFile(
-      pendingSlot.productId,
+      pendingSlot.versionId,
       pendingSlot.role,
       f,
       pendingSlot.replaceFileId || null,
@@ -880,7 +928,7 @@ $fileInput.addEventListener("change", () => {
   }
 });
 
-async function uploadFile(productId, role, file, replaceFileId = null) {
+async function uploadFile(versionId, role, file, replaceFileId = null) {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("dxf_role", role);
@@ -893,8 +941,9 @@ async function uploadFile(productId, role, file, replaceFileId = null) {
     fd.append("skip_layer_pick", "true");
   }
   $status.textContent = `uploading ${file.name} → ${role}…`;
-  const res = await fetch(`/api/products/${productId}/files`, { method: "POST", body: fd });
+  const res = await fetch(`/api/versions/${versionId}/files`, { method: "POST", body: fd });
   if (!res.ok) {
+    if (await handleSignedOff409(res)) { await refresh(); return; }
     let msg = `upload failed: ${res.status}`;
     try {
       const body = await res.json();
@@ -909,10 +958,11 @@ async function uploadFile(productId, role, file, replaceFileId = null) {
   startPollingIfBusy();
 }
 
-async function deleteProductFile(product, role, file) {
+async function deleteVersionFile(version, role, file) {
   if (!confirm(`Remove "${file.name}" from ${role}?`)) return;
-  const res = await fetch(`/api/products/${product.id}/files/${file.id}`, { method: "DELETE" });
+  const res = await fetch(`/api/versions/${version.id}/files/${file.id}`, { method: "DELETE" });
   if (!res.ok) {
+    if (await handleSignedOff409(res)) { await refresh(); return; }
     $status.textContent = `remove failed: ${res.status}`;
     return;
   }
@@ -921,44 +971,56 @@ async function deleteProductFile(product, role, file) {
 }
 
 async function deleteProduct(p) {
-  if (!confirm(`Delete product "${p.name}" and all its files from this view?`)) return;
+  if (!confirm(`Delete product "${p.name}" — every version, file binding, and result with it?`)) return;
   const res = await fetch(`/api/products/${p.id}`, { method: "DELETE" });
   if (!res.ok) {
     $status.textContent = `delete failed: ${res.status}`;
     return;
   }
+  selectedVersions.delete(p.id);
   await refresh();
 }
 
-async function runRuleCheck(p) {
-  if (ruleCheckJobs.has(p.id)) return;  // already in flight; button should be disabled
-  $status.textContent = `submitting rule check on "${p.name}"…`;
-  const res = await fetch(`/api/products/${p.id}/rule-check`, { method: "POST" });
+async function runRuleCheck(p, version) {
+  if (ruleCheckJobs.has(version.id)) return;  // already in flight; button should be disabled
+  $status.textContent = `submitting rule check on "${p.name} / ${version.label}"…`;
+  const res = await fetch(`/api/versions/${version.id}/rule-check`, { method: "POST" });
   if (!res.ok) {
+    if (await handleSignedOff409(res)) { await refresh(); return; }
     const err = await res.text();
     $status.textContent = `rule-check submit failed: ${res.status}`;
     console.error(err);
     return;
   }
   const { job_id: jobId } = await res.json();
-  ruleCheckJobs.set(p.id, { jobId, name: p.name });
+  ruleCheckJobs.set(version.id, { jobId, name: `${p.name} / ${version.label}` });
   $status.textContent =
-    `Rule check on "${p.name}" running (job ${jobId.slice(0, 8)}…)`;
+    `Rule check on "${p.name} / ${version.label}" running (job ${jobId.slice(0, 8)}…)`;
   renderProducts();      // reflect "Running…" on the button immediately
   startPollingIfBusy();  // tick handler watches `ruleCheckJobs` too
 }
 
+// Locate (product, version) for a version id in the freshly-refreshed
+// `products` snapshot. Returns {product, version} or nulls.
+function findVersion(versionId) {
+  for (const p of products) {
+    const v = (p.versions || []).find(x => x.id === versionId);
+    if (v) return { product: p, version: v };
+  }
+  return { product: null, version: null };
+}
+
 // Poll a single rule-check job; called from the dashboard tick. Returns
 // `true` while the job is still in flight so the tick keeps running.
-async function _stepRuleCheckJob(productId) {
-  const entry = ruleCheckJobs.get(productId);
+async function _stepRuleCheckJob(versionId) {
+  const entry = ruleCheckJobs.get(versionId);
   if (!entry) return false;
   let job;
   try {
     const r = await fetch(`/api/jobs/${entry.jobId}`);
     if (!r.ok) {
       $status.textContent = `rule-check job lost: ${r.status}`;
-      ruleCheckJobs.delete(productId);
+      ruleCheckJobs.delete(versionId);
       return false;
     }
     job = await r.json();
@@ -967,7 +1029,7 @@ async function _stepRuleCheckJob(productId) {
     return true;  // transient — try again next tick
   }
   if (job.status === "done") {
-    ruleCheckJobs.delete(productId);
+    ruleCheckJobs.delete(versionId);
     _markRuleCheckJobSeen(entry.jobId);
     const summary = job.result || {};
     $status.textContent =
@@ -977,17 +1039,17 @@ async function _stepRuleCheckJob(productId) {
     // Refresh products (so rule_check_available flips) and fetch the
     // persisted result for the modal.
     await refresh();
-    const product = products.find(p => p.id === productId);
-    if (product) {
+    const { product, version } = findVersion(versionId);
+    if (product && version) {
       try {
-        const r = await fetch(`/api/products/${productId}/rule-check`);
+        const r = await fetch(`/api/versions/${versionId}/rule-check`);
         if (r.ok) {
           const data = await r.json();
           // The persisted GET returns `results / rule_count / pass_count /
           // fail_count` but not roles_covered; merge the job summary in
           // so `showRuleResults` can render the roles line.
           data.roles_covered = summary.roles_covered || [];
-          showRuleResults(product, data);
+          showRuleResults(product, version, data);
         }
       } catch (e) {
         console.error("failed to load persisted rule check", e);
@@ -996,7 +1058,7 @@ async function _stepRuleCheckJob(productId) {
     return false;
   }
   if (job.status === "error") {
-    ruleCheckJobs.delete(productId);
+    ruleCheckJobs.delete(versionId);
     _markRuleCheckJobSeen(entry.jobId);
     $status.textContent = `Rule check on "${entry.name}" failed: ${job.error || "(no detail)"}`;
     renderProducts();
@@ -1034,22 +1096,22 @@ function isLocatable(sub) {
   return Boolean(sub && (sub.from || hasToValue(sub.to) || sub.tol));
 }
 
-// Re-open the persisted rule-check result modal for a product on demand
+// Re-open the persisted rule-check result modal for a version on demand
 // (the "Check Result" button). Unlike the auto-pop path there's no live job
-// summary here, so roles_covered comes from the product's latest rule-check
+// summary here, so roles_covered comes from the version's latest rule-check
 // job result when available (null after a server restart → empty list, which
 // showRuleResults renders gracefully).
-async function showRuleCheckResult(p) {
-  $status.textContent = `loading rule-check result for "${p.name}"…`;
+async function showRuleCheckResult(p, version) {
+  $status.textContent = `loading rule-check result for "${p.name} / ${version.label}"…`;
   try {
-    const r = await fetch(`/api/products/${p.id}/rule-check`);
+    const r = await fetch(`/api/versions/${version.id}/rule-check`);
     if (!r.ok) {
-      $status.textContent = `no rule-check result for "${p.name}" (${r.status})`;
+      $status.textContent = `no rule-check result for "${p.name} / ${version.label}" (${r.status})`;
       return;
     }
     const data = await r.json();
-    data.roles_covered = p.latest_rule_check_job?.result?.roles_covered || [];
-    showRuleResults(p, data);
+    data.roles_covered = version.latest_rule_check_job?.result?.roles_covered || [];
+    showRuleResults(p, version, data);
     $status.textContent = "";
   } catch (e) {
     $status.textContent = `failed to load rule-check result: ${e}`;
@@ -1057,8 +1119,8 @@ async function showRuleCheckResult(p) {
   }
 }
 
-function showRuleResults(product, data) {
-  $ruleResultsTitle.textContent = `Rule Check — ${product.name}`;
+function showRuleResults(product, version, data) {
+  $ruleResultsTitle.textContent = `Rule Check — ${product.name} / ${version.label}`;
   $ruleResultsSummary.textContent =
     `${data.pass_count}/${data.rule_count} pass · roles: ${(data.roles_covered || []).join(", ")}`;
   $ruleResultsBody.innerHTML = "";
@@ -1107,9 +1169,9 @@ function showRuleResults(product, data) {
         // `files_by_role_all` by raw `dxf_role`, so a sub-rule with
         // `part: "LID"` lights up the LID half of the split 4th cell
         // without any extra branching here.
-        const siblings = product.files_by_role_all?.[sub.part] ?? [];
+        const siblings = version.files_by_role_all?.[sub.part] ?? [];
         const file = (sub.file_id && siblings.find(f => f.id === sub.file_id))
-                  || product.files_by_role[sub.part];
+                  || version.files_by_role[sub.part];
         const locatable = isLocatable(sub);
         const li = document.createElement("li");
         // Three branches: (a) file not uploaded → existing no-file
@@ -1121,7 +1183,7 @@ function showRuleResults(product, data) {
           trailing = `<span class="no-file">${escapeHtml(sub.part)} not uploaded</span>`;
         } else if (locatable) {
           textPrefix = "🎯 ";
-          trailing = `<a class="view-link" href="/viewer/${file.id}?rule=${encodeURIComponent(name)}&idx=${idx}">View in ${escapeHtml(sub.part)} →</a>`;
+          trailing = `<a class="view-link" href="/viewer/${file.id}?version_id=${encodeURIComponent(version.id)}&rule=${encodeURIComponent(name)}&idx=${idx}">View in ${escapeHtml(sub.part)} →</a>`;
         } else {
           textPrefix = "ℹ ";
           trailing = "";
@@ -1143,10 +1205,12 @@ function showRuleResults(product, data) {
 // The modal is user-driven only — never auto-popped. A file sitting in
 // `awaiting_layers` shows a "Pick layers" call-to-action on its slot;
 // clicking it (or the "Layers" button on a post-Phase-1 file) is the
-// only way to open the modal.
+// only way to open the modal. All file-centric endpoints are version
+// scoped now — `f.version_id` rides along into the modal's fetches.
 async function promptLayerSelection(file) {
   const result = await openLayerModal({
     fileId: file.id,
+    versionId: file.version_id,
     fileName: file.name,
     onConfirm: async () => {
       $status.textContent = `Phase 2 running on ${file.name}…`;
@@ -1162,6 +1226,7 @@ async function promptLayerSelection(file) {
 async function promptLayoutSelection(file) {
   const result = await openLayoutModal({
     fileId: file.id,
+    versionId: file.version_id,
     fileName: file.name,
     onConfirm: async (layout) => {
       $status.textContent = `Loading "${layout}" from ${file.name}…`;
@@ -1177,6 +1242,7 @@ async function editLayers(file) {
   const hasManifest = file.status !== "error";  // ready/preprocessing imply manifest exists
   const result = await openLayerModal({
     fileId: file.id,
+    versionId: file.version_id,
     fileName: file.name,
     triggerDiscovery: !hasManifest || file.status === "preprocessing",
     onConfirm: async () => {
@@ -1196,15 +1262,20 @@ function startPollingIfBusy() {
     await refresh();
     // Step every active rule-check job. _stepRuleCheckJob() removes
     // entries from `ruleCheckJobs` once they reach done/error.
-    const ruleJobProducts = Array.from(ruleCheckJobs.keys());
-    await Promise.all(ruleJobProducts.map(pid => _stepRuleCheckJob(pid)));
+    const ruleJobVersions = Array.from(ruleCheckJobs.keys());
+    await Promise.all(ruleJobVersions.map(vid => _stepRuleCheckJob(vid)));
 
+    // A file in ANY version of any product keeps the poll alive — a
+    // freshly-cloned version re-preprocesses its bindings even though
+    // it may not be the selected one.
     const fileBusy = products.some(p =>
-      Object.values(p.files_by_role).some(f => f && (
-        f.status === "preprocessing"
-        || f.status === "discovering_layers"
-        || f.status === "checking_rules"
-      ))
+      (p.versions || []).some(v =>
+        Object.values(v.files_by_role).some(f => f && (
+          f.status === "preprocessing"
+          || f.status === "discovering_layers"
+          || f.status === "checking_rules"
+        ))
+      )
     );
     const ruleBusy = ruleCheckJobs.size > 0;
     if (fileBusy || ruleBusy) {
@@ -1283,7 +1354,6 @@ async function pollReprocessJob(jobId) {
 // ---- bootstrap -----------------------------------------------------------
 (async () => {
   syncDevModeButton();
-  await loadLibraries();
   await refresh();
   startPollingIfBusy();
 })();

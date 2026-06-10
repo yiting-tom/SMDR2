@@ -116,6 +116,11 @@ class VersionStore:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         with self.lock, self.conn:
+            # versions reference libraries (1:1) and the clone txn copies
+            # templates/classes rows — make sure those tables exist even
+            # when this store is the first to open a fresh DB.
+            from app.library import SCHEMA as LIBRARY_SCHEMA
+            self.conn.executescript(LIBRARY_SCHEMA)
             self.conn.executescript(VERSIONS_SCHEMA)
 
     # ---- reads -----------------------------------------------------------

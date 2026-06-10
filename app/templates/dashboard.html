@@ -22,10 +22,7 @@
   </header>
 
   <main class="dashboard-main">
-    <section id="library-bar">
-      <label for="library-select">Library:</label>
-      <select id="library-select" aria-label="Active library"></select>
-      <button id="new-library-btn" type="button" title="Create a new library">+ New library</button>
+    <section id="dashboard-toolbar">
       <span class="spacer"></span>
       <button id="new-product-btn" type="button">+ New product</button>
     </section>
@@ -51,8 +48,8 @@
           <input id="new-product-name" type="text" placeholder="e.g., Customer-A P/N 12345" />
         </label>
         <label class="form-row">
-          <span>Library (customer)</span>
-          <select id="new-product-library"></select>
+          <span>Version label <em class="required-mark">*</em></span>
+          <input id="new-product-version-label" type="text" placeholder="e.g., v1" />
         </label>
         <div class="form-actions">
           <button id="new-product-create" type="button">Create</button>

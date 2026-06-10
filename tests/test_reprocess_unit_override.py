@@ -1,25 +1,32 @@
-"""Regression tests: a per-file unit override must survive re-preprocessing.
+"""Regression tests: a per-binding unit override must survive
+re-preprocessing.
 
-Bug: `submit_reprocess_all` dispatched `_preprocess_worker` without the file's
-stored `user_unit_override` (or `product_id`), so any reprocess-all — including
-the startup unit-rescale migration — re-ran the auto-detector and clobbered the
-operator's unit on every restart. These tests pin the dispatch wiring and the
-migration's exclusion of overridden files.
+Bug: `submit_reprocess_all` dispatched `_preprocess_worker` without the
+binding's stored `user_unit_override`, so any reprocess-all re-ran the
+auto-detector and clobbered the operator's unit on every restart. These
+tests pin the dispatch wiring under the versioned model (the worker also
+receives the version's library and writes version-scoped artifact paths).
+
+Removed test: test_startup_migration_is_a_noop_after_auto_rescale_removed —
+the one-shot startup unit-rescale migration itself was REMOVED (openspec
+add-product-versioning, REMOVED "One-shot legacy migration on startup");
+its absence is pinned in tests/test_dxf_auto_rescale.py.
 """
 
 from __future__ import annotations
 
 from app import jobs
-from app import main as main_mod
 from app.files import FileStore
 
 
 # Worker positional signature, for indexing the captured submit() args:
-#   0 file_id, 1 src, 2 parsed_dst, 3 prematch_dst, 4 library_id,
-#   5 selected_layers, 6 transient_primitives, 7 dev_overrides_snapshot,
-#   8 user_unit_override, 9 product_id
-_OVERRIDE_ARG = 8
-_PRODUCT_ARG = 9
+#   0 version_id, 1 file_id, 2 src, 3 parsed_dst, 4 prematch_dst,
+#   5 library_id, 6 selected_layers, 7 transient_primitives,
+#   8 dev_overrides_snapshot, 9 user_unit_override, 10 layout_name
+_VERSION_ARG = 0
+_FILE_ARG = 1
+_LIBRARY_ARG = 5
+_OVERRIDE_ARG = 9
 
 
 class _FakeFuture:
@@ -36,17 +43,35 @@ class _FakeExecutor:
         return _FakeFuture()
 
 
-def _ready_file(fs: FileStore, file_id: str, *, insunits: int, bbox, product_id=None):
-    fs.register(file_id, f"{file_id}.dxf", 1, product_id=product_id)
-    fs.update_parsed(file_id, 1, bbox, "#000", insunits=insunits, applied_scale=1.0)
+def _ready_binding(fs: FileStore, version_id: str, file_id: str, *,
+                   insunits: int, bbox):
+    fs.register_content(file_id, f"{file_id}.dxf", 1)
+    fs.bind(version_id, "BD", file_id)
+    fs.update_parsed(version_id, file_id, 1, bbox, "#000",
+                     insunits=insunits, applied_scale=1.0)
 
 
-def test_reprocess_all_threads_override_and_product_id(tmp_path, monkeypatch):
+class _FakeVersion:
+    def __init__(self, vid, library_id):
+        self.id = vid
+        self.library_id = library_id
+        self.is_signed_off = False
+
+
+def _patch_version_lookup(monkeypatch, mapping):
+    class _FakeVersionStore:
+        def get(self, vid):
+            return mapping.get(vid)
+    monkeypatch.setattr("app.versions.VERSION_STORE", _FakeVersionStore())
+
+
+def test_reprocess_all_threads_override_and_version(tmp_path, monkeypatch):
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
+    _patch_version_lookup(monkeypatch, {"v1": _FakeVersion("v1", "lib1")})
 
-    _ready_file(fs, "f1", insunits=4, bbox=(0, 0, 300, 300), product_id="P1")
-    fs.set_user_unit_override("f1", "mm")
+    _ready_binding(fs, "v1", "f1", insunits=4, bbox=(0, 0, 300, 300))
+    fs.set_user_unit_override("v1", "f1", "mm")
 
     fake = _FakeExecutor()
     monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
@@ -55,16 +80,18 @@ def test_reprocess_all_threads_override_and_product_id(tmp_path, monkeypatch):
 
     assert len(fake.calls) == 1
     args = fake.calls[0]
-    assert args[0] == "f1"
+    assert args[_VERSION_ARG] == "v1"
+    assert args[_FILE_ARG] == "f1"
+    assert args[_LIBRARY_ARG] == "lib1", "version's library must reach the worker"
     assert args[_OVERRIDE_ARG] == "mm", "stored unit override must reach the worker"
-    assert args[_PRODUCT_ARG] == "P1", "product scope must reach the worker"
 
 
-def test_reprocess_all_passes_none_override_for_unset_file(tmp_path, monkeypatch):
+def test_reprocess_all_passes_none_override_for_unset_binding(tmp_path, monkeypatch):
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
+    _patch_version_lookup(monkeypatch, {"v1": _FakeVersion("v1", "lib1")})
 
-    _ready_file(fs, "f2", insunits=4, bbox=(0, 0, 300, 300))
+    _ready_binding(fs, "v1", "f2", insunits=4, bbox=(0, 0, 300, 300))
 
     fake = _FakeExecutor()
     monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
@@ -74,33 +101,29 @@ def test_reprocess_all_passes_none_override_for_unset_file(tmp_path, monkeypatch
     assert len(fake.calls) == 1
     args = fake.calls[0]
     assert args[_OVERRIDE_ARG] is None
-    assert args[_PRODUCT_ARG] is None
 
 
-def test_startup_migration_is_a_noop_after_auto_rescale_removed(tmp_path, monkeypatch):
-    """Auto-rescale was removed on 2026-06-09 (`detect_scale_factor` is
-    pinned to 1.0), so the boot migration never re-queues anything — not the
-    legacy unitless 1000×-too-big shape it used to catch, nor an
-    override-pinned file."""
+def test_reprocess_all_skips_signed_off_versions(tmp_path, monkeypatch):
+    """Bindings on signed-off versions are frozen — reprocess-all must
+    not dispatch a worker for them (their artifacts must not change)."""
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
-    monkeypatch.setattr("app.main.FILE_STORE", fs)
 
-    # Both are legacy unitless 1000x-too-big — the old migration's target.
-    _ready_file(fs, "needs", insunits=0, bbox=(0, 0, 42_000, 42_000))
-    _ready_file(fs, "pinned", insunits=0, bbox=(0, 0, 42_000, 42_000))
-    fs.set_user_unit_override("pinned", "mm")
+    frozen = _FakeVersion("vs", "lib-signed")
+    frozen.is_signed_off = True
+    _patch_version_lookup(monkeypatch, {
+        "vs": frozen,
+        "vo": _FakeVersion("vo", "lib-open"),
+    })
 
-    called = {"hit": False}
+    _ready_binding(fs, "vs", "ff", insunits=4, bbox=(0, 0, 300, 300))
+    _ready_binding(fs, "vo", "fo", insunits=4, bbox=(0, 0, 300, 300))
 
-    def fake_submit(file_id_filter=None, *, kind="reprocess-all"):
-        called["hit"] = True
-        return "fake-job-id"
+    fake = _FakeExecutor()
+    monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
 
-    monkeypatch.setattr("app.main.jobs.submit_reprocess_all", fake_submit)
+    parent_id = jobs.submit_reprocess_all()
 
-    main_mod._submit_unit_rescale_migration()
-
-    assert called["hit"] is False, (
-        "auto-rescale migration must submit nothing once detection is disabled"
-    )
+    assert len(fake.calls) == 1
+    assert fake.calls[0][_VERSION_ARG] == "vo"
+    assert jobs._jobs[parent_id]["skipped"] >= 1

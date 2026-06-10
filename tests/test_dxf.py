@@ -436,7 +436,6 @@ def test_decorative_dxf_types_are_flagged_and_excluded_from_index(tmp_path):
     test_hatch_emits_no_primitives — so it never gets a decorative-tagged
     primitive in the first place.)"""
     import ezdxf
-    from ezdxf.math import Vec3
 
     doc = ezdxf.new("R2010", setup=True)
     doc.header["$INSUNITS"] = 4  # declare mm so auto-rescale doesn't convert ezdxf-default meters

@@ -107,25 +107,26 @@ def test_match_json_invalidated_when_applied_scale_changes(tmp_path, monkeypatch
 
     # Isolate disk + DB so the test doesn't disturb real state.
     monkeypatch.setattr(storage, "MATCH_DIR", tmp_path / "match")
-    storage.MATCH_DIR.mkdir(parents=True, exist_ok=True)
+    (storage.MATCH_DIR / "v1").mkdir(parents=True, exist_ok=True)
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("X", "x.dxf", 1)
-    fs.update_parsed("X", 1, (0, 0, 100, 100), "#000",
+    fs.register_content("X", "x.dxf", 1)
+    fs.bind("v1", "BD", "X")
+    fs.update_parsed("v1", "X", 1, (0, 0, 100, 100), "#000",
                      insunits=0, applied_scale=1.0)
-    fs.set_match_saved("X", True)
-    mp = storage.match_path("X")
+    fs.set_match_saved("v1", "X", True)
+    mp = storage.match_path("v1", "X")
     mp.write_text(json.dumps({"bga_ball.0": [["h1"], ["h2"]]}))
 
     # Operator overrides to inch → applied_scale flips to 25.4.
-    factor_changed = fs.update_parsed("X", 1, (0, 0, 2540, 2540), "#000",
+    factor_changed = fs.update_parsed("v1", "X", 1, (0, 0, 2540, 2540), "#000",
                                        insunits=0, applied_scale=25.4)
     assert factor_changed is True
-    jobs._invalidate_match_after_rescale("X")
+    jobs._invalidate_match_after_rescale("v1", "X")
 
     assert not mp.exists(), "match JSON should be deleted after rescale"
-    assert fs.get("X").match_saved is False
+    assert fs.get("v1", "X").match_saved is False
 
 
 def test_match_json_left_alone_when_factor_unchanged(tmp_path, monkeypatch):
@@ -134,51 +135,33 @@ def test_match_json_left_alone_when_factor_unchanged(tmp_path, monkeypatch):
     from app.files import FileStore
 
     monkeypatch.setattr(storage, "MATCH_DIR", tmp_path / "match")
-    storage.MATCH_DIR.mkdir(parents=True, exist_ok=True)
+    (storage.MATCH_DIR / "v1").mkdir(parents=True, exist_ok=True)
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("Y", "y.dxf", 1)
-    fs.update_parsed("Y", 1, (0, 0, 100, 100), "#000",
+    fs.register_content("Y", "y.dxf", 1)
+    fs.bind("v1", "BD", "Y")
+    fs.update_parsed("v1", "Y", 1, (0, 0, 100, 100), "#000",
                      insunits=4, applied_scale=1.0)
-    fs.set_match_saved("Y", True)
-    mp = storage.match_path("Y")
+    fs.set_match_saved("v1", "Y", True)
+    mp = storage.match_path("v1", "Y")
     mp.write_text(json.dumps({"bga_ball.0": [["h1"]]}))
 
     # Same factor → caller never triggers invalidation.
-    factor_changed = fs.update_parsed("Y", 1, (0, 0, 100, 100), "#000",
+    factor_changed = fs.update_parsed("v1", "Y", 1, (0, 0, 100, 100), "#000",
                                        insunits=4, applied_scale=1.0)
     assert factor_changed is False
     assert mp.exists(), "match JSON must survive a no-op rescale check"
-    assert fs.get("Y").match_saved is True
+    assert fs.get("v1", "Y").match_saved is True
 
 
-# ---- Startup migration is now a permanent no-op --------------------------
-def test_startup_migration_never_submits_now_that_auto_rescale_is_off(tmp_path, monkeypatch):
-    """With `detect_scale_factor` pinned to 1.0, the lifespan-time unit
-    rescale scanner can never pick a file — it submits no job for any row,
-    including the legacy unitless 1000×-too-big shape it used to catch."""
-    from app.files import FileStore
+# Removed test: test_startup_migration_never_submits_now_that_auto_rescale_is_off
+# — the one-shot startup unit-rescale migration itself was REMOVED
+# (openspec add-product-versioning, REMOVED "One-shot legacy migration on
+# startup": C9 keeps no legacy data, so there is no startup scan to be a
+# no-op). The next test pins its absence.
+
+
+def test_startup_unit_rescale_migration_is_gone():
     from app import main as main_mod
-
-    fs = FileStore(tmp_path / "library.sqlite")
-    monkeypatch.setattr("app.files.FILE_STORE", fs)
-    monkeypatch.setattr("app.main.FILE_STORE", fs)
-
-    # Legacy unitless 1000× too big — previously the migration's target.
-    fs.register("needs", "n.dxf", 1)
-    fs.update_parsed("needs", 1, (0, 0, 42_000, 42_000), "#000",
-                     insunits=0, applied_scale=1.0)
-    # Healthy mm-declared file.
-    fs.register("mm", "m.dxf", 1)
-    fs.update_parsed("mm", 1, (0, 0, 300, 300), "#000",
-                     insunits=4, applied_scale=1.0)
-
-    called = {"hit": False}
-    def fake_submit(file_id_filter=None, *, kind="reprocess-all"):
-        called["hit"] = True
-        return "fake-job-id"
-    monkeypatch.setattr("app.main.jobs.submit_reprocess_all", fake_submit)
-
-    main_mod._submit_unit_rescale_migration()
-    assert called["hit"] is False
+    assert not hasattr(main_mod, "_submit_unit_rescale_migration")

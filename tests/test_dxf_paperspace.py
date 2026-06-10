@@ -9,7 +9,6 @@ back empty.
 from __future__ import annotations
 
 import ezdxf
-import pytest
 
 from app.dxf import enumerate_layouts, flatten_for_render
 

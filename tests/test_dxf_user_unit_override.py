@@ -122,8 +122,9 @@ def test_maybe_clear_redundant_unit_override_clears_when_factors_match(tmp_path,
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("agrees", "a.dxf", 1)
-    fs.set_user_unit_override("agrees", "inch")
+    fs.register_content("agrees", "a.dxf", 1)
+    fs.bind("v1", "BD", "agrees")
+    fs.set_user_unit_override("v1", "agrees", "inch")
     # Mimic the worker result: operator picked "inch" (×25.4) on a
     # declared-inch DXF — detector would have produced 25.4 too.
     result = {
@@ -131,8 +132,8 @@ def test_maybe_clear_redundant_unit_override_clears_when_factors_match(tmp_path,
         "detector_factor": 25.4,
         "applied_scale": 25.4,
     }
-    jobs._maybe_clear_redundant_unit_override("agrees", result)
-    assert fs.get("agrees").user_unit_override is None
+    jobs._maybe_clear_redundant_unit_override("v1", "agrees", result)
+    assert fs.get("v1", "agrees").user_unit_override is None
 
 
 def test_maybe_clear_redundant_unit_override_keeps_when_factors_differ(tmp_path, monkeypatch):
@@ -144,16 +145,17 @@ def test_maybe_clear_redundant_unit_override_keeps_when_factors_differ(tmp_path,
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("disagrees", "d.dxf", 1)
-    fs.set_user_unit_override("disagrees", "mm")
+    fs.register_content("disagrees", "d.dxf", 1)
+    fs.bind("v1", "BD", "disagrees")
+    fs.set_user_unit_override("v1", "disagrees", "mm")
     # Detector would have rescaled to ×0.001; operator forced ×1.0.
     result = {
         "user_unit_override_requested": "mm",
         "detector_factor": 0.001,
         "applied_scale": 1.0,
     }
-    jobs._maybe_clear_redundant_unit_override("disagrees", result)
-    assert fs.get("disagrees").user_unit_override == "mm"
+    jobs._maybe_clear_redundant_unit_override("v1", "disagrees", result)
+    assert fs.get("v1", "disagrees").user_unit_override == "mm"
 
 
 def test_maybe_clear_redundant_unit_override_noop_without_request(tmp_path, monkeypatch):
@@ -165,15 +167,16 @@ def test_maybe_clear_redundant_unit_override_noop_without_request(tmp_path, monk
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("noop", "n.dxf", 1)
-    fs.set_user_unit_override("noop", "inch")
+    fs.register_content("noop", "n.dxf", 1)
+    fs.bind("v1", "BD", "noop")
+    fs.set_user_unit_override("v1", "noop", "inch")
     result = {
         "user_unit_override_requested": None,
         "detector_factor": 1.0,
         "applied_scale": 1.0,
     }
-    jobs._maybe_clear_redundant_unit_override("noop", result)
-    assert fs.get("noop").user_unit_override == "inch"
+    jobs._maybe_clear_redundant_unit_override("v1", "noop", result)
+    assert fs.get("v1", "noop").user_unit_override == "inch"
 
 
 def test_maybe_clear_redundant_unit_override_skips_without_detector_factor(tmp_path, monkeypatch):
@@ -186,15 +189,16 @@ def test_maybe_clear_redundant_unit_override_skips_without_detector_factor(tmp_p
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("noinfo", "x.dxf", 1)
-    fs.set_user_unit_override("noinfo", "inch")
+    fs.register_content("noinfo", "x.dxf", 1)
+    fs.bind("v1", "BD", "noinfo")
+    fs.set_user_unit_override("v1", "noinfo", "inch")
     result = {
         "user_unit_override_requested": "inch",
         "detector_factor": None,
         "applied_scale": 25.4,
     }
-    jobs._maybe_clear_redundant_unit_override("noinfo", result)
-    assert fs.get("noinfo").user_unit_override == "inch"
+    jobs._maybe_clear_redundant_unit_override("v1", "noinfo", result)
+    assert fs.get("v1", "noinfo").user_unit_override == "inch"
 
 
 # ---- Endpoint → store wiring: override persists across get -----------------
@@ -208,22 +212,26 @@ def test_submit_unit_override_preprocess_writes_row_immediately(tmp_path, monkey
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
-    fs.register("ovx", "o.dxf", 1)
+    fs.register_content("ovx", "o.dxf", 1)
+    fs.bind("v1", "BD", "ovx")
     # Stub submit_preprocess so we don't actually spin up a worker.
     captured = {}
-    def fake_submit(file_id, library_id="default", selected_layers=None,
-                    user_unit_override=None, product_id=None, layout_name=None):
+    def fake_submit(version_id, file_id, library_id=None, selected_layers=None,
+                    user_unit_override=None, layout_name=None):
+        captured["version_id"] = version_id
         captured["file_id"] = file_id
         captured["unit"] = user_unit_override
         captured["layout_name"] = layout_name
         return "fake-job-id"
     monkeypatch.setattr(jobs, "submit_preprocess", fake_submit)
+    monkeypatch.setattr(jobs, "_library_of_version", lambda _vid: "libX")
 
-    job_id = jobs.submit_unit_override_preprocess("ovx", "inch")
+    job_id = jobs.submit_unit_override_preprocess("v1", "ovx", "inch")
     assert job_id == "fake-job-id"
     # chosen_layout is NULL for this model-space file, so it threads through
     # as None alongside the override.
-    assert captured == {"file_id": "ovx", "unit": "inch", "layout_name": None}
-    rec = fs.get("ovx")
+    assert captured == {"version_id": "v1", "file_id": "ovx", "unit": "inch",
+                        "layout_name": None}
+    rec = fs.get("v1", "ovx")
     assert rec.user_unit_override == "inch"
     assert rec.status == PREPROCESSING

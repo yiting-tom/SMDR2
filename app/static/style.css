@@ -38,19 +38,17 @@ header .file-name {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-header #library-switcher {
-  background: #1a2840;
-  color: #69f0ae;
-  border: 1px solid #2a3340;
+/* 已畫押 (signed-off) badge — viewer header + dashboard version bar. */
+.signed-badge {
+  background: rgba(255, 184, 77, 0.12);
+  color: #ffb84d;
+  border: 1px solid rgba(255, 184, 77, 0.55);
   border-radius: 9999px;
-  padding: 0.1rem 0.5rem;
-  font: inherit;
+  padding: 0.1rem 0.6rem;
   font-family: ui-monospace, monospace;
-  font-size: 0.78rem;
-  cursor: pointer;
+  font-size: 0.76rem;
+  white-space: nowrap;
 }
-header #library-switcher:hover { border-color: #69f0ae; }
-header #library-switcher:disabled { opacity: 0.5; cursor: not-allowed; }
 
 header #product-context {
   font-family: ui-monospace, monospace;
@@ -769,7 +767,7 @@ body.dashboard main.dashboard-main {
   overflow: auto;
 }
 
-#library-bar {
+#dashboard-toolbar {
   display: flex;
   align-items: center;
   gap: 0.6rem;
@@ -780,111 +778,41 @@ body.dashboard main.dashboard-main {
   margin-bottom: 1rem;
   font-size: 0.88rem;
 }
-#library-bar label { color: #9aa5b1; }
-#library-bar select {
+
+/* ---- Version bar (per product card) ------------------------------------ */
+.version-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+  font-size: 0.84rem;
+}
+.version-bar__label { color: #9aa5b1; }
+.version-bar .spacer { flex: 1; }
+.version-bar .version-select {
   background: #1a1f26;
   color: #e8eef5;
   border: 1px solid #2a3340;
   border-radius: 3px;
-  padding: 0.22rem 0.4rem;
+  padding: 0.2rem 0.4rem;
   font: inherit;
-  min-width: 16ch;
+  font-size: 0.84rem;
+  min-width: 10ch;
 }
-#library-bar #new-library-btn {
+.version-bar .version-select:hover { border-color: #4a6080; }
+.version-bar .version-action-btn {
   background: transparent;
   color: #00ffff;
-  border: 1px solid #00ffff;
+  border: 1px solid #2a3340;
   border-radius: 3px;
   padding: 0.18rem 0.6rem;
   cursor: pointer;
   font: inherit;
+  font-size: 0.8rem;
 }
-#library-bar #new-library-btn:hover { background: rgba(0, 255, 255, 0.1); }
-#library-bar #library-info {
-  color: #5d8aa8;
-  font-family: ui-monospace, monospace;
-  font-size: 0.78rem;
-  margin-left: auto;
-}
-#upload-target-lib {
-  color: #69f0ae;
-  font-family: ui-monospace, monospace;
-  font-size: 0.82rem;
-  display: inline-block;
-  margin-left: 0.6rem;
-}
-#file-list .library-pill {
-  background: #1a2840;
-  color: #c0cad6;
-  padding: 0.05rem 0.5rem;
-  border-radius: 9999px;
-  font-size: 0.74rem;
-  font-family: ui-monospace, monospace;
-}
-#file-list .row-library-select {
-  background: #1a2028;
-  color: #c0cad6;
-  border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.18rem 0.4rem;
-  font: inherit;
-  font-size: 0.78rem;
-  max-width: 18ch;
-}
-#file-list .row-library-select:hover { border-color: #4a6080; }
-#file-list .row-library-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* ---- Customer (library) fold sections --------------------------------- */
-/* Product cards are grouped under a per-library header that folds the cards
-   below it. Default-folded on first load (see dashboard.js / FOLD_KEY). */
-.customer-section {
-  border: 1px solid #2a3340;
-  border-radius: 6px;
-  background: #0b0e12;
-}
-.customer-section__header {
-  display: flex;
-  align-items: baseline;
-  gap: 0.55rem;
-  padding: 0.55rem 0.9rem;
-  cursor: pointer;
-  user-select: none;
-  border-radius: 6px 6px 0 0;
-}
-.customer-section[data-folded="true"] .customer-section__header {
-  border-radius: 6px;
-}
-.customer-section__header:hover { background: #141a22; }
-.customer-section__header:focus-visible {
-  outline: 1px solid #00ffff;
-  outline-offset: -1px;
-}
-.customer-section__chevron {
-  font-family: ui-monospace, monospace;
-  color: #5d8aa8;
-  width: 1ch;
-  display: inline-block;
-}
-.customer-section__name {
-  font-weight: 600;
-  color: #e8eef5;
-}
-.customer-section__count {
-  font-size: 0.78rem;
-  color: #5d8aa8;
-}
-.customer-section__body {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  padding: 0.85rem 0.9rem 1rem;
-  border-top: 1px solid #1c2630;
-}
-.customer-section[data-folded="true"] .customer-section__body {
-  display: none;
+.version-bar .version-action-btn:hover {
+  border-color: #00ffff;
+  background: rgba(0, 255, 255, 0.08);
 }
 
 /* ---- Product cards ----------------------------------------------------- */
@@ -909,15 +837,6 @@ body.dashboard main.dashboard-main {
   margin-bottom: 0.6rem;
 }
 .product-card .product-name { font-weight: 600; font-size: 1rem; }
-.product-card .product-library {
-  background: #1a2840;
-  color: #69f0ae;
-  padding: 0.06rem 0.6rem;
-  border-radius: 9999px;
-  font-family: ui-monospace, monospace;
-  font-size: 0.74rem;
-  border: 1px solid #2a3340;
-}
 .product-card .spacer { flex: 1; }
 .product-card .product-delete {
   background: transparent;
@@ -960,8 +879,8 @@ body.dashboard main.dashboard-main {
   color: #00ffff;
   cursor: pointer;
 }
-/* Empty slot locked via `disabledReason` on `slotCell` — reachable
-   API for future per-slot constraints. Not currently triggered. */
+/* Empty slot locked — either via `disabledReason` on `slotCell` or
+   because the selected version is signed off (uploads frozen). */
 .product-card .slot.empty.disabled,
 .product-card .slot.empty.disabled:hover {
   border-color: #1c2630;
@@ -1909,3 +1828,10 @@ body.dashboard header .spacer { flex: 1; }
 .floating-collapse:hover { color: #e8eef5; }
 .class-panel.collapsed .class-panel-body { display: none; }
 .class-panel.collapsed .floating-collapse { transform: rotate(-90deg); }
+
+/* ---- New-product form validation --------------------------------------- */
+.form-row .required-mark { color: #ff5252; font-style: normal; }
+.form-row input.input-error {
+  border-color: #ff5252;
+  outline: 1px solid rgba(255, 82, 82, 0.5);
+}

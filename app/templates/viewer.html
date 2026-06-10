@@ -5,11 +5,15 @@
   <title>SMDR2 Viewer</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}">
+<body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}"
+      data-version-id="{{ version_id }}" data-version-label="{{ version_label }}"
+      data-product-name="{{ product_name }}"
+      data-signed-off="{{ '1' if signed_off else '' }}">
   <header>
     <a id="back-btn" href="/" title="Back to product dashboard">← Products</a>
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
-    <span id="product-context"></span>
+    <span id="product-context" title="Product / version (read-only — switch versions on the product page)">{{ product_name }} / {{ version_label }}</span>
+    {% if signed_off %}<span id="signed-badge" class="signed-badge" title="此版本已凍結為唯讀">已畫押</span>{% endif %}
     <span id="role-switcher"></span>
     <span id="unit-picker-wrap" title="Unit override — pick to re-run preprocess with the chosen unit">
       Unit:
@@ -23,7 +27,6 @@
       <span id="unit-picker-badge" class="unit-picker-badge" hidden></span>
       <span id="unit-picker-hint" class="unit-picker-hint" hidden></span>
     </span>
-    <select id="library-switcher" title="Library this file uses (set by its product)"></select>
     <button id="dev-params-toggle" type="button" hidden
             title="Adjust matching tunables (dev mode only)">⚙</button>
   </header>
@@ -31,7 +34,7 @@
     <button id="chain-btn" class="tool-btn" type="button" title="When on, single-click selects the whole connected chain">Chain</button>
     <button id="sides-btn" class="tool-btn" type="button" title="Mark the top / bottom / side view regions · left-click to draw all, right-click for options (hotkey: V)">Views</button>
     <span class="toolbar-sep" aria-hidden="true"></span>
-    <button id="library-btn" class="tool-btn" type="button" title="Manage saved templates (delete / move between classes)">📚 Library</button>
+    <button id="library-btn" class="tool-btn" type="button" title="Manage this version's saved templates (delete / move between classes)">📚 範本</button>
     <button id="scan-all-btn" class="tool-btn" type="button" title="Run every saved template and highlight by class (hotkey: A)">🔍 Scan All</button>
     <button id="save-match-btn" class="tool-btn" type="button" title="Generate Match JSON for downstream rule checking">💾 Save Match</button>
     <button id="measure-btn" class="tool-btn" type="button" title="Measure distance between two points · AutoCAD DIST (hotkey: D)">📏 Measure</button>
@@ -150,9 +153,9 @@
 
   <div id="library-modal" class="modal" hidden>
     <div class="modal-bg" data-close></div>
-    <div class="modal-panel" role="dialog" aria-label="Template Library">
+    <div class="modal-panel" role="dialog" aria-label="Templates">
       <header class="modal-header">
-        <h2>Template Library</h2>
+        <h2>範本(Templates)</h2>
         <span id="library-summary"></span>
         <span class="spacer"></span>
         <button type="button" class="modal-close" data-close>×</button>

@@ -156,12 +156,13 @@ def test_on_preprocess_done_persists_recover_notes(monkeypatch, tmp_path):
     from app.files import FILE_STORE, READY
 
     fid = "rn-callback"
-    FILE_STORE.register(fid, "f.dxf", 1, initial_status="preprocessing")
+    FILE_STORE.register_content(fid, "f.dxf", 1)
+    FILE_STORE.bind("v1", "BD", fid, initial_status="preprocessing")
 
     job_id = "test-rn-job"
     with jobs._lock:
         jobs._jobs[job_id] = {
-            "id": job_id, "file_id": fid, "library_id": "default",
+            "id": job_id, "version_id": "v1", "file_id": fid, "library_id": "lib1",
             "kind": "preprocess", "status": "running",
             "submitted_at": time.time(), "started_at": time.time(),
             "completed_at": None, "error": None,
@@ -190,7 +191,7 @@ def test_on_preprocess_done_persists_recover_notes(monkeypatch, tmp_path):
 
     jobs._on_preprocess_done(job_id, fut)
 
-    rec = FILE_STORE.get(fid)
+    rec = FILE_STORE.get("v1", fid)
     assert rec.status == READY
     assert rec.dxf_recover_notes == notes
 
@@ -206,7 +207,8 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
     from app.files import FILE_STORE, READY
 
     fid = "rn-callback-strict"
-    FILE_STORE.register(fid, "f.dxf", 1, initial_status="preprocessing")
+    FILE_STORE.register_content(fid, "f.dxf", 1)
+    FILE_STORE.bind("v1", "BD", fid, initial_status="preprocessing")
     # Pre-populate the field so we can prove the callback actively clears it.
     FILE_STORE.set_dxf_recover_notes(fid, {
         "strict_error": "stale", "n_fixed": 1, "n_unrecoverable": 0,
@@ -216,7 +218,7 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
     job_id = "test-rn-strict-job"
     with jobs._lock:
         jobs._jobs[job_id] = {
-            "id": job_id, "file_id": fid, "library_id": "default",
+            "id": job_id, "version_id": "v1", "file_id": fid, "library_id": "lib1",
             "kind": "preprocess", "status": "running",
             "submitted_at": time.time(), "started_at": time.time(),
             "completed_at": None, "error": None,
@@ -240,6 +242,6 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
 
     jobs._on_preprocess_done(job_id, fut)
 
-    rec = FILE_STORE.get(fid)
+    rec = FILE_STORE.get("v1", fid)
     assert rec.status == READY
     assert rec.dxf_recover_notes is None

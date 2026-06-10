@@ -1,4 +1,4 @@
-"""resolve_views — per-(product, role) view resolution."""
+"""resolve_views — per-(version, role) view resolution."""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ def _rec(
 ) -> FileRecord:
     return FileRecord(
         id=id,
+        version_id="v1",
         name=f"{id}.dxf",
         size=1,
         uploaded_at=0.0,
         status="ready_to_match",
-        product_id="p1",
         dxf_role="SBT",
         dxf_view=dxf_view,
         top_view_rect=top,
@@ -117,25 +117,25 @@ def test_legacy_null_view_treated_as_multi():
     assert out["top"].source == "region"
 
 
-def test_resolve_for_product_integration(tmp_db, monkeypatch):
-    """End-to-end via the FILE_STORE: register a mixed set and confirm
-    resolve_for_product returns the right per-view source."""
+def test_resolve_for_version_integration(tmp_db, monkeypatch):
+    """End-to-end via the FILE_STORE: bind a mixed set into one version
+    and confirm resolve_for_version returns the right per-view source."""
     import app.product_views as pv
     from app.files import FileStore
 
     fs = FileStore(tmp_db)
     monkeypatch.setattr(pv, "FILE_STORE", fs)
 
-    fs.register("multi1", "m.dxf", 1, product_id="prod1",
-                dxf_role="SBT", dxf_view="multi")
-    fs.update_side_regions("multi1", top_view_rect=RECT_A,
-                            bottom_view_rect=None, side_view_rect=None)
-    fs.register("split-side", "s.dxf", 1, product_id="prod1",
-                dxf_role="SBT", dxf_view="side")
+    fs.register_content("multi1", "m.dxf", 1)
+    fs.bind("ver1", "SBT", "multi1", dxf_view="multi")
+    fs.update_side_regions("ver1", "multi1", top_view_rect=RECT_A,
+                           bottom_view_rect=None, side_view_rect=None)
+    fs.register_content("split-side", "s.dxf", 1)
+    fs.bind("ver1", "SBT", "split-side", dxf_view="side")
 
-    out = pv.resolve_for_product("prod1", "SBT")
+    out = pv.resolve_for_version("ver1", "SBT")
     assert set(out.keys()) == {"top", "side"}
     assert out["top"].source == "region" and out["top"].file_id == "multi1"
     assert out["side"].source == "whole_file" and out["side"].file_id == "split-side"
-    # bottom is not covered by either file — and that's OK.
+    # bottom is not covered by either binding — and that's OK.
     assert "bottom" not in out
