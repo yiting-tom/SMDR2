@@ -65,8 +65,9 @@
 - [ ] editor 能不能刪 product / 刪別人上傳的檔？
 
 ### §4 Library / Product 拓樸（決定整個模型，先定）
-- [ ] 維持「**一個共用 library 裝多 product**」，還是改成「**一 product 一 library**」（讓 library 邊界 = product 邊界，library 級風險自然消失）？
-- [ ] library-scoped 共用範本誰能改？只有 admin，還是不開放編輯？
+- [x] **已定案（2026-06-10）：一 product 一 library，library 跟著 product 走。** library 邊界 = product 邊界，library 級寫入風險自然消失；編輯鎖粒度（§7）自動對齊。
+  - ⚠️ **衍生新問題**：現在 library-scoped 共用範本（BGABall 等標準件）是「一個共用 library」才成立的。改成一 product 一 library 後，**共用標準件放哪**？候選：(a) 一個特殊「global library」放標準件，product library 只放 product 範本；(b) 建 product 時從範本庫 clone 一份進去（之後各自獨立）；(c) 不再有共用件，每個 product 自己框選。→ 待定。
+- [ ] library-scoped 共用範本誰能改？只有 admin，還是不開放編輯？（答案取決於上面 (a)/(b)/(c) 的選擇）
 - [ ] 不同 product 之間要**完全隔離**（editor 看不到別人 product），還是「viewer 都能看全部、只是不能編」？editor 的「看」範圍是否也全開？
 
 ### §5 Admin 與啟動

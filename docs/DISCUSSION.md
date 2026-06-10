@@ -35,8 +35,9 @@
 ## §A. Library / Product 拓樸（**最先定，牽動最多**）
 > 細節：[`auth-permissions.md` §4](auth-permissions.md)
 
-- [ ] **A1.** 維持「**一個共用 library 裝多 product**」，還是改「**一 product 一 library**」（讓 library 邊界 = product 邊界，library 級風險自然消失）？
-- [ ] **A2.** library-scoped 共用範本（BGABall 等）誰能改？只有 admin，還是不開放編輯？
+- [x] **A1. 已定案（2026-06-10）：一 product 一 library，library 跟著 product 走。** library 邊界 = product 邊界；library 級寫入風險消失；§D3 編輯鎖粒度自動對齊。
+- [ ] **A1b.（A1 的衍生題，新增）** 共用標準件（BGABall 等）失去「共用 library」的家後放哪？(a) 特殊 global library 放標準件／(b) 建 product 時 clone 一份進 product library（之後各自獨立）／(c) 不再共用、每 product 自己框選。
+- [ ] **A2.** 共用範本誰能改？只有 admin，還是不開放編輯？（取決於 A1b 選 (a)/(b)/(c)）
 - [ ] **A3.** 不同 product 要**完全隔離**（editor 看不到別人 product），還是「viewer 看全部、只是不能編」？
 
 ---
@@ -71,7 +72,7 @@
 
 - [ ] **D1.** 是該 product 的 editor、但**鎖被別人佔住**時怎麼辦？純唯讀等他放，還是給「**請求接手 / 通知 admin**」？
 - [ ] **D2.** **heartbeat 間隔與鎖 TTL** 取多少？（初步候選：heartbeat 30s、TTL 2–5 分鐘，取決於你們會不會編到一半離開很久。）
-- [ ] **D3.**（連動 §A）鎖粒度對齊 **product** 還是 **library**？若走「一 product 一 library」會自動對齊。
+- [x] **D3. 已隨 A1 定案：** 一 product 一 library → 鎖粒度 product = library，自動對齊，無需再議。
 
 ---
 
