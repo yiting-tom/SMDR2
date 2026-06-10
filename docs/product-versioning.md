@@ -54,8 +54,8 @@
 - (c) 其他情形？
 → **這題決定 `version_id` 掛在哪幾張 table。**
 
-### Q2. library-scoped 標準件（共用件）確定版本無關？
-BGABall 等共用範本目前跨 product 共用。版本切換時這些**完全不動**，對嗎？還是某些共用件也可能隨版本變？
+### Q2. ~~library-scoped 標準件（共用件）確定版本無關？~~ **已蒸發（2026-06-10）**
+拓樸定案「一 product 一 library、無任何共用範本、新 product 空白開始」（見 `auth-permissions.md` §4）→ 不再有 library-scoped 層 → **版本快照涵蓋整個 product library，無例外**。本題不存在了。
 
 ### Q3. 版號的格式與輸入規則
 - 自由輸入文字（如 `v1.0`、`A`、`2026-06`）還是固定格式？
