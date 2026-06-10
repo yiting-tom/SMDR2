@@ -216,14 +216,20 @@ Phase 1 寫、Phase 2 成功後刪。若 Phase 2 失敗或跳過（unit override
 
 ---
 
-## 9. 要 infra 確認的兩題（決定走哪條）
+## 9. ~~要 infra 確認的兩題~~ **已確認（2026-06-10）→ Plan A 定案**
 
-1. **有沒有 PostgreSQL？**（不要只有 Oracle。）→ 決定 Plan B vs C。
-2. **內部工具的資料能不能自管**（SQLite-on-PVC / Litestream），還是**一定要進公司 DB**？→ 決定 Plan A vs B/C。
+1. ~~有沒有 PostgreSQL？~~ → **只有 Oracle**。
+2. ~~資料能不能自管？~~ → **可以自管**。
 
-附帶（之後 sizing 用）：備份/還原期待（volume 快照就好 vs 需要 PITR）、最大 DXF 大小與尖峰併發。
+→ **路線定案：Plan A**（blob → MinIO、SQLite 保留 + Litestream→MinIO、單 replica）。Plan C（Oracle port）因可自管而整個避開；Plan B 無 Postgres 可走。
 
-**目前賭注：答案多半會落在 Plan A。**
+Sizing（2026-06-10 確認）：
+- 同時最多 **10 人**、總用戶 **<100** → 單 replica + ProcessPool 足夠（與 multi-user-readiness.md A 層一致）。
+- 單一 DXF 最大 **150MB**、每年 **<500 個** → blob 最壞 ~75GB/年，MinIO 輕鬆。
+- ⚠️ **150MB 單檔是新警報**（現有 `data/` 總量才 ~62MB）：
+  - 上傳限制要上修（`SMDR2_MAX_UPLOAD_MB` ≥ 200，連動 launch-readiness 的 SEC-001）。
+  - **驗證 parser / ProcessPool worker 對 150MB DXF 的記憶體與耗時行為**（parsed JSON 可能膨脹數倍；worker 預設 2 個、每個各吃一份記憶體）。
+  - §7.2 的「parent 代理下載到 temp」模式在 150MB 仍可行（內網頻寬），但 worker 數 × 150MB 的 scratch 空間要算進 pod ephemeral disk。
 
 ---
 

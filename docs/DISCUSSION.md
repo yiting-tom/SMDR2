@@ -103,9 +103,10 @@
 ## §G. Production 儲存 / DB（**問 infra，可平行**）
 > 細節：[`production-storage.md` §9](production-storage.md)
 
-- [ ] **G1.** 公司有沒有 **PostgreSQL**（不要只有 Oracle）？→ 決定 Plan B vs C。
-- [ ] **G2.** 內部工具資料能否**自管**（SQLite-on-PVC / Litestream），還是**一定要進公司 DB**？→ 決定 Plan A vs B/C。
-- [ ] **G3.**（sizing 用）備份/還原期待（volume 快照 vs 需要 PITR）、最大 DXF 大小、尖峰併發人數？
+- [x] **G1. 已確認（2026-06-10）：** 公司 DB 是 **Oracle**（無 Postgres）。
+- [x] **G2. 已確認（2026-06-10）：** 內部工具資料**可以自管**。
+- [x] **G3. 已確認（2026-06-10）：** 同時最多 **10 人**、總用戶 **<100**、單一 DXF 最大 **150MB**、每年 **<500 個** DXF。
+- [x] **→ 路線定案：Plan A**（blob → MinIO、SQLite 保留 + Litestream→MinIO 備份、單 replica）。Oracle port（Plan C）因 G2 可自管而整個避開。⚠️ G3 的 150MB 單檔需要：上修上傳限制（`SMDR2_MAX_UPLOAD_MB` ≥ 200）＋ 驗證 parser/worker 對 150MB DXF 的記憶體行為（現有資料最大才 ~34MB 總量級）。儲存量級：500/年 × 最壞 150MB ≈ 75GB/年上限，MinIO 輕鬆；併發 10 人單 replica + ProcessPool 足夠。
 
 ---
 
