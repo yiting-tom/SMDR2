@@ -16,7 +16,6 @@ Routes:
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -37,7 +36,6 @@ from starlette.requests import Request
 
 from app import jobs
 from app.files import (
-    AWAITING_LAYERS,
     AWAITING_LAYOUT,
     DISCOVERING_LAYERS,
     FILE_STORE,
@@ -63,7 +61,7 @@ from app.matching import (
     find_matches,
     find_matches_from_pointsets,
 )
-from app.products import PRODUCT_STORE, VALID_ROLES, Product
+from app.products import PRODUCT_STORE, VALID_ROLES
 from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
 from app.storage import (

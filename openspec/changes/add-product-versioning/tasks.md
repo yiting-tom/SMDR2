@@ -18,8 +18,8 @@
 
 ## 3. 儲存路徑與 jobs 版本化
 
-- [ ] 3.1 `storage.py` path helper 全面改 `(version_id, file_id)` 簽名:parsed/prematch/match/layer_preview;`rule_check_path(version_id)`
-- [ ] 3.2 `jobs.py`:所有 worker payload 帶 `version_id`;討論期 invariant 不變(worker 重讀 store、只碰本地路徑)
+- [x] 3.1 `storage.py` path helper 全面改 `(version_id, file_id)` 簽名:parsed/prematch/match/layer_preview;`rule_check_path(version_id)`
+- [x] 3.2 `jobs.py`:所有 worker payload 帶 `version_id`;討論期 invariant 不變(worker 重讀 store、只碰本地路徑)
 - [ ] 3.3 `_cached_parsed` lru key 改 `(version_id, file_id, mtime_ns)`
 - [ ] 3.4 移除 startup 一次性 legacy auto-rescale 掃描(REMOVED 規格);`/api/dev/reprocess-all` 保留並改為逐 version 遍歷
 

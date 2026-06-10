@@ -36,54 +36,60 @@ for d in (UPLOADS_DIR, PARSED_DIR, PREMATCH_DIR, MATCH_DIR, RULE_CHECK_DIR, LAYE
     d.mkdir(parents=True, exist_ok=True)
 
 
+# Derived artifacts are keyed by (version_id, file_id): two versions can
+# share the same DXF bytes (uploads/ is content-addressed, version-free)
+# while parsing/matching them differently — re-running version B must
+# never overwrite version A's results (old versions stay reproducible).
+
+
 def upload_path(file_id: str) -> Path:
     return UPLOADS_DIR / f"{file_id}.dxf"
 
 
-def parsed_path(file_id: str) -> Path:
-    return PARSED_DIR / f"{file_id}.json"
+def parsed_path(version_id: str, file_id: str) -> Path:
+    return PARSED_DIR / version_id / f"{file_id}.json"
 
 
-def prematch_path(file_id: str) -> Path:
-    return PREMATCH_DIR / f"{file_id}.json"
+def prematch_path(version_id: str, file_id: str) -> Path:
+    return PREMATCH_DIR / version_id / f"{file_id}.json"
 
 
-def match_path(file_id: str) -> Path:
-    return MATCH_DIR / f"{file_id}.json"
+def match_path(version_id: str, file_id: str) -> Path:
+    return MATCH_DIR / version_id / f"{file_id}.json"
 
 
-def rule_check_path(file_id: str) -> Path:
-    return RULE_CHECK_DIR / f"{file_id}.json"
+def rule_check_path(version_id: str) -> Path:
+    return RULE_CHECK_DIR / f"{version_id}.json"
 
 
-def layer_preview_dir(file_id: str) -> Path:
-    return LAYER_PREVIEW_DIR / file_id
+def layer_preview_dir(version_id: str, file_id: str) -> Path:
+    return LAYER_PREVIEW_DIR / version_id / file_id
 
 
-def layer_manifest_path(file_id: str) -> Path:
-    return layer_preview_dir(file_id) / "layers.json"
+def layer_manifest_path(version_id: str, file_id: str) -> Path:
+    return layer_preview_dir(version_id, file_id) / "layers.json"
 
 
-def layer_preview_svg_path(file_id: str, safe_name: str) -> Path:
-    return layer_preview_dir(file_id) / f"{safe_name}.svg"
+def layer_preview_svg_path(version_id: str, file_id: str, safe_name: str) -> Path:
+    return layer_preview_dir(version_id, file_id) / f"{safe_name}.svg"
 
 
-def layer_preview_primitives_path(file_id: str) -> Path:
+def layer_preview_primitives_path(version_id: str, file_id: str) -> Path:
     """Transient — written by Phase 1, deleted by Phase 2 on success."""
-    return layer_preview_dir(file_id) / "primitives.json"
+    return layer_preview_dir(version_id, file_id) / "primitives.json"
 
 
 # ---- Layout (AutoCAD-tab) picker assets ----------------------------------
 # Lives in a subdir of the layer-preview dir so a single cleanup of
-# layer_preview/{file_id}/ removes both. Subdir keeps layout SVGs from
-# colliding with layer SVGs (a layout could share a layer's name).
-def layout_preview_dir(file_id: str) -> Path:
-    return layer_preview_dir(file_id) / "layouts"
+# layer_preview/{version_id}/{file_id}/ removes both. Subdir keeps layout
+# SVGs from colliding with layer SVGs (a layout could share a layer's name).
+def layout_preview_dir(version_id: str, file_id: str) -> Path:
+    return layer_preview_dir(version_id, file_id) / "layouts"
 
 
-def layout_manifest_path(file_id: str) -> Path:
-    return layout_preview_dir(file_id) / "layouts.json"
+def layout_manifest_path(version_id: str, file_id: str) -> Path:
+    return layout_preview_dir(version_id, file_id) / "layouts.json"
 
 
-def layout_preview_svg_path(file_id: str, safe_name: str) -> Path:
-    return layout_preview_dir(file_id) / f"{safe_name}.svg"
+def layout_preview_svg_path(version_id: str, file_id: str, safe_name: str) -> Path:
+    return layout_preview_dir(version_id, file_id) / f"{safe_name}.svg"

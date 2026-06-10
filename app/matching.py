@@ -26,7 +26,6 @@ from typing import Iterable
 import numpy as np
 from scipy.spatial import cKDTree
 
-from app.library import Template
 
 
 logger = logging.getLogger(__name__)

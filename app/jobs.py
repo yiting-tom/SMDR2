@@ -5,13 +5,17 @@ Two job kinds, both running on the same worker pool:
 - **discover**: cheap first pass — parse DXF, enumerate layers, render a
   per-layer SVG preview, drop the full primitive set into a transient file
   so Phase 2 can skip re-parsing. Outputs:
-      data/layer_preview/{file_id}/layers.json
-      data/layer_preview/{file_id}/<safe_name>.svg
-      data/layer_preview/{file_id}/primitives.json   (transient)
+      data/layer_preview/{version_id}/{file_id}/layers.json
+      data/layer_preview/{version_id}/{file_id}/<safe_name>.svg
+      data/layer_preview/{version_id}/{file_id}/primitives.json   (transient)
 - **preprocess**: existing heavy pipeline, now filtered to the user's
   chosen layer subset. Outputs (as before):
-      data/parsed/{file_id}.json
-      data/prematch/{file_id}.json
+      data/parsed/{version_id}/{file_id}.json
+      data/prematch/{version_id}/{file_id}.json
+
+Every job operates on a (version_id, file_id) binding — the same DXF
+bytes bound into two versions parse/match independently, and artifacts
+key on the pair so one version's re-run never clobbers another's.
 
 WORKER STORE-ACCESS INVARIANT
 -----------------------------
@@ -41,11 +45,8 @@ from typing import Any
 
 from app.storage import (
     DATA_DIR,
-    layer_manifest_path,
     layer_preview_dir,
     layer_preview_primitives_path,
-    layer_preview_svg_path,
-    layout_preview_dir,
     match_path,
     parsed_path,
     prematch_path,
@@ -79,6 +80,7 @@ def shutdown() -> None:
 
 # ---- Pre-process worker (must be picklable for ProcessPool) --------------
 def _preprocess_worker(
+    version_id: str,
     file_id: str,
     src: str,
     parsed_dst: str,
@@ -88,7 +90,6 @@ def _preprocess_worker(
     transient_primitives: str | None = None,
     dev_overrides_snapshot: dict[str, Any] | None = None,
     user_unit_override: str | None = None,
-    product_id: str | None = None,
     layout_name: str | None = None,
 ) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly.
@@ -200,9 +201,7 @@ def _preprocess_worker(
     from app.library import CLASS_JSON_KEY
 
     store = Store(DB_PATH)
-    classes, configs_by_class, templates_by_class = store.load_library(
-        library_id, product_id=product_id
-    )
+    classes, configs_by_class, templates_by_class = store.load_library(library_id)
     out: dict[str, list[list[str]]] = {}
     # Iterate the `classes` list (deterministic order) and look up
     # templates via `.get(cls, [])` — same pattern `_save_match_worker`
@@ -280,6 +279,7 @@ def _preprocess_worker(
         detector_factor = detect_scale_factor(insunits, pre_diag)
 
     return {
+        "version_id": version_id,
         "file_id": file_id,
         "primitive_count": len(primitives),
         "bbox": bbox,
@@ -307,29 +307,26 @@ def _current_dev_overrides() -> dict[str, Any]:
 
 
 def submit_preprocess(
+    version_id: str,
     file_id: str,
-    library_id: str = "default",
+    library_id: str,
     selected_layers: list[str] | None = None,
     user_unit_override: str | None = None,
-    product_id: str | None = None,
     layout_name: str | None = None,
 ) -> str:
-    """Submit a preprocess job. When `user_unit_override` is None,
-    the worker reads the file row's persisted override (set in a
-    prior viewer-picker action). Callers that came in via the
-    `/unit-override` endpoint pass the new unit explicitly so the
-    job picks it up even before the row write commits.
+    """Submit a preprocess job for one (version, file) binding. When
+    `user_unit_override` is None, the worker reads the binding's
+    persisted override (set in a prior viewer-picker action). Callers
+    that came in via the `/unit-override` endpoint pass the new unit
+    explicitly so the job picks it up even before the row write commits.
 
     `layout_name` (which AutoCAD tab to render) is resolved the same
-    way: None falls back to the row's persisted `chosen_layout`, so a
-    file that was bound to a paper-space layout keeps rendering that
-    layout across every re-preprocess (library swap, unit override,
-    reprocess-all)."""
+    way: None falls back to the binding's persisted `chosen_layout`."""
     # Worker runs in a separate process and can't trivially read the
     # row, so resolve the active override + chosen layout here.
     if user_unit_override is None or layout_name is None:
         from app.files import FILE_STORE
-        rec = FILE_STORE.get(file_id)
+        rec = FILE_STORE.get(version_id, file_id)
         if rec is not None:
             if user_unit_override is None:
                 user_unit_override = rec.user_unit_override
@@ -339,6 +336,7 @@ def submit_preprocess(
     with _lock:
         _jobs[job_id] = {
             "id": job_id,
+            "version_id": version_id,
             "file_id": file_id,
             "library_id": library_id,
             "kind": "preprocess",
@@ -350,19 +348,19 @@ def submit_preprocess(
             "error": None,
             "user_unit_override_requested": user_unit_override,
         }
-    transient = layer_preview_primitives_path(file_id)
+    transient = layer_preview_primitives_path(version_id, file_id)
     fut = _get_executor().submit(
         _preprocess_worker,
+        version_id,
         file_id,
         str(upload_path(file_id)),
-        str(parsed_path(file_id)),
-        str(prematch_path(file_id)),
+        str(parsed_path(version_id, file_id)),
+        str(prematch_path(version_id, file_id)),
         library_id,
         list(selected_layers) if selected_layers is not None else None,
         str(transient),
         _current_dev_overrides() or None,
         user_unit_override,
-        product_id,
         layout_name,
     )
     fut.add_done_callback(lambda f: _on_preprocess_done(job_id, f))
@@ -372,43 +370,53 @@ def submit_preprocess(
     return job_id
 
 
-def find_inflight_preprocess_job(file_id: str) -> str | None:
+def find_inflight_preprocess_job(version_id: str, file_id: str) -> str | None:
     """Return the id of any queued / running preprocess job for the
-    given file, or None. Used by the unit-override endpoint to return
+    given binding, or None. Used by the unit-override endpoint to return
     `409 Conflict` instead of double-enqueueing."""
     with _lock:
         for job in _jobs.values():
             if (
                 job.get("kind") == "preprocess"
                 and job.get("file_id") == file_id
+                and job.get("version_id") == version_id
                 and job.get("status") in ("queued", "running")
             ):
                 return job["id"]
     return None
 
 
-def submit_unit_override_preprocess(file_id: str, unit: str) -> str:
+def submit_unit_override_preprocess(version_id: str, file_id: str, unit: str) -> str:
     """Operator-driven recompute triggered by the viewer's unit picker.
-    Writes the override to the file row, flips status to PREPROCESSING,
+    Writes the override to the binding, flips status to PREPROCESSING,
     and enqueues the standard preprocess pipeline carrying the new
     unit so the worker uses it directly. The done-callback may clear
     the override back to NULL if it agrees with the detector — see
     `_on_preprocess_done`."""
     from app.files import FILE_STORE, PREPROCESSING
 
-    rec = FILE_STORE.get(file_id)
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise KeyError(file_id)
-    FILE_STORE.set_user_unit_override(file_id, unit)
-    FILE_STORE.update_status(file_id, PREPROCESSING)
+        raise KeyError((version_id, file_id))
+    FILE_STORE.set_user_unit_override(version_id, file_id, unit)
+    FILE_STORE.update_status(version_id, file_id, PREPROCESSING)
     return submit_preprocess(
+        version_id,
         file_id,
-        library_id=rec.library_id,
+        library_id=_library_of_version(version_id),
         selected_layers=rec.selected_layers,
         user_unit_override=unit,
-        product_id=rec.product_id,
         layout_name=rec.chosen_layout,
     )
+
+
+def _library_of_version(version_id: str) -> str:
+    """Resolve a version's library id (fresh read, no cache)."""
+    from app.versions import VERSION_STORE
+    v = VERSION_STORE.get(version_id)
+    if v is None:
+        raise KeyError(f"version {version_id!r} not found")
+    return v.library_id
 
 
 # Backwards-compat alias — older code may still call submit_parse.
@@ -421,6 +429,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
         job = _jobs.get(job_id)
     if job is None:
         return
+    version_id = job["version_id"]
     file_id = job["file_id"]
     try:
         result = fut.result()
@@ -430,10 +439,10 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
             job["status"] = "error"
             job["error"] = str(e)
             job["completed_at"] = time.time()
-        FILE_STORE.update_status(file_id, "error", error=f"{e}\n{tb}")
+        FILE_STORE.update_status(version_id, file_id, "error", error=f"{e}\n{tb}")
         logger.warning(
-            "preprocess_failed job_id=%s file_id=%s %s: %s",
-            job_id, file_id, type(e).__name__, e,
+            "preprocess_failed job_id=%s version_id=%s file_id=%s %s: %s",
+            job_id, version_id, file_id, type(e).__name__, e,
         )
         return
     # Post-result work (FILE_STORE mutations) runs inside the guard so an
@@ -441,6 +450,7 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
     # silently swallowed after a premature `done`.
     try:
         factor_changed = FILE_STORE.update_parsed(
+            version_id,
             file_id,
             primitive_count=result["primitive_count"],
             bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
@@ -449,10 +459,10 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
             applied_scale=float(result.get("applied_scale", 1.0)),
         )
         FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
-        _persist_source_layout(file_id, result)
+        _persist_source_layout(version_id, file_id, result)
         if factor_changed:
-            _invalidate_match_after_rescale(file_id)
-        _maybe_clear_redundant_unit_override(file_id, result)
+            _invalidate_match_after_rescale(version_id, file_id)
+        _maybe_clear_redundant_unit_override(version_id, file_id, result)
     except Exception as e:
         tb = traceback.format_exc()
         with _lock:
@@ -460,8 +470,8 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
             job["error"] = f"{e}\n{tb}"
             job["completed_at"] = time.time()
         logger.error(
-            "preprocess_callback_failed job_id=%s file_id=%s %s: %s",
-            job_id, file_id, type(e).__name__, e, exc_info=True,
+            "preprocess_callback_failed job_id=%s version_id=%s file_id=%s %s: %s",
+            job_id, version_id, file_id, type(e).__name__, e, exc_info=True,
         )
         return
     with _lock:
@@ -469,43 +479,44 @@ def _on_preprocess_done(job_id: str, fut: Future) -> None:
         job["completed_at"] = time.time()
         job["result"] = result
     logger.info(
-        "preprocess_done job_id=%s file_id=%s primitive_count=%s",
-        job_id, file_id, result.get("primitive_count"),
+        "preprocess_done job_id=%s version_id=%s file_id=%s primitive_count=%s",
+        job_id, version_id, file_id, result.get("primitive_count"),
     )
 
 
-def _invalidate_match_after_rescale(file_id: str) -> None:
-    """Drop the saved per-file Match JSON when `applied_scale` changes.
+def _invalidate_match_after_rescale(version_id: str, file_id: str) -> None:
+    """Drop the binding's saved Match JSON when `applied_scale` changes.
     Saved point sets reference the prior coordinate system; rerunning is
     cheaper and safer than scaling the JSON in place. See the
     `dxf-pipeline` spec / `auto-normalize-unit-suspect-dxf` change."""
     from app.files import FILE_STORE
     from app.storage import match_path
 
-    mp = match_path(file_id)
+    mp = match_path(version_id, file_id)
     try:
         mp.unlink()
     except FileNotFoundError:
         pass
-    FILE_STORE.set_match_saved(file_id, False)
+    FILE_STORE.set_match_saved(version_id, file_id, False)
 
 
-def _persist_source_layout(file_id: str, result: dict[str, Any]) -> None:
-    """Auto-stamp the file's `chosen_layout` when preprocess rendered from a
-    paper-space layout (modelspace was empty, so flatten fell back to a
-    layout tab). This pins the tab for every future re-preprocess (library
-    swap, unit override, reprocess-all) and feeds the dashboard's
-    "tab: <name>" badge. Modelspace sources leave `chosen_layout` untouched
-    so NULL stays the clean default for normal files."""
+def _persist_source_layout(version_id: str, file_id: str, result: dict[str, Any]) -> None:
+    """Auto-stamp the binding's `chosen_layout` when preprocess rendered
+    from a paper-space layout (modelspace was empty, so flatten fell back
+    to a layout tab). This pins the tab for every future re-preprocess and
+    feeds the dashboard's "tab: <name>" badge. Modelspace sources leave
+    `chosen_layout` untouched so NULL stays the clean default."""
     from app.files import FILE_STORE
     if not result.get("source_is_paperspace"):
         return
     source_layout = result.get("source_layout")
     if source_layout:
-        FILE_STORE.set_chosen_layout(file_id, source_layout)
+        FILE_STORE.set_chosen_layout(version_id, file_id, source_layout)
 
 
-def _maybe_clear_redundant_unit_override(file_id: str, result: dict[str, Any]) -> None:
+def _maybe_clear_redundant_unit_override(
+    version_id: str, file_id: str, result: dict[str, Any],
+) -> None:
     """If the operator's override matches what the detector would have
     chosen anyway, persist `user_unit_override = NULL` so future
     detector improvements continue to apply automatically.
@@ -524,7 +535,7 @@ def _maybe_clear_redundant_unit_override(file_id: str, result: dict[str, Any]) -
     if detector_factor is None:
         return
     if abs(float(detector_factor) - applied_scale) < 1e-12:
-        FILE_STORE.set_user_unit_override(file_id, None)
+        FILE_STORE.set_user_unit_override(version_id, file_id, None)
 
 
 # ---- Discover-layers worker (Phase 1) ------------------------------------
@@ -688,24 +699,27 @@ def _discover_layers_worker(
     }
 
 
-def submit_discover_layers(file_id: str, layout_name: str | None = None) -> str:
-    """Kick off Phase 1 in the worker pool. The file moves to
+def submit_discover_layers(
+    version_id: str, file_id: str, layout_name: str | None = None,
+) -> str:
+    """Kick off Phase 1 in the worker pool. The binding moves to
     `awaiting_layers` once the manifest is ready — or to `awaiting_layout`
     when the worker detects geometry spread across multiple paper-space
     layouts and needs the operator to pick a tab first.
 
-    `layout_name` is resolved from the file row's persisted `chosen_layout`
+    `layout_name` is resolved from the binding's persisted `chosen_layout`
     when None, so a re-run after a layout pick (or for a tab-bound file)
     renders the right tab and skips the picker gate."""
     if layout_name is None:
         from app.files import FILE_STORE
-        rec = FILE_STORE.get(file_id)
+        rec = FILE_STORE.get(version_id, file_id)
         if rec is not None:
             layout_name = rec.chosen_layout
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
             "id": job_id,
+            "version_id": version_id,
             "file_id": file_id,
             "kind": "discover",
             "phase": "discover",
@@ -719,7 +733,7 @@ def submit_discover_layers(file_id: str, layout_name: str | None = None) -> str:
         _discover_layers_worker,
         file_id,
         str(upload_path(file_id)),
-        str(layer_preview_dir(file_id)),
+        str(layer_preview_dir(version_id, file_id)),
         layout_name,
     )
     fut.add_done_callback(lambda f: _on_discover_done(job_id, f))
@@ -735,6 +749,7 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
         job = _jobs.get(job_id)
     if job is None:
         return
+    version_id = job["version_id"]
     file_id = job["file_id"]
     try:
         result = fut.result()
@@ -744,7 +759,7 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
             job["status"] = "error"
             job["error"] = str(e)
             job["completed_at"] = time.time()
-        FILE_STORE.update_status(file_id, ERROR, error=f"{e}\n{tb}")
+        FILE_STORE.update_status(version_id, file_id, ERROR, error=f"{e}\n{tb}")
         return
     with _lock:
         job["status"] = "done"
@@ -753,18 +768,24 @@ def _on_discover_done(job_id: str, fut: Future) -> None:
     # Geometry spread across multiple paper-space layouts → park for a tab
     # pick; otherwise proceed to the normal layer-selection gate.
     if result.get("needs_layout_pick"):
-        FILE_STORE.update_status(file_id, AWAITING_LAYOUT)
+        FILE_STORE.update_status(version_id, file_id, AWAITING_LAYOUT)
     else:
-        FILE_STORE.update_status(file_id, AWAITING_LAYERS)
+        FILE_STORE.update_status(version_id, file_id, AWAITING_LAYERS)
 
 
 # ---- Rule-check worker ---------------------------------------------------
 def _rule_check_worker(
     product_id: str,
+    version_id: str,
     file_ids: list[str],
     dst: str,
 ) -> dict[str, Any]:
-    """Run product-scoped DRC in a worker process.
+    """Run a version's DRC in a worker process.
+
+    The rule contract stays keyed by product (`check_rules(product_id,
+    bundle_dir)` — rules are product-level, version-independent) but the
+    bundle is built from the version's bindings and the result persists
+    to `rule_check/{version_id}.json`.
 
     Materialises the DRC handoff bundle to a temp directory (same
     layout `app/drc_bundle.py:build_bundle` ships inside the zip),
@@ -784,14 +805,16 @@ def _rule_check_worker(
     files = []
     roles_seen: set[str] = set()
     for fid in file_ids:
-        rec = FILE_STORE.get(fid)
+        rec = FILE_STORE.get(version_id, fid)
         if rec is None:
-            raise RuntimeError(f"file {fid!r} not found in worker")
+            raise RuntimeError(
+                f"binding ({version_id!r}, {fid!r}) not found in worker"
+            )
         files.append(rec)
         if rec.dxf_role:
             roles_seen.add(rec.dxf_role)
 
-    with materialise_bundle(product, files) as bundle_dir:
+    with materialise_bundle(product, version_id, files) as bundle_dir:
         result = check_rules(product_id, bundle_dir)
 
     dst_path = Path(dst)
@@ -806,6 +829,7 @@ def _rule_check_worker(
         saved_to = str(dst_path)
     return {
         "product_id": product_id,
+        "version_id": version_id,
         "saved_to": saved_to,
         "rule_count": len(result),
         "pass_count": n_pass,
@@ -816,21 +840,23 @@ def _rule_check_worker(
 
 def submit_rule_check(
     product_id: str,
+    version_id: str,
     file_ids: list[str],
 ) -> str:
-    """Submit a product-scoped rule check to the worker pool. Returns
+    """Submit a version's rule check to the worker pool. Returns
     the job_id immediately; the request handler should return 202 +
     {job_id} so the front-end can poll `GET /api/jobs/{job_id}`.
 
-    The worker receives only the product id and the list of
-    role-attached file ids; it re-opens the per-process `PRODUCT_STORE`
-    / `FILE_STORE` to fetch records and materialise the bundle from
-    on-disk DXF + Match JSON files."""
+    The worker receives the product id (rule contract), the version id
+    (binding + artifact scope), and the list of role-bound file ids; it
+    re-opens the per-process stores to fetch records and materialise the
+    bundle from on-disk DXF + Match JSON files."""
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
             "id": job_id,
             "product_id": product_id,
+            "version_id": version_id,
             "kind": "rule_check",
             "status": "queued",
             "submitted_at": time.time(),
@@ -841,8 +867,9 @@ def submit_rule_check(
     fut = _get_executor().submit(
         _rule_check_worker,
         product_id,
+        version_id,
         list(file_ids),
-        str(rule_check_path(product_id)),
+        str(rule_check_path(version_id)),
     )
     fut.add_done_callback(lambda f: _on_rule_check_done(job_id, f))
     with _lock:
@@ -881,7 +908,7 @@ def _on_rule_check_done(job_id: str, fut: Future) -> None:
 
 
 # ---- Save Match worker --------------------------------------------------
-def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
+def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any]:
     # Imports inside so spawned workers re-import cleanly. This worker
     # is a verbatim port of the loop that previously lived inside
     # `app/main.py:save_match_json` — same `out` shape, same per-class
@@ -916,18 +943,25 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     )
     from app.storage import DB_PATH
 
-    rec = FILE_STORE.get(file_id)
+    from app.versions import VersionStore
+
+    rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
-        raise RuntimeError(f"file {file_id!r} not found in worker")
-    store = Store(DB_PATH)
-    if store.get_library(rec.library_id) is None:
         raise RuntimeError(
-            f"library {rec.library_id!r} not registered in worker"
+            f"binding ({version_id!r}, {file_id!r}) not found in worker"
+        )
+    version = VersionStore(DB_PATH).get(version_id)
+    if version is None:
+        raise RuntimeError(f"version {version_id!r} not found in worker")
+    store = Store(DB_PATH)
+    if store.get_library(version.library_id) is None:
+        raise RuntimeError(
+            f"library {version.library_id!r} not registered in worker"
         )
     classes, configs_by_class, templates_by_class = store.load_library(
-        rec.library_id, product_id=rec.product_id
+        version.library_id
     )
-    pp = parsed_path(file_id)
+    pp = parsed_path(version_id, file_id)
     if not pp.exists():
         raise RuntimeError(f"parsed file missing for {file_id!r}: {pp}")
     with open(pp) as f:
@@ -1027,7 +1061,7 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     # stays, i.e. no worse than before this change.
     try:
         pm_by_class = {k: sorted(v) for k, v in prematch_sets.items()}
-        pm_path = Path(prematch_path(file_id))
+        pm_path = Path(prematch_path(version_id, file_id))
         pm_path.parent.mkdir(parents=True, exist_ok=True)
         with open(pm_path, "w") as f:
             json.dump(
@@ -1048,8 +1082,9 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     except ValueError:
         saved_to = str(dst_path)
     return {
+        "version_id": version_id,
         "file_id": file_id,
-        "library_id": rec.library_id,
+        "library_id": version.library_id,
         "template_keys": list(out.keys()),
         "total_matches": total_matches,
         "side_counts": side_counts,
@@ -1059,18 +1094,19 @@ def _save_match_worker(file_id: str, dst: str) -> dict[str, Any]:
     }
 
 
-def submit_save_match(file_id: str) -> str:
-    """Submit a per-file Match JSON build to the worker pool. Returns
-    the job_id immediately; the request handler should return 202 +
-    {job_id} so the front-end can poll `GET /api/jobs/{job_id}`.
+def submit_save_match(version_id: str, file_id: str) -> str:
+    """Submit a Match JSON build for one binding to the worker pool.
+    Returns the job_id immediately; the request handler should return
+    202 + {job_id} so the front-end can poll `GET /api/jobs/{job_id}`.
 
-    The worker is portable across processes — it re-opens `FILE_STORE`,
-    re-loads `LIBRARIES`, and reads `parsed/{file_id}.json` from disk.
-    `file.match_saved` is flipped only in `_on_save_match_done`."""
+    The worker is portable across processes — it re-opens the stores
+    fresh and reads `parsed/{version_id}/{file_id}.json` from disk.
+    `match_saved` is flipped only in `_on_save_match_done`."""
     job_id = str(uuid.uuid4())
     with _lock:
         _jobs[job_id] = {
             "id": job_id,
+            "version_id": version_id,
             "file_id": file_id,
             "kind": "save_match",
             "status": "queued",
@@ -1081,8 +1117,9 @@ def submit_save_match(file_id: str) -> str:
         }
     fut = _get_executor().submit(
         _save_match_worker,
+        version_id,
         file_id,
-        str(match_path(file_id)),
+        str(match_path(version_id, file_id)),
     )
     fut.add_done_callback(lambda f: _on_save_match_done(job_id, f))
     with _lock:
@@ -1097,6 +1134,7 @@ def _on_save_match_done(job_id: str, fut: Future) -> None:
         job = _jobs.get(job_id)
     if job is None:
         return
+    version_id = job["version_id"]
     file_id = job["file_id"]
     try:
         result = fut.result()
@@ -1117,7 +1155,7 @@ def _on_save_match_done(job_id: str, fut: Future) -> None:
     # so a mutation failure flips the job to `error` rather than being
     # swallowed after a premature `done`.
     try:
-        FILE_STORE.set_match_saved(file_id, True)
+        FILE_STORE.set_match_saved(version_id, file_id, True)
     except Exception as e:
         tb = traceback.format_exc()
         with _lock:
@@ -1151,29 +1189,38 @@ _REPROCESS_SKIP_STATUSES = frozenset({
 })
 
 
-def submit_reprocess_all(
-    file_id_filter: set[str] | None = None,
-    *,
-    kind: str = "reprocess-all",
-) -> str:
-    """Re-preprocess every eligible file in storage with current overrides.
+def submit_reprocess_all(*, kind: str = "reprocess-all") -> str:
+    """Re-preprocess every eligible binding in storage with current
+    overrides, iterating versions (each binding parses against its own
+    version's library and writes its own version-scoped artifacts).
 
     Returns one parent job_id; `_jobs[job_id]` exposes
-    `total`, `done`, `skipped`, `errors`. Eligible = a file that has
+    `total`, `done`, `skipped`, `errors`. Eligible = a binding that has
     completed Phase 1 layer selection (status is past
-    `awaiting_layers`). Errored or still-discovering files are counted
-    in `skipped` and don't get a worker dispatched.
-
-    `file_id_filter` restricts the run to a subset (used by the
-    startup auto-rescale migration); `None` runs the full set.
+    `awaiting_layers`). Errored or still-discovering bindings are counted
+    in `skipped` and don't get a worker dispatched. Bindings on
+    signed-off versions are skipped too (frozen results must not change).
     """
     from app.files import FILE_STORE
+    from app.versions import VERSION_STORE
     parent_id = str(uuid.uuid4())
-    files = FILE_STORE.list_all()
-    if file_id_filter is not None:
-        files = [r for r in files if r.id in file_id_filter]
-    eligible = [r for r in files if r.status not in _REPROCESS_SKIP_STATUSES]
-    skipped = len(files) - len(eligible)
+    bindings = FILE_STORE.list_all()
+    eligible = []
+    skipped = 0
+    lib_by_version: dict[str, str | None] = {}
+    for r in bindings:
+        if r.status in _REPROCESS_SKIP_STATUSES:
+            skipped += 1
+            continue
+        if r.version_id not in lib_by_version:
+            v = VERSION_STORE.get(r.version_id)
+            lib_by_version[r.version_id] = (
+                None if v is None or v.is_signed_off else v.library_id
+            )
+        if lib_by_version[r.version_id] is None:
+            skipped += 1
+            continue
+        eligible.append(r)
     now = time.time()
     with _lock:
         _jobs[parent_id] = {
@@ -1195,41 +1242,48 @@ def submit_reprocess_all(
     for rec in eligible:
         fut = _get_executor().submit(
             _preprocess_worker,
+            rec.version_id,
             rec.id,
             str(upload_path(rec.id)),
-            str(parsed_path(rec.id)),
-            str(prematch_path(rec.id)),
-            rec.library_id,
+            str(parsed_path(rec.version_id, rec.id)),
+            str(prematch_path(rec.version_id, rec.id)),
+            lib_by_version[rec.version_id],
             list(rec.selected_layers) if rec.selected_layers is not None else None,
             None,                     # transient_primitives: re-parse from source
             overrides_snap,           # dev_overrides_snapshot
             rec.user_unit_override,   # honour the operator's unit, skip the detector
-            rec.product_id,           # load product-scoped templates for pre-match
             rec.chosen_layout,        # keep rendering the operator's chosen tab
         )
         fut.add_done_callback(
-            lambda f, fid=rec.id, pid=parent_id: _on_reprocess_step_done(pid, fid, f)
+            lambda f, vid=rec.version_id, fid=rec.id, pid=parent_id:
+                _on_reprocess_step_done(pid, vid, fid, f)
         )
     return parent_id
 
 
-def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
+def _on_reprocess_step_done(
+    parent_id: str, version_id: str, file_id: str, fut: Future,
+) -> None:
     from app.files import FILE_STORE
     try:
         result = fut.result()
     except Exception as exc:
         tb = traceback.format_exc()
-        FILE_STORE.update_status(file_id, "error", error=f"{exc}\n{tb}")
+        FILE_STORE.update_status(version_id, file_id, "error", error=f"{exc}\n{tb}")
         with _lock:
             job = _jobs.get(parent_id)
             if job is not None:
-                job["errors"].append({"file_id": file_id, "error": str(exc)})
+                job["errors"].append({
+                    "version_id": version_id, "file_id": file_id,
+                    "error": str(exc),
+                })
                 job["done"] += 1
                 if job["done"] >= job["total"]:
                     job["status"] = "done"
                     job["completed_at"] = time.time()
         return
     factor_changed = FILE_STORE.update_parsed(
+        version_id,
         file_id,
         primitive_count=result["primitive_count"],
         bbox=tuple(result["bbox"]) if result["bbox"] else (0, 0, 0, 0),
@@ -1238,10 +1292,10 @@ def _on_reprocess_step_done(parent_id: str, file_id: str, fut: Future) -> None:
         applied_scale=float(result.get("applied_scale", 1.0)),
     )
     FILE_STORE.set_dxf_recover_notes(file_id, result.get("dxf_recover_notes"))
-    _persist_source_layout(file_id, result)
+    _persist_source_layout(version_id, file_id, result)
     if factor_changed:
-        _invalidate_match_after_rescale(file_id)
-    _maybe_clear_redundant_unit_override(file_id, result)
+        _invalidate_match_after_rescale(version_id, file_id)
+    _maybe_clear_redundant_unit_override(version_id, file_id, result)
     with _lock:
         job = _jobs.get(parent_id)
         if job is not None:
@@ -1263,8 +1317,8 @@ def list_jobs() -> list[dict]:
         return [dict(j) for j in _jobs.values()]
 
 
-def latest_rule_check_job(product_id: str) -> dict | None:
-    """Latest rule-check job dict for a product, or None. Used by
+def latest_rule_check_job(version_id: str) -> dict | None:
+    """Latest rule-check job dict for a version, or None. Used by
     `GET /api/products` so a fresh dashboard load can pick up a job
     that was kicked off in a previous browser session and is either
     still running or finished while the user was elsewhere."""
@@ -1273,7 +1327,7 @@ def latest_rule_check_job(product_id: str) -> dict | None:
         for j in _jobs.values():
             if j.get("kind") != "rule_check":
                 continue
-            if j.get("product_id") != product_id:
+            if j.get("version_id") != version_id:
                 continue
             if latest is None or (j.get("submitted_at") or 0) > (latest.get("submitted_at") or 0):
                 latest = j
