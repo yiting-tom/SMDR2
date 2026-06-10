@@ -57,11 +57,11 @@
 
 - [x] **C1. 已定案（2026-06-10）：** templates + match 調參 = 該版 library；files **可跨版共用**（實例：新版 SBT/BD 沿用前版、只換 POD）→ role 綁定抽成 junction `version_files(version_id, role, file_id, …per-version 狀態)`，`files` 退化為純內容儲存（content-hash 天然去重）。建新版 = clone library + 複製綁定，只換有改的角色。⚠️ 衍生 artifact（parsed/match/prematch/rule_check）改以 `(version_id, file_id)` 為 key，否則 v2 重跑會覆蓋 v1 結果。細節見 [`product-versioning.md` Q1](product-versioning.md)。
 - [x] **C2. 已隨 A1b 蒸發：** 不再有 library-scoped 共用件 → 版本快照涵蓋**整個 version library**，無例外層。
-- [ ] **C3.** 版號格式與輸入規則：自由輸入 vs 固定格式？自動遞增 vs 人工？同 product 內**可否重複**？
-- [ ] **C4.** 舊版生命週期：永久保留 vs 留最近 N 版？可否刪？要能**回看舊版的 match / rule 結果**嗎？
+- [x] **C3. 已定案（2026-06-10）：** 版號**自由輸入**、純人工；同 product 內**不可重複**（重複報錯，不覆蓋）。
+- [x] **C4. 已定案（2026-06-10）：** 舊版**可回看**（match / rule 結果都要能看 → artifact 以 `(version_id, file_id)` keying 已在 C1 鋪好）；舊版**不可刪除**、永久保留。
 - [x] **C5. 已隨 C1 定案：** 建新版 = **clone 上一版**（library + role 綁定），user 只替換有改的角色。「SBT/BD 沿用、只換 POD」的情境直接蘊含此流程。
-- [ ] **C6.** 要不要 **v1 ↔ v2 差異比較**？現在就要還是未來再加？
-- [ ] **C7.** 新 product 是否**自動建第一版**（如 `v1`），還是可存在「沒有任何版本」的空狀態？
+- [x] **C6. 已定案（2026-06-10）：** v1↔v2 差異比較**先不做**，未來有需求再加。
+- [x] **C7. 已定案（2026-06-10）：** 建 product 時 **user 必須輸入版號** —— 不自動取名 `v1`、也不存在「無版本」的空 product；第一版隨 product 建立一起生。
 - [ ] **C8.**（連動 §B）editor 綁 **product**（能改所有版本）還是綁**特定版本**？product 編輯鎖要不要下放到版本級？
 - [ ] **C9.** 既有資料遷移：全部歸到一個預設版（如 `v1`）？rule 結果 `{product_id}.json` → `{version_id}.json` 由 migration 自動搬？
 
