@@ -71,8 +71,8 @@
 ## §D. 編輯鎖細節
 > 細節：[`auth-permissions.md` §7](auth-permissions.md)（大方向已定，剩兩個參數）
 
-- [ ] **D1.** 是該 product 的 editor、但**鎖被別人佔住**時怎麼辦？純唯讀等他放，還是給「**請求接手 / 通知 admin**」？
-- [ ] **D2.** **heartbeat 間隔與鎖 TTL** 取多少？（初步候選：heartbeat 30s、TTL 2–5 分鐘，取決於你們會不會編到一半離開很久。）
+- [x] **D1. 已定案（2026-06-10）：(c)** 被佔鎖就唯讀等待；急用走「找 admin 強制解鎖」（既有定案功能），不做「請求接手」通知機制。
+- [x] **D2. 已定案（2026-06-10）：heartbeat 30s、TTL 5 分鐘。** 開會情境分析：分頁開著 → heartbeat 持續 → 鎖不掉（人還在編輯狀態）；筆電休眠/關分頁 → heartbeat 停 → 5 分鐘後鎖自動釋放，回來再搶即可（被人搶走就等或找 admin，符合 D1）。
 - [x] **D3. 已隨 A1 定案：** 一 product 一 library → 鎖粒度 product = library，自動對齊，無需再議。
 
 ---
@@ -95,8 +95,8 @@
 
 - [x] **F1. 已隨 E4 定案：** 靠 Keycloak 停用帳號自動失效（登不進來 = 權限死），App 不用另外清。
 - [x] **F2. 已定案（2026-06-10）：要。** 至少記錄 **library 內容的增刪改**：哪個 editor、在哪個 product（含版本）、對 templates / match 調參做了 add / delete / modify。雛形：`audit_log(id, ts, user_sub, product_id, version_id, action, target_type, target_id, detail)`。是否擴及其他動作（上傳檔、建 product、rule-check 觸發…）實作時再議，表結構先留通用。
-- [ ] **F3.** **未登入**怎麼處理——直接導去 Keycloak，還是保留公開唯讀頁？
-- [ ] **F4.** 內網 vs 外網存取限制？只能公司網段用嗎？
+- [x] **F3. 已定案（2026-06-10）：** 無論如何**強制先登入**——未登入一律導去 Keycloak SSO login，不留公開頁。
+- [x] **F4. 已定案（2026-06-10）：** 部署環境是**全封閉網路**，無外網存取考量（TLS/暴露面不在 app 範圍）。
 
 ---
 

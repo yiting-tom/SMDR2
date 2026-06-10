@@ -88,8 +88,8 @@
 ### §6 邊界與營運
 - [ ] **離職 / 轉組**：權限怎麼收？靠 Keycloak 停用帳號自動失效，還是 App 要另外清？
 - [x] **已定案（2026-06-10）：要 audit log。** 至少涵蓋 **library 內容的增刪改**：哪個 editor、在哪個 product（含版本）、對 templates / match 調參做了 add / delete / modify。雛形：`audit_log(id, ts, user_sub, product_id, version_id, action, target_type, target_id, detail)`。admin 強制解鎖已定要留 audit（§7），寫同一張表。是否擴及其他動作（上傳檔、建 product、rule-check 觸發…）實作時再議，表結構先留通用。
-- [ ] **未登入**怎麼處理——直接導去 Keycloak，還是保留公開唯讀頁？
-- [ ] 內網 vs 外網存取限制？只能公司網段用嗎？
+- [x] **已定案（2026-06-10）：未登入一律導去 Keycloak SSO login**，強制先登入，不留公開頁。
+- [x] **已定案（2026-06-10）：全封閉網路部署**，無外網存取考量（TLS/暴露面不在 app 範圍）。
 - [ ] 上線權限後，**既有資料**（現在無隔離）要不要回溯指派 owner / product 歸屬？
 
 ### §7 多用戶併發與編輯鎖定
@@ -107,9 +107,9 @@
 - **背景 job 涵蓋在 product 鎖內**：`jobs.py` 的 preprocess / scan-all 是該 editor 動作觸發的，天然屬於他的 product 鎖；job 寫的是衍生資料（match JSON、預覽）、冪等，收尾晚一點無妨。鎖只需保證「同一 product 同時只有一個**人類**寫入者」。
 - **不需即時共編**：內部工具，「被擋住 + 顯示鎖狀態 + 手動重整（或輕量輪詢更新鎖狀態）」即可，不上 WebSocket 即時協作。
 
-#### 待討論
-- ③ **該 product 的 editor、但鎖被別人佔住時**怎麼辦？純唯讀等他放，還是給「**請求接手 / 通知 admin**」？
-- ④ **heartbeat 間隔與鎖 TTL** 取多少？取決於你們會不會編到一半離開很久（開會、查資料）。太短 → 正常 idle 被誤踢；太長 → 殭屍鎖卡很久。（初步候選：heartbeat 30s、TTL 2–5 分鐘，待確認你們作業節奏）
+#### 已定案（原待討論 ③④，2026-06-10）
+- ③ **鎖被佔住時：唯讀等待**；急用走「找 admin 強制解鎖」（上方既有定案），**不做**「請求接手」通知機制。
+- ④ **heartbeat 30s、TTL 5 分鐘**。開會情境：分頁開著 → heartbeat 持續 → 鎖不掉；筆電休眠/關分頁 → heartbeat 停 → 5 分鐘後自動釋放，回來再搶（被搶走就等或找 admin，符合 ③）。
 
 #### 相依
 - **鎖粒度與 §4 拓樸相依**：editor 只能編自己的 product，鎖也只在該 product 範圍競爭；若改成「一 product 一 library」，鎖邊界會直接對齊 library。
