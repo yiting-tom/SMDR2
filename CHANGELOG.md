@@ -17,6 +17,19 @@ Every feature that has been built is on `main`.
 
 ---
 
+## Product versioning（2026-06-11）
+
+- **Shipped（versioning-impl 分支）** — `add-product-versioning`：一
+  version 一 library 模型落地。新增 `versions` / `version_files` 表；
+  product 建立必填版號（同 product 不重複、version 不可刪）；建新版 =
+  clone 上一版（templates + 調參 + 綁定，檔案 bytes 以 content-hash 共
+  用）；衍生 artifact 改 `(version_id, file_id)` keying（舊版結果永久可
+  回看）；畫押 sign-off 凍結 version（所有寫入 409，僅可解押後再編）；
+  兩層 scope（`PRODUCT_SCOPED_CLASSES`）與 library CRUD API 移除;DRC
+  manifest 升 2.0.0（customer 欄位 → version_id/version_label）。不遷移
+  舊資料（C9）：偵測到舊 schema 直接重建。測試改跑隔離 `SMDR2_DATA_DIR`
+  tmp dir（不再污染 `data/library.sqlite`）。
+
 ## Matching / detection engine
 
 - **rule-filter-prefix-category** (2026-06-02) — rule sidebar category filter now

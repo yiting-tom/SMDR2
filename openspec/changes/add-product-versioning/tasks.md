@@ -36,11 +36,11 @@
 
 ## 5. 前端
 
-- [ ] 5.1 Dashboard:扁平 product 卡片(移除 customer sections 與 library bar);New Product 表單加必填版號欄位
-- [ ] 5.2 Product 卡片/頁:版本切換器(label + 畫押徽章「誰/何時」);new-version 動作(prompt label → clone 當前選中版)
-- [ ] 5.3 已畫押版本:上傳/commit/重跑/刪除控制項全部 disabled + 徽章呈現;sign-off / unsign 按鈕
-- [ ] 5.4 viewer:呼叫鏈帶 `version_id`(開檔入口從版本上下文進);header 的 library `<select>` 移除,改顯示 product/version 唯讀標籤
-- [ ] 5.5 Library modal 改名 Templates、資料源改當前 version;已畫押時刪/移按鈕停用
+- [x] 5.1 Dashboard:扁平 product 卡片(移除 customer sections 與 library bar);New Product 表單加必填版號欄位
+- [x] 5.2 Product 卡片/頁:版本切換器(label + 畫押徽章「誰/何時」);new-version 動作(prompt label → clone 當前選中版)
+- [x] 5.3 已畫押版本:上傳/commit/重跑/刪除控制項全部 disabled + 徽章呈現;sign-off / unsign 按鈕
+- [x] 5.4 viewer:呼叫鏈帶 `version_id`(開檔入口從版本上下文進);header 的 library `<select>` 移除,改顯示 product/version 唯讀標籤
+- [x] 5.5 Library modal 改名 Templates、資料源改當前 version;已畫押時刪/移按鈕停用
 
 ## 6. 測試
 
@@ -49,10 +49,10 @@
 - [x] 6.3 凍結守門:已畫押後 commit/上傳/調參/rule-check/scan-all 全 409;讀取 200;unsign 後恢復
 - [x] 6.4 keying:`(vid, fid)` artifact 隔離(v2 重跑不動 v1)、共用檔案 bytes 單份、per-version 選層/rects 獨立
 - [x] 6.5 既有測試遷移:product-files/dxf-pipeline/template-library 系列改 version 綁定模型;刪除兩層 scope 相關測試
-- [ ] 6.6 全量 `pytest` 綠燈 + `ruff` 乾淨
+- [x] 6.6 全量 `pytest` 綠燈 + `ruff` 乾淨
 
 ## 7. 收尾
 
-- [ ] 7.1 更新 `ARCHITECTURE.md` / `README.md` 對應段落(拓樸、版本、無共用範本)
-- [ ] 7.2 `CHANGELOG.md` 條目
-- [ ] 7.3 手動煙測:建料號(v1)→ 上傳 → 框選 commit → scan-all → rule-check → 畫押 → 建 v2(clone)→ 只換 POD → 驗 v1 結果不動
+- [x] 7.1 更新 `ARCHITECTURE.md` / `README.md` 對應段落(拓樸、版本、無共用範本)
+- [x] 7.2 `CHANGELOG.md` 條目
+- [x] 7.3 手動煙測:建料號(v1)→ 上傳 → 框選 commit → scan-all → rule-check → 畫押 → 建 v2(clone)→ 只換 POD → 驗 v1 結果不動

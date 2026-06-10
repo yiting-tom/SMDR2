@@ -5,13 +5,15 @@ Web 工具：上傳半導體封裝相關的 DXF 圖紙，框選樣板形狀建�
 （DRC）團隊做檢查。
 
 ```
-[upload DXF]
+[create product + version]          ← 版號必填;建新版 = clone 上一版
+  → upload DXF (per version role)   ← 檔案 content-hash 跨版共用
   → preprocess (parse + flatten)
   → pick layers
   → ready_to_match
-  → frame-select template → commit to library
-  → match → Save Match (per file)
-  → product-level Rule Check / DRC bundle export
+  → frame-select template → commit to 該 version 的 library
+  → match → Save Match (per version+file)
+  → version-level Rule Check / DRC bundle export
+  → sign-off（畫押）凍結 version;舊版結果永久可回看
 ```
 
 ## Quick start
@@ -269,7 +271,6 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | Key | 寫入處 | 作用 |
 |---|---|---|
-| `smdr2.dashboard.selectedLibrary` | `dashboard.js:93` | dashboard library 下拉的選項 |
 | `smdr2.hiddenLayers.<file_id>` | `canvas.js:49` | viewer 隱藏的 layer 集合（per file）|
 | `smdr2.viewer.ruleOpened` | `canvas.js:1422` | rule sidebar 中被使用者展開的 rule 名稱集合（預設全部摺疊；fail 排在 pass 前面）|
 

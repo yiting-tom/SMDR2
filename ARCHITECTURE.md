@@ -17,6 +17,15 @@ FastAPI 後端 + 原生 JS 前端的**內網**工具。工程師上傳半導體�
 把結果交給下游 DRC（量測組）團隊檢查。**無 auth、預設綁 127.0.0.1、
 低併發、可信任使用者**——所有設計取捨都以此為前提（不做 web-scale 防護）。
 
+**版本模型（2026-06-10，openspec `add-product-versioning`）**：product 是
+version 的容器；每個 version 1:1 擁有自己的 library（templates + 每類
+match 調參），檔案以 content-hash 跨版共用、綁定走 `version_files`
+junction。建新版 = clone 上一版（library + 綁定）；衍生 artifact 一律以
+`(version_id, file_id)` 為 key，舊版永久可回看；**畫押（sign-off）**把
+version 凍結成唯讀（`versions.signed_off_by/at`，server 端守門）。規則
+（rule-check 契約）掛 product、跨版不變。完整設計見
+`docs/product-versioning.md` 與 `docs/system-design.md`。
+
 ```
               ┌─────────────── parent FastAPI process ───────────────┐
    browser ──►│  routes (main.py)   singletons: FILE_STORE / LIBRARIES │
@@ -54,7 +63,7 @@ upload
                                                           ▼
                                               ready_to_match ──► (使用者框選比對) ──► Save Match
                                                           │
-                          product 層 rule-check ◄─────────┘
+                          version 層 rule-check ◄─────────┘
                             checking_rules ─► report
                                                           
    任一 worker 失敗 ─► error（error 欄位帶 message + traceback）
@@ -65,13 +74,13 @@ upload
 
 | 目錄 | 寫入者 | 內容（dict 形狀）|
 |---|---|---|
-| `data/uploads/{id}.dxf` | upload handler | 原始 DXF（byte-for-byte）|
-| `data/parsed/{id}.json` | `_preprocess_worker` | `{"primitives":[...], "bbox":[x0,y0,x1,y1], "background":"#…", "insunits":int|null, "applied_scale":float, "dxf_recover_notes":{…}|null}` |
-| `data/prematch/{id}.json` | `_preprocess_worker` | `{"by_class":{class:[handles]}, "total":int}`（class-toolbar 計數的前置快取）|
-| `data/match/{id}.json` | `_save_match_worker` | `{"<view>.<class_snake>.<idx>": [[handle,…], …]}`（交給 DRC 的契約，見 INTEGRATION.md）|
-| `data/rule_check/{pid}.json` | `_rule_check_worker` | `{"<ruleName>": {"pass":bool, "text":str, "rules":[…]}}` |
-| `data/layer_preview/{id}/` | `_discover_layers_worker` | `layers.json` + per-layer `.svg` 縮圖 |
-| `data/library.sqlite` | parent（`Store`）| library / template / product / file 的持久化 |
+| `data/uploads/{id}.dxf` | upload handler | 原始 DXF（byte-for-byte，content-hash 跨版本共用）|
+| `data/parsed/{vid}/{id}.json` | `_preprocess_worker` | `{"primitives":[...], "bbox":[x0,y0,x1,y1], "background":"#…", "insunits":int|null, "applied_scale":float, "dxf_recover_notes":{…}|null}` |
+| `data/prematch/{vid}/{id}.json` | `_preprocess_worker` | `{"by_class":{class:[handles]}, "total":int}`（class-toolbar 計數的前置快取）|
+| `data/match/{vid}/{id}.json` | `_save_match_worker` | `{"<view>.<class_snake>.<idx>": [[handle,…], …]}`（交給 DRC 的契約，見 INTEGRATION.md）|
+| `data/rule_check/{vid}.json` | `_rule_check_worker` | `{"<ruleName>": {"pass":bool, "text":str, "rules":[…]}}` |
+| `data/layer_preview/{vid}/{id}/` | `_discover_layers_worker` | `layers.json` + per-layer `.svg` 縮圖 |
+| `data/library.sqlite` | parent（`Store`）| product / version / library / template / file 的持久化 |
 
 > 這些 dict 形狀目前是**隱性契約**（靠註解 + 測試，沒有 dataclass/schema
 > 強制）。動它們之前先看對應的 `openspec/specs/`。整個 `data/` 可攜——
@@ -98,7 +107,7 @@ def _my_worker(file_id: str, ...) -> dict:
     from app.library import Store
     from app.storage import DB_PATH
     store = Store(DB_PATH)
-    lib = store.load_library(library_id, product_id=...)   # ← 見 §4，務必這樣讀
+    lib = store.load_library(library_id)   # ← 見 §4，務必這樣讀（library 1:1 隸屬 version）
     ...
     return {"result": ...}          # 回傳值會被 pickle 回 parent
 
@@ -159,7 +168,7 @@ parent 內由 `add_template` 等更新。worker 是獨立 process，看不到這
 
 ```python
 # ✅ 對：worker 內每次重新讀
-store = Store(DB_PATH); lib = store.load_library(library_id, product_id=...)
+store = Store(DB_PATH); lib = store.load_library(library_id)
 # ❌ 錯：worker 內讀 process 級快取（過時）
 from app.library import LIBRARIES; lib = LIBRARIES.get(library_id)
 ```
