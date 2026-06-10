@@ -338,6 +338,23 @@ function versionBar(p, version) {
     }
   }
 
+  // 版本差異比較 — needs two versions to diff. Disabled (with an
+  // explanatory tooltip) on single-version products rather than hidden,
+  // so the affordance is discoverable. Pure read — works on signed
+  // versions too.
+  const diffBtn = document.createElement("button");
+  diffBtn.type = "button";
+  diffBtn.className = "version-action-btn";
+  diffBtn.textContent = "🔍 比較";
+  if ((p.versions || []).length >= 2) {
+    diffBtn.title = "比較此產品任兩個版本的差異(範本、比對參數、檔案綁定)";
+    diffBtn.addEventListener("click", () => openVersionDiffModal(p, version));
+  } else {
+    diffBtn.disabled = true;
+    diffBtn.title = "需要至少兩個版本才能比較";
+  }
+  bar.appendChild(diffBtn);
+
   const newBtn = document.createElement("button");
   newBtn.type = "button";
   newBtn.className = "version-action-btn";
@@ -1199,6 +1216,247 @@ function showRuleResults(product, version, data) {
     $ruleResultsBody.appendChild(card);
   }
   $ruleResultsModal.hidden = false;
+}
+
+// ---- version diff modal (版本差異比較) ------------------------------------
+// Read-only comparison of two versions of the same product: templates
+// added/removed (thumbnails), per-class match-config changes, and file
+// binding changes. Backed by GET /api/products/{pid}/version-diff.
+const $versionDiffModal = document.getElementById("version-diff-modal");
+const $versionDiffTitle = document.getElementById("version-diff-title");
+const $versionDiffFrom = document.getElementById("version-diff-from");
+const $versionDiffTo = document.getElementById("version-diff-to");
+const $versionDiffBody = document.getElementById("version-diff-body");
+
+$versionDiffModal.addEventListener("click", (e) => {
+  if (e.target.matches("[data-close]")) $versionDiffModal.hidden = true;
+});
+
+// Translated names of the binding fields that `state_changed` rows may
+// report in `changed`. Unknown fields fall through verbatim so a new
+// backend field never renders blank.
+const BINDING_FIELD_LABELS = {
+  selected_layers: "選層",
+  top_view_rect: "top 視圖框",
+  bottom_view_rect: "bottom 視圖框",
+  side_view_rect: "side 視圖框",
+  user_unit_override: "單位覆寫",
+  chosen_layout: "圖紙分頁",
+  dxf_view: "視圖模式",
+};
+const BINDING_KIND_LABELS = {
+  added: "新增",
+  removed: "移除",
+  state_changed: "狀態變更",
+};
+
+function versionOptionLabel(v) {
+  return v.signed_off_by ? `${v.label} 🔒` : v.label;
+}
+
+function fillVersionDiffSelect(select, versions, selectedId) {
+  select.innerHTML = "";
+  for (const v of versions) {
+    const opt = document.createElement("option");
+    opt.value = v.id;
+    opt.textContent = versionOptionLabel(v);
+    if (v.id === selectedId) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+function openVersionDiffModal(p, currentVersion) {
+  const versions = p.versions || [];
+  if (versions.length < 2) return;
+  $versionDiffTitle.textContent = `版本差異比較 — ${p.name}`;
+  // Defaults: to = the currently selected version, from = the version
+  // right before it in the versions array (or the first one).
+  const toIdx = Math.max(0, versions.findIndex(v => v.id === currentVersion?.id));
+  const fromIdx = Math.max(0, toIdx - 1);
+  fillVersionDiffSelect($versionDiffFrom, versions, versions[fromIdx].id);
+  fillVersionDiffSelect($versionDiffTo, versions, versions[toIdx].id);
+  const reload = () => loadVersionDiff(p);
+  $versionDiffFrom.onchange = reload;
+  $versionDiffTo.onchange = reload;
+  $versionDiffModal.hidden = false;
+  loadVersionDiff(p);
+}
+
+async function loadVersionDiff(p) {
+  $versionDiffBody.innerHTML = `<p class="version-diff-empty">載入差異中…</p>`;
+  try {
+    const qs = `from=${encodeURIComponent($versionDiffFrom.value)}&to=${encodeURIComponent($versionDiffTo.value)}`;
+    const r = await fetch(`/api/products/${p.id}/version-diff?${qs}`);
+    if (!r.ok) {
+      $versionDiffBody.innerHTML =
+        `<p class="version-diff-empty">載入差異失敗(${r.status})</p>`;
+      return;
+    }
+    renderVersionDiff(await r.json());
+  } catch (e) {
+    console.error("version diff load failed", e);
+    $versionDiffBody.innerHTML =
+      `<p class="version-diff-empty">載入差異失敗:${escapeHtml(e.message)}</p>`;
+  }
+}
+
+// Small standalone thumbnail renderer mirroring the Templates modal in
+// canvas.js (drawTemplateThumbnail): normalize by bbox, stroke each
+// entity's point set as a polyline. dashboard.js can't import canvas.js
+// (it's a page script, not a module export), hence the local copy.
+function renderTemplateThumb(entry, strokeColor) {
+  const dpr = window.devicePixelRatio || 1;
+  const canvas = document.createElement("canvas");
+  canvas.className = "diff-thumb";
+  canvas.width = 96 * dpr;
+  canvas.height = 96 * dpr;
+  canvas.style.width = "96px";
+  canvas.style.height = "96px";
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = "#0f1318";
+  ctx.fillRect(0, 0, W, H);
+
+  const [xmin, ymin, xmax, ymax] = entry.bbox || [0, 0, 1, 1];
+  const dw = Math.max(xmax - xmin, 1e-6);
+  const dh = Math.max(ymax - ymin, 1e-6);
+  const pad = 8 * dpr;
+  const s = Math.min((W - pad * 2) / dw, (H - pad * 2) / dh);
+
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(s, -s);  // DXF Y-up → canvas Y-down
+  ctx.translate(-(xmin + xmax) / 2, -(ymin + ymax) / 2);
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = 1.4 / s * dpr;
+  for (const pts of entry.entity_point_sets || []) {
+    if (!pts || pts.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+  }
+  ctx.restore();
+  return canvas;
+}
+
+function diffThumbGroup(title, entries, accentClass, strokeColor) {
+  const group = document.createElement("div");
+  group.className = `diff-thumb-group ${accentClass}`;
+  const head = document.createElement("h4");
+  head.className = "diff-subhead";
+  head.textContent = `${title}(${entries.length})`;
+  group.appendChild(head);
+  const grid = document.createElement("div");
+  grid.className = "diff-thumb-grid";
+  for (const t of entries) {
+    const card = document.createElement("div");
+    card.className = "diff-thumb-card";
+    card.appendChild(renderTemplateThumb(t, strokeColor));
+    const label = document.createElement("span");
+    label.className = "diff-thumb-label";
+    label.textContent = t.class_name;
+    label.title = t.class_name;
+    card.appendChild(label);
+    grid.appendChild(card);
+  }
+  group.appendChild(grid);
+  return group;
+}
+
+// Render one side of a config diff row; null means the class doesn't
+// exist in that version.
+function fmtConfigSide(cfg) {
+  if (!cfg) return "(無此類別)";
+  return `${cfg.match_strategy} / bbox_ratio ${cfg.bbox_ratio}`;
+}
+
+function renderVersionDiff(data) {
+  $versionDiffBody.innerHTML = "";
+
+  if (data.summary?.identical) {
+    const empty = document.createElement("p");
+    empty.className = "version-diff-empty";
+    empty.textContent = "兩版本內容相同";
+    $versionDiffBody.appendChild(empty);
+    return;
+  }
+
+  // ---- Section 1: 範本差異 ----
+  const added = data.templates?.added || [];
+  const removed = data.templates?.removed || [];
+  if (added.length || removed.length) {
+    const sec = document.createElement("section");
+    sec.className = "version-diff-section";
+    const h = document.createElement("h3");
+    h.textContent = "範本差異";
+    sec.appendChild(h);
+    if (added.length) {
+      sec.appendChild(diffThumbGroup("新增", added, "diff-group-added", "#69f0ae"));
+    }
+    if (removed.length) {
+      sec.appendChild(diffThumbGroup("移除", removed, "diff-group-removed", "#ff5252"));
+    }
+    $versionDiffBody.appendChild(sec);
+  }
+
+  // ---- Section 2: 比對參數變更 ----
+  const configs = data.configs || [];
+  if (configs.length) {
+    const sec = document.createElement("section");
+    sec.className = "version-diff-section";
+    const h = document.createElement("h3");
+    h.textContent = "比對參數變更";
+    sec.appendChild(h);
+    const table = document.createElement("table");
+    table.className = "diff-config-table";
+    table.innerHTML =
+      `<thead><tr><th>類別</th><th>${escapeHtml(data.from?.label ?? "from")}</th><th></th><th>${escapeHtml(data.to?.label ?? "to")}</th></tr></thead>`;
+    const tbody = document.createElement("tbody");
+    for (const c of configs) {
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td class="diff-class">${escapeHtml(c.class_name)}</td>` +
+        `<td class="${c.from ? "" : "diff-null"}">${escapeHtml(fmtConfigSide(c.from))}</td>` +
+        `<td class="diff-arrow">→</td>` +
+        `<td class="${c.to ? "" : "diff-null"}">${escapeHtml(fmtConfigSide(c.to))}</td>`;
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    sec.appendChild(table);
+    $versionDiffBody.appendChild(sec);
+  }
+
+  // ---- Section 3: 檔案綁定變更 ----
+  const bindings = data.bindings || [];
+  if (bindings.length) {
+    const sec = document.createElement("section");
+    sec.className = "version-diff-section";
+    const h = document.createElement("h3");
+    h.textContent = "檔案綁定變更";
+    sec.appendChild(h);
+    const list = document.createElement("ul");
+    list.className = "diff-binding-list";
+    for (const b of bindings) {
+      const li = document.createElement("li");
+      li.className = `diff-binding diff-binding--${b.kind}`;
+      const fileName = b.to?.name ?? b.from?.name ?? "(unknown)";
+      const kindLabel = BINDING_KIND_LABELS[b.kind] || b.kind;
+      let detail = "";
+      if (b.kind === "state_changed" && (b.changed || []).length) {
+        const fields = b.changed.map(f => BINDING_FIELD_LABELS[f] || f).join("、");
+        detail = `<span class="diff-binding-fields">(${escapeHtml(fields)})</span>`;
+      }
+      li.innerHTML =
+        `<span class="diff-binding-role">${escapeHtml(b.role)}</span>` +
+        `<span class="diff-binding-name" title="${escapeHtml(fileName)}">${escapeHtml(fileName)}</span>` +
+        `<span class="diff-binding-kind">${escapeHtml(kindLabel)}</span>` +
+        detail;
+      list.appendChild(li);
+    }
+    sec.appendChild(list);
+    $versionDiffBody.appendChild(sec);
+  }
 }
 
 // ---- layer-selection prompts --------------------------------------------

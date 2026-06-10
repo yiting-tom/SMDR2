@@ -1177,6 +1177,151 @@ body.dashboard header .spacer { flex: 1; }
   background: #0f1318;
 }
 
+/* Version diff modal (版本差異比較) ------------------------------------ */
+.version-diff-pickers {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: 0.8rem;
+}
+.version-diff-pickers select {
+  background: #1a1f26;
+  color: #e8eef5;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.2rem 0.4rem;
+  font: inherit;
+  font-size: 0.84rem;
+  min-width: 10ch;
+}
+.version-diff-pickers select:hover { border-color: #4a6080; }
+.version-diff-arrow { color: #9aa5b1; }
+
+#version-diff-body {
+  overflow-y: auto;
+  padding: 0.6rem 1rem 1rem 1rem;
+}
+.version-diff-empty {
+  text-align: center;
+  color: #9aa5b1;
+  padding: 2.2rem 0;
+  margin: 0;
+}
+.version-diff-section { margin-bottom: 1rem; }
+.version-diff-section > h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 0.92rem;
+  color: #c0cad6;
+  border-bottom: 1px solid #1a2028;
+  padding-bottom: 0.3rem;
+}
+
+/* Section 1 — template thumbnails */
+.diff-thumb-group { margin-bottom: 0.7rem; }
+.diff-thumb-group .diff-subhead {
+  margin: 0 0 0.4rem 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.diff-group-added .diff-subhead { color: #69f0ae; }
+.diff-group-removed .diff-subhead { color: #ff5252; }
+.diff-thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 0.6rem;
+}
+.diff-thumb-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem;
+  border: 1px solid #2a3340;
+  border-radius: 4px;
+  background: #0f1318;
+}
+.diff-group-added .diff-thumb-card { border-color: rgba(105, 240, 174, 0.45); }
+.diff-group-removed .diff-thumb-card { border-color: rgba(255, 82, 82, 0.45); }
+.diff-thumb-card .diff-thumb-label {
+  font-family: ui-monospace, monospace;
+  font-size: 0.74rem;
+  color: #c0cad6;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Section 2 — match-config change table */
+.diff-config-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+.diff-config-table th {
+  text-align: left;
+  color: #9aa5b1;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid #2a3340;
+}
+.diff-config-table td {
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid #1a2028;
+  color: #c0cad6;
+}
+.diff-config-table td.diff-class {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  color: #00ffff;
+}
+.diff-config-table td.diff-arrow { color: #9aa5b1; width: 2ch; }
+.diff-config-table td.diff-null { color: #5d8aa8; font-style: italic; }
+
+/* Section 3 — binding change rows */
+.diff-binding-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.diff-binding {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.32rem 0.5rem;
+  border-left: 2px solid #2a3340;
+  background: #0f1318;
+  border-radius: 0 3px 3px 0;
+  font-size: 0.84rem;
+}
+.diff-binding--added { border-left-color: #69f0ae; }
+.diff-binding--removed { border-left-color: #ff5252; }
+.diff-binding--state_changed { border-left-color: #ffb84d; }
+.diff-binding .diff-binding-role {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #00ffff;
+  min-width: 4ch;
+}
+.diff-binding .diff-binding-name {
+  color: #c0cad6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-binding .diff-binding-kind { color: #9aa5b1; }
+.diff-binding--added .diff-binding-kind { color: #69f0ae; }
+.diff-binding--removed .diff-binding-kind { color: #ff5252; }
+.diff-binding--state_changed .diff-binding-kind { color: #ffb84d; }
+.diff-binding .diff-binding-fields {
+  color: #9aa5b1;
+  font-size: 0.78rem;
+}
+
 #upload-zone {
   border: 2px dashed #2a3340;
   border-radius: 6px;

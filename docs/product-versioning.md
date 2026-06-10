@@ -77,8 +77,8 @@ templates + match 調參隨版本走（= 該版的 library，見 §2.4）。file
 ### Q5. ~~建新版的起點~~ **已隨 Q1 定案（2026-06-10）**
 建新版 = **clone 上一版**（library + role 綁定），user 只替換有改的角色。「SBT/BD 沿用、只換 POD」情境直接蘊含此流程。
 
-### Q6. ~~跨版本比較需求~~ **已定案（2026-06-10）**
-**先不做**，未來有需求再加。（資料面不擋路：兩版各自完整快照，事後加 diff 視圖隨時可做。）
+### Q6. ~~跨版本比較需求~~ **已實作(2026-06-11)**
+原定延後,user 改為立即實作。`GET /api/products/{pid}/version-diff?from=&to=`:範本以 canonical signature 比對(clone 副本不誤報)、match 調參逐類差異、檔案綁定增刪/狀態變更;dashboard 比較 modal 含範本縮圖。已畫押版本可比較(純讀取)。openspec `add-version-diff`。
 
 ### Q7. ~~新 product 的第一版~~ **已定案（2026-06-10）**
 建 product 時 **user 必須輸入版號**——不自動取名 `v1`、也不存在「無版本」的空 product；第一版隨 product 建立一起生（空白開始，見拓樸定案）。

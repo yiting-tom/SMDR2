@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -440,6 +440,28 @@ async def delete_product(product_id: str) -> dict:
             pass
     PRODUCT_STORE.delete(product_id)
     return {"deleted": product_id, "versions_removed": len(removed)}
+
+
+@app.get("/api/products/{product_id}/version-diff")
+async def get_version_diff(
+    product_id: str,
+    from_id: str = Query(alias="from"),
+    to_id: str = Query(alias="to"),
+) -> dict:
+    """Compare two versions of the same product (C6). Pure read — works
+    on signed-off versions too. Query params: `from`, `to` (version ids)."""
+    from app.version_diff import diff_versions
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    v_from = _resolve_version(from_id)
+    v_to = _resolve_version(to_id)
+    for v in (v_from, v_to):
+        if v.product_id != product_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"version {v.id!r} does not belong to product {product_id!r}",
+            )
+    return diff_versions(v_from, v_to)
 
 
 @app.get("/api/products/{product_id}/versions")

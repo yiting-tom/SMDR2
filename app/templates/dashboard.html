@@ -135,6 +135,24 @@
     </div>
   </div>
 
+  <!-- Version diff modal (版本差異比較) -->
+  <div id="version-diff-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="版本差異比較">
+      <header class="modal-header">
+        <h2 id="version-diff-title">版本差異比較</h2>
+        <span class="version-diff-pickers">
+          <select id="version-diff-from" title="比較基準版本(from)"></select>
+          <span class="version-diff-arrow">→</span>
+          <select id="version-diff-to" title="比較目標版本(to)"></select>
+        </span>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close>×</button>
+      </header>
+      <div id="version-diff-body"></div>
+    </div>
+  </div>
+
   <!-- Hidden file picker reused per slot -->
   <input type="file" id="file-input" accept=".dxf" hidden />
 

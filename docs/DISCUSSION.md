@@ -61,7 +61,7 @@
 - [x] **C3. 已定案（2026-06-10）：** 版號**自由輸入**、純人工；同 product 內**不可重複**（重複報錯，不覆蓋）。
 - [x] **C4. 已定案（2026-06-10）：** 舊版**可回看**（match / rule 結果都要能看 → artifact 以 `(version_id, file_id)` keying 已在 C1 鋪好）；舊版**不可刪除**、永久保留。
 - [x] **C5. 已隨 C1 定案：** 建新版 = **clone 上一版**（library + role 綁定），user 只替換有改的角色。「SBT/BD 沿用、只換 POD」的情境直接蘊含此流程。
-- [x] **C6. 已定案（2026-06-10）：** v1↔v2 差異比較**先不做**，未來有需求再加。
+- [x] **C6. 已實作(2026-06-11):** 版本差異比較完成 —— `GET /api/products/{pid}/version-diff?from=&to=`(範本 signature 比對/調參/綁定三區)+ dashboard「🔍 比較」modal。openspec `add-version-diff`。
 - [x] **C7. 已定案（2026-06-10）：** 建 product 時 **user 必須輸入版號** —— 不自動取名 `v1`、也不存在「無版本」的空 product；第一版隨 product 建立一起生。
 - [x] **C8. 已定案（2026-06-10）：** editor 綁 **product**（能改其下所有版本）；編輯鎖維持 product 級，不下放。
 - [x] **C9. 已定案（2026-06-10）：不用遷移** —— 現有資料全是開發期產物，不保留。schema 直接上新模型，舊資料砍掉重練。
