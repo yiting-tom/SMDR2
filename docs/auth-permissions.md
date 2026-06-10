@@ -71,7 +71,9 @@
 - [ ] editor 能不能刪 product / 刪別人上傳的檔？
 
 ### §4 Library / Product 拓樸（決定整個模型，先定）
-- [x] **已定案（2026-06-10）：一 product 一 library，library 跟著 product 走。** library 邊界 = product 邊界，library 級寫入風險自然消失；編輯鎖粒度（§7）自動對齊。
+- [x] **已定案（2026-06-10）：library 跟著 product 走；同日因 versioning 精煉為「一 version 一 library」（路線 1）。** product 是 version 的容器，每個 version 1:1 擁有自己的 library（templates + match 調參）；product 之間照樣完全不共用。library 級寫入風險自然消失；**編輯鎖維持 product 級**（§7 不變，鎖住 product = 鎖住其下所有 version）。
+  - 快照語意：建新版 = **clone 上一版的 library**；match 調參跟著快照 → v2 調參不影響 v1，**舊版結果可重現**。
+  - schema：`templates` / `classes` 不動（本來就掛 `library_id`），只加 `versions(id, product_id, label, library_id, created_at)`。
 - [x] **已定案（2026-06-10）：不再有任何共用範本——新 product 空白開始（選項 c）。** 標準件（SMD-2T/Fiducial 等）每個 product 自己框選、match 調參自己調，不從 seed 或既有 product 複製。
   - 影響：`PRODUCT_SCOPED_CLASSES` 兩層 scope 區分**整個消失**（所有 class 一律 product 範圍）；`load_library()` 的雙 scope merge 可刪；「共用範本誰能改」一題**蒸發**（沒有共用範本了）。
   - 既有累積的 library-scoped 範本（SMD-2T 907、FiducialCircle 421）多為 dev/測試殘留，遷移時不保留為共用資產（細節留給 OpenSpec change）。

@@ -35,7 +35,7 @@
 ## §A. Library / Product 拓樸（**最先定，牽動最多**）
 > 細節：[`auth-permissions.md` §4](auth-permissions.md)
 
-- [x] **A1. 已定案（2026-06-10）：一 product 一 library，library 跟著 product 走。** library 邊界 = product 邊界；library 級寫入風險消失；§D3 編輯鎖粒度自動對齊。
+- [x] **A1. 已定案（2026-06-10，同日精煉）：一 version 一 library（路線 1）。** product 是 version 的容器，每個 version 1:1 擁有自己的 library（templates + match 調參）；product 間完全不共用。建新版 = clone 上一版 library；調參跟著快照 → 舊版結果可重現。schema 只加 `versions(id, product_id, label, library_id, created_at)`，`templates`/`classes` 不動。**編輯鎖維持 product 級**（D3 結論不變）。
 - [x] **A1b. 已定案（2026-06-10）：不再有任何共用範本——新 product 空白開始（選 c）。** 標準件每 product 自己框、調參自己調。影響：兩層 scope 區分整個消失（`PRODUCT_SCOPED_CLASSES` 與雙 scope merge 可刪）；versioning 的 C2 跟著蒸發（快照 = 整個 product library）。
 - [x] **A2. 已隨 A1b 蒸發：** 沒有共用範本，無此題。
 - [ ] **A3.** 不同 product 要**完全隔離**（editor 看不到別人 product），還是「viewer 看全部、只是不能編」？
@@ -55,8 +55,8 @@
 ## §C. Product 版本管理
 > 細節：[`product-versioning.md` §3](product-versioning.md)
 
-- [ ] **C1.（最關鍵）** 版本到底**換掉什麼**？(a) role-bound DXF files + 對應 product-scoped templates 一起換成一份快照／(b) 只換 files、templates 跨版沿用／(c) 其他。→ 決定 `version_id` 掛哪幾張表。
-- [x] **C2. 已隨 A1b 蒸發：** 不再有 library-scoped 共用件 → 版本快照涵蓋**整個 product library**，無例外層。
+- [ ] **C1.（已被路線 1 收窄）** templates + match 調參已定隨版本走（= 該版的 library）。剩下確認：**role-bound DXF files（SBT/BD/POD/RING/LID）也綁 version** 對吧（每版有自己的圖紙）？→ `files.product_id` 改掛 `version_id`。
+- [x] **C2. 已隨 A1b 蒸發：** 不再有 library-scoped 共用件 → 版本快照涵蓋**整個 version library**，無例外層。
 - [ ] **C3.** 版號格式與輸入規則：自由輸入 vs 固定格式？自動遞增 vs 人工？同 product 內**可否重複**？
 - [ ] **C4.** 舊版生命週期：永久保留 vs 留最近 N 版？可否刪？要能**回看舊版的 match / rule 結果**嗎？
 - [ ] **C5.** 建新版的起點：從**上一版 clone**（再改那一兩個小東西）vs 每版從零上傳全部角色檔？

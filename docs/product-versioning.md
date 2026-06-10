@@ -34,12 +34,16 @@
 1. **版本不是不同 product。** rules 不變 → 規則屬 product 身分層級；變的只是比對基準。做成獨立 product 會把固定 rules 複製 N 份 → drift。
 2. **儲存用整組快照（方式 A）**，不做 base+diff。版本數頂多 ~20，快照最穩；要看「改了什麼」就兩版即時 diff，不預建 diff 結構。
 3. **rules 掛 product、跨版共用；version 只換比對基準。** 若日後有人要「按版本改規則」→ 擋下,那要走的是開新 product。
-4. 模型雛形：
+4. **模型定案（2026-06-10，路線 1：一 version 一 library）**：
    ```
-   library → product (身分 + 固定 rules)
-                └─ version (版號 + 該版快照)
+   product (身分 + 固定 rules)
+     └─ version ──1:1── library (templates + match 調參)
    ```
-   schema 動作預估：新增 `versions(id, product_id, label, created_at)`；product-scoped 的 templates/files 改掛 `version_id`；library-scoped 維持 `product_id IS NULL` 不動；rule 結果從 `{product_id}.json` 改成 `{version_id}.json`。
+   - product 是 version 的容器；product 之間完全不共用（無任何共用範本，新 product 空白開始——拓樸定案見 `auth-permissions.md` §4）。
+   - **建新版 = clone 上一版的 library**（一個動作完成整包快照）。
+   - **match 調參跟著快照**：v2 調參不影響 v1 → 舊版結果可重現。
+   - schema：`templates` / `classes` **完全不動**（本來就掛 `library_id`）；只新增 `versions(id, product_id, label, library_id, created_at)`；`files` 預計改掛 version（待 C1 末段確認）；rule 結果 `{product_id}.json` → `{version_id}.json`。
+   - 編輯鎖維持 **product 級**（鎖住 product = 鎖住其下所有 version）。
 
 ---
 
@@ -47,12 +51,9 @@
 
 > 以下每題都會影響 schema / UI / 遷移，請逐題拍板。
 
-### Q1.（最關鍵）版本到底換掉什麼？
-系統裡「圖紙」= 上傳的 **role-bound DXF files（SBT/BD/POD/RING/LID）**；**product-scoped templates** 是從這些圖紙框選出的參考幾何。換版時：
-- (a) files 換新的、對應的 product-scoped templates 也一起重抽？（兩者綁在一起當一份快照）
-- (b) 只換 files，templates 想跨版沿用？
-- (c) 其他情形？
-→ **這題決定 `version_id` 掛在哪幾張 table。**
+### Q1.（已被路線 1 收窄，剩末段待確認）
+templates + match 調參已定隨版本走（= 該版的 library，見 §2.4）。剩下確認一件事：
+- **role-bound DXF files（SBT/BD/POD/RING/LID）也綁 version** 對吧？（每版有自己的圖紙 → `files.product_id` 改掛 `version_id`）
 
 ### Q2. ~~library-scoped 標準件（共用件）確定版本無關？~~ **已蒸發（2026-06-10）**
 拓樸定案「一 product 一 library、無任何共用範本、新 product 空白開始」（見 `auth-permissions.md` §4）→ 不再有 library-scoped 層 → **版本快照涵蓋整個 product library，無例外**。本題不存在了。
