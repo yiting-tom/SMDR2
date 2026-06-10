@@ -231,6 +231,24 @@ Sizing（2026-06-10 確認）：
   - **驗證 parser / ProcessPool worker 對 150MB DXF 的記憶體與耗時行為**（parsed JSON 可能膨脹數倍；worker 預設 2 個、每個各吃一份記憶體）。
   - §7.2 的「parent 代理下載到 temp」模式在 150MB 仍可行（內網頻寬），但 worker 數 × 150MB 的 scratch 空間要算進 pod ephemeral disk。
 
+### 9.1 SQLite PVC 容量評估（2026-06-10，供 PVC 申請）
+
+實測：template 一列僅 23B–426B（點雲是相對座標小圖形）；現 DB 含全部測試殘留才 5.2MB。
+
+| 項目 | 假設（worst case） | 量 |
+|---|---|---|
+| 一個 version 的 library | ~3000 列範本（BGA 整盤 commit 等級）× ~350B 含 overhead | ~1–2MB |
+| 一個 product | ≤20 版全 clone | ≤40MB |
+| 一年 | ~150 version（500 DXF/年 ÷ 3–5 檔/版） | **~300MB/年** |
+| audit_log | 數百事件/天 × ~300B | ~10MB/年 |
+| 其他表 | 千列等級 | 忽略 |
+
+→ worst ~0.3GB/年（實際估 1/5），五年 worst ~1.5GB。
+
+**申請建議：10GB、block storage（RWO）**——含 DB + WAL + Litestream staging headroom；公司最小單位更大就拿最小的。❌ 絕不可用 NFS-backed PVC（§10 硬規則）。
+
+附帶：150MB DXF 的 worker scratch **不進此 PVC**——用 pod emptyDir/ephemeral（預留 worker 數 × 150MB ≈ 1GB）。免 PVC 變體（Litestream restore-on-boot）存在但不採——既然申請得到，掛 PVC 更穩，Litestream 純當備份。
+
 ---
 
 ## 10. 地雷清單（不分方案都要記得）
