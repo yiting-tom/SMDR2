@@ -8,13 +8,13 @@
 
 ## 2. Schema 與 store 層
 
-- [ ] 2.1 schema 重建邏輯:偵測缺 `versions` 表 → drop & recreate 全部表(含新 `versions`、`version_files`;`files` 去綁定欄位;`templates` 去 `product_id`;`products` 去 `library_id`)
-- [ ] 2.2 `VersionStore`(或併入 `ProductStore`):create(含 UNIQUE(product_id,label) → 409 語意)、get、list_by_product、sign_off/unsign
-- [ ] 2.3 `version_files` CRUD:bind/unbind/list_by_version、per-version 狀態欄位(selected_layers/view/rects/unit_override)讀寫
-- [ ] 2.4 clone 交易:複製 library(templates + classes 調參)+ version_files 到新 version(單交易,毫秒級)
-- [ ] 2.5 刪除兩層 scope:`PRODUCT_SCOPED_CLASSES`、`is_product_scoped()`、`load_library()` 的 product_id 參數與 merge、`insert_template` 分支、boot 洩漏清理
-- [ ] 2.6 dedup scope 改 `(library_id, class_name)`(`add_template_for_file` 簽名去 product_id)
-- [ ] 2.7 product 建立改為「product + 第一版 + 空 library」單交易;product 刪除 cascade 驗證(versions/libraries/templates/version_files)
+- [x] 2.1 schema 重建邏輯:偵測缺 `versions` 表 → drop & recreate 全部表(含新 `versions`、`version_files`;`files` 去綁定欄位;`templates` 去 `product_id`;`products` 去 `library_id`)
+- [x] 2.2 `VersionStore`(或併入 `ProductStore`):create(含 UNIQUE(product_id,label) → 409 語意)、get、list_by_product、sign_off/unsign
+- [x] 2.3 `version_files` CRUD:bind/unbind/list_by_version、per-version 狀態欄位(selected_layers/view/rects/unit_override)讀寫
+- [x] 2.4 clone 交易:複製 library(templates + classes 調參)+ version_files 到新 version(單交易,毫秒級)
+- [x] 2.5 刪除兩層 scope:`PRODUCT_SCOPED_CLASSES`、`is_product_scoped()`、`load_library()` 的 product_id 參數與 merge、`insert_template` 分支、boot 洩漏清理
+- [x] 2.6 dedup scope 改 `(library_id, class_name)`(`add_template_for_file` 簽名去 product_id)
+- [x] 2.7 product 建立改為「product + 第一版 + 空 library」單交易;product 刪除 cascade 驗證(versions/libraries/templates/version_files)
 
 ## 3. 儲存路徑與 jobs 版本化
 

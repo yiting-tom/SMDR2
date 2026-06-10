@@ -184,33 +184,10 @@ def is_allowed_view(class_name: str, view: str | None) -> bool:
     return view is not None and view in allowed
 
 
-# ---- Per-class storage scope (library vs. product) ----------------------
-# Library-scoped is the implicit default; only classes in this set persist
-# templates with a non-null product_id. The Store's load_library() merges
-# the two scopes for a given (library_id, product_id) pair.
-PRODUCT_SCOPED_CLASSES: frozenset[str] = frozenset({
-    "Substrate",
-    "Lid",
-    "RingOuter",
-    "RingInner",
-    "DieArea",
-    "C4Ball",
-    "BGABall",
-    "Protrusion",
-})
-
-
-def is_product_scoped(class_name: str) -> bool:
-    return class_name in PRODUCT_SCOPED_CLASSES
-
-
-_unknown_product_scoped = PRODUCT_SCOPED_CLASSES - set(DEFAULT_CLASSES)
-if _unknown_product_scoped:
-    raise ValueError(
-        f"PRODUCT_SCOPED_CLASSES contains classes not in DEFAULT_CLASSES: "
-        f"{sorted(_unknown_product_scoped)!r}"
-    )
-del _unknown_product_scoped
+# Two-tier storage scope (PRODUCT_SCOPED_CLASSES) was removed 2026-06-10:
+# every library belongs 1:1 to a version (app.versions), so all templates
+# are version-scoped by construction and no class-based scope routing or
+# dual-scope merge exists anymore.
 
 
 # ---- Per-class toolbar category -----------------------------------------
@@ -325,9 +302,9 @@ def _template_signature_cached(t: "Template") -> tuple:
     return sig
 
 
-DEFAULT_LIBRARY_ID = "default"
-DEFAULT_LIBRARY_NAME = "Default"
-
+# The shared "default" library was removed 2026-06-10: libraries are
+# created exclusively by version creation (app.versions) and belong 1:1
+# to a version.
 
 Point = tuple[float, float]
 
@@ -412,7 +389,6 @@ CREATE TABLE IF NOT EXISTS templates (
     bbox_ymax          REAL NOT NULL,
     created_at         REAL NOT NULL,
     entity_kinds       TEXT,
-    product_id         TEXT,
     FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
 );
 """
@@ -424,6 +400,8 @@ class Store:
     def __init__(self, path: Path | str) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        from app.dbschema import ensure_versioned_schema
+        ensure_versioned_schema(path)
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -432,110 +410,19 @@ class Store:
         with self.lock, self.conn:
             self.conn.executescript(SCHEMA)
             self._migrate()
-            # Index created after migration so library_id column is guaranteed.
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_templates_lib_class ON templates(library_id, class_name)"
             )
-            # Always ensure the default library exists.
-            self.conn.execute(
-                "INSERT OR IGNORE INTO libraries (id, name, created_at) VALUES (?, ?, ?)",
-                (DEFAULT_LIBRARY_ID, DEFAULT_LIBRARY_NAME, time.time()),
-            )
 
-    # ---- migration from pre-multi-library schema -------------------------
+    # ---- per-boot idempotent maintenance ----------------------------------
     def _migrate(self) -> None:
-        """Bring a pre-multi-library DB up to date.
+        """Idempotent per-boot upkeep on a versioned-schema DB.
 
-        Detects whether `classes`/`templates` have the `library_id` column;
-        if not, adds it and re-tags all rows with the default library.
+        Pre-versioning databases never reach here — the dbschema guard
+        rebuilds them from scratch (decision C9: no data preserved). What
+        remains is rename/purge/seed/re-rank maintenance that must track
+        code-level class-list changes across boots.
         """
-        def has_col(table: str, col: str) -> bool:
-            rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
-            return any(r["name"] == col for r in rows)
-
-        # templates.library_id — simple column add (ALTER doesn't take params).
-        if not has_col("templates", "library_id"):
-            self.conn.execute(
-                f"ALTER TABLE templates ADD COLUMN library_id TEXT NOT NULL "
-                f"DEFAULT '{DEFAULT_LIBRARY_ID}'"
-            )
-
-        # templates.entity_kinds — JSON-encoded parallel list of primitive
-        # types (or None) captured at commit time. NULL on legacy rows; the
-        # loader parses NULL as [None] * len(entity_point_sets) so existing
-        # libraries keep working without the circle fast path.
-        if not has_col("templates", "entity_kinds"):
-            self.conn.execute(
-                "ALTER TABLE templates ADD COLUMN entity_kinds TEXT"
-            )
-
-        # templates.product_id — NULL = library-scoped (visible to every
-        # product in the library); set = product-scoped (visible only to
-        # that product). See PRODUCT_SCOPED_CLASSES.
-        if not has_col("templates", "product_id"):
-            self.conn.execute(
-                "ALTER TABLE templates ADD COLUMN product_id TEXT"
-            )
-
-        # Pre-multi-library schema had templates.FOREIGN KEY(class_name)
-        # → classes(name). After we changed classes' PK to (library_id, name)
-        # that FK is unresolvable ("foreign key mismatch"). Rebuild templates
-        # without that old FK.
-        fk_list = self.conn.execute("PRAGMA foreign_key_list(templates)").fetchall()
-        if any(fk["table"] == "classes" for fk in fk_list):
-            self.conn.executescript("""
-                CREATE TABLE templates__new (
-                    id                 TEXT PRIMARY KEY,
-                    library_id         TEXT NOT NULL,
-                    class_name         TEXT NOT NULL,
-                    entity_point_sets  TEXT NOT NULL,
-                    centroid_x         REAL NOT NULL,
-                    centroid_y         REAL NOT NULL,
-                    bbox_xmin          REAL NOT NULL,
-                    bbox_ymin          REAL NOT NULL,
-                    bbox_xmax          REAL NOT NULL,
-                    bbox_ymax          REAL NOT NULL,
-                    created_at         REAL NOT NULL,
-                    FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
-                );
-                INSERT INTO templates__new
-                    SELECT id, library_id, class_name, entity_point_sets,
-                           centroid_x, centroid_y,
-                           bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at
-                    FROM templates;
-                DROP TABLE templates;
-                ALTER TABLE templates__new RENAME TO templates;
-            """)
-
-        # classes needs PK change (was: name; now: (library_id, name)). Rebuild.
-        cls_cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(classes)")]
-        if cls_cols and "library_id" not in cls_cols:
-            self.conn.executescript(f"""
-                CREATE TABLE classes__new (
-                    library_id  TEXT NOT NULL,
-                    name        TEXT NOT NULL,
-                    rank        INTEGER NOT NULL,
-                    created_at  REAL NOT NULL,
-                    PRIMARY KEY (library_id, name)
-                );
-                INSERT INTO classes__new (library_id, name, rank, created_at)
-                    SELECT '{DEFAULT_LIBRARY_ID}', name, rank, created_at FROM classes;
-                DROP TABLE classes;
-                ALTER TABLE classes__new RENAME TO classes;
-            """)
-
-        # Per-class match strategy + bbox_ratio. Both columns are additive;
-        # NULL bbox_ratio is the explicit "use default" signal, only honored
-        # when match_strategy == 'signature'.
-        if not has_col("classes", "match_strategy"):
-            self.conn.execute(
-                "ALTER TABLE classes ADD COLUMN match_strategy TEXT NOT NULL DEFAULT 'chamfer'"
-            )
-        if not has_col("classes", "bbox_ratio"):
-            self.conn.execute(
-                "ALTER TABLE classes ADD COLUMN bbox_ratio REAL"
-            )
-
         # Legacy snake_case class names → new canonical IDs. Rewrite both the
         # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
         # rows that would collide with an already-existing (library_id, NEW)
@@ -610,20 +497,6 @@ class Store:
                     (new_rank, lib_id, r["name"]),
                 )
 
-        # Purge legacy library-scoped rows for product-scoped classes.
-        # Before the class-scope split, classes like Substrate / C4Ball /
-        # BGABall were stored at library scope (product_id IS NULL), which
-        # caused cross-product leakage. Drop those rows so users re-commit
-        # per product. Idempotent: rows committed under the new code carry
-        # a non-null product_id and are skipped.
-        if PRODUCT_SCOPED_CLASSES:
-            placeholders = ",".join("?" * len(PRODUCT_SCOPED_CLASSES))
-            self.conn.execute(
-                f"DELETE FROM templates WHERE product_id IS NULL "
-                f"AND class_name IN ({placeholders})",
-                tuple(PRODUCT_SCOPED_CLASSES),
-            )
-
     # ---- library CRUD ----------------------------------------------------
     def create_library(self, library_id: str, name: str) -> None:
         with self.lock, self.conn:
@@ -675,19 +548,13 @@ class Store:
             )
             return cur.rowcount > 0
 
-    def insert_template(
-        self,
-        library_id: str,
-        t: Template,
-        *,
-        product_id: str | None = None,
-    ) -> None:
+    def insert_template(self, library_id: str, t: Template) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 "INSERT INTO templates "
                 "(id, library_id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds, product_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     t.id, library_id, t.class_name,
                     json.dumps(t.entity_point_sets, separators=(",", ":")),
@@ -695,7 +562,6 @@ class Store:
                     t.bbox[0], t.bbox[1], t.bbox[2], t.bbox[3],
                     time.time(),
                     json.dumps(t.entity_kinds, separators=(",", ":")),
-                    product_id,
                 ),
             )
 
@@ -715,16 +581,11 @@ class Store:
     def load_library(
         self,
         library_id: str,
-        *,
-        product_id: str | None = None,
     ) -> tuple[list[str], dict[str, dict], dict[str, list[Template]]]:
         """Return (classes, configs, templates_by_class) for a library.
 
-        When `product_id` is None, only library-scoped templates
-        (product_id IS NULL) are included — the library-admin view used
-        by `GET /api/libraries/{id}/templates`. When `product_id` is
-        non-null, the result merges library-scoped templates with the
-        product-scoped templates belonging to that product.
+        A library belongs 1:1 to a version, so this is the version's
+        complete template view — no scope merging exists anymore.
         """
         with self.lock:
             class_rows = self.conn.execute(
@@ -742,25 +603,14 @@ class Store:
             }
             templates: dict[str, list[Template]] = {c: [] for c in classes}
 
-            if product_id is None:
-                tmpl_rows = self.conn.execute(
-                    "SELECT id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                    "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, entity_kinds "
-                    "FROM templates "
-                    "WHERE library_id = ? AND product_id IS NULL "
-                    "ORDER BY created_at ASC",
-                    (library_id,),
-                ).fetchall()
-            else:
-                tmpl_rows = self.conn.execute(
-                    "SELECT id, class_name, entity_point_sets, centroid_x, centroid_y, "
-                    "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, entity_kinds "
-                    "FROM templates "
-                    "WHERE library_id = ? "
-                    "AND (product_id IS NULL OR product_id = ?) "
-                    "ORDER BY created_at ASC",
-                    (library_id, product_id),
-                ).fetchall()
+            tmpl_rows = self.conn.execute(
+                "SELECT id, class_name, entity_point_sets, centroid_x, centroid_y, "
+                "bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, entity_kinds "
+                "FROM templates "
+                "WHERE library_id = ? "
+                "ORDER BY created_at ASC",
+                (library_id,),
+            ).fetchall()
             for r in tmpl_rows:
                 raw_sets = json.loads(r["entity_point_sets"])
                 point_sets: list[list[Point]] = [
@@ -882,55 +732,28 @@ class Library:
         return True
 
     def add_template(self, template: Template) -> tuple[Template, bool]:
-        """Library-scoped insert. Routes to add_template_for_file with
-        product_id=None — preserved for tests/fixtures and any caller
-        with no file context. Returns (template, already_existed)."""
-        return self.add_template_for_file(template, product_id=None)
+        """Alias of add_template_for_file — kept for fixtures and any
+        caller with no file context. Returns (template, already_existed)."""
+        return self.add_template_for_file(template)
 
-    def add_template_for_file(
-        self,
-        template: Template,
-        *,
-        product_id: str | None,
-    ) -> tuple[Template, bool]:
-        """Persist a template with its scope derived from the class.
-        Product-scoped classes (PRODUCT_SCOPED_CLASSES) land with
-        product_id set to the file's product; library-scoped classes
-        land with product_id IS NULL.
+    def add_template_for_file(self, template: Template) -> tuple[Template, bool]:
+        """Persist a template into this (version's) library.
 
         Deduplicates by canonical signature within the
-        (library_id, class_name, effective_product_id) scope. Returns
+        (library_id, class_name) scope — the in-memory cache holds the
+        library's full template set, so it is canonical. Returns
         (existing_template, True) on hit (no append, no store insert);
         otherwise appends + inserts and returns (template, False)."""
         if template.class_name not in self._templates:
             self.add_class(template.class_name)
-        scope_pid = product_id if is_product_scoped(template.class_name) else None
         new_sig = template_signature(template.entity_point_sets)
-
-        # Library-scoped class → the in-memory cache is canonical at
-        # library scope (every row has product_id IS NULL). Scan it.
-        # Product-scoped class → the cache mixes rows across products
-        # (it's hydrated library-scope-only and then appended to by
-        # any file's commit, regardless of product). Reload the
-        # per-product view from the store so we only compare against
-        # rows in the same effective product scope.
-        if scope_pid is None:
-            candidates = self._templates.get(template.class_name, [])
-        else:
-            _, _, scoped_templates = self.store.load_library(
-                self.library_id, product_id=scope_pid
-            )
-            candidates = scoped_templates.get(template.class_name, [])
-
-        for existing in candidates:
+        for existing in self._templates.get(template.class_name, []):
             if _template_signature_cached(existing) == new_sig:
                 return existing, True
 
         object.__setattr__(template, "_signature", new_sig)
         self._templates[template.class_name].append(template)
-        self.store.insert_template(
-            self.library_id, template, product_id=scope_pid
-        )
+        self.store.insert_template(self.library_id, template)
         return template, False
 
     def templates_of(self, class_name: str) -> list[Template]:
@@ -1018,10 +841,14 @@ class LibraryRegistry:
         return self.get(library_id)
 
     def delete(self, library_id: str) -> None:
-        if library_id == DEFAULT_LIBRARY_ID:
-            raise ValueError("cannot delete the default library")
         with self._lock:
             self.store.delete_library(library_id)
+            self._libs.pop(library_id, None)
+
+    def evict(self, library_id: str) -> None:
+        """Drop the in-memory cache for a library whose rows were written
+        or removed by another connection (version clone / product cascade)."""
+        with self._lock:
             self._libs.pop(library_id, None)
 
     def list_summaries(self) -> list[dict]:
@@ -1048,8 +875,6 @@ from app.storage import DB_PATH  # noqa: E402
 
 _STORE = Store(DB_PATH)
 LIBRARIES = LibraryRegistry(_STORE)
-# Ensure default library has its classes seeded.
-LIBRARIES.get(DEFAULT_LIBRARY_ID)
 
 
 # ---- Entity index helpers (unchanged) ------------------------------------
