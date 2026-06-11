@@ -482,8 +482,8 @@ def test_save_match_post_returns_202_and_registers_job(monkeypatch, tmp_path):
     assert body["version_id"] == version.id
     job_id = body["job_id"]
     assert isinstance(job_id, str) and len(job_id) > 0
-    assert job_id in jobs._jobs
-    entry = jobs._jobs[job_id]
+    entry = jobs.get(job_id)
+    assert entry is not None
     assert entry["kind"] == "save_match"
     assert entry["file_id"] == fid
     assert entry["version_id"] == version.id
@@ -521,20 +521,17 @@ def test_save_match_done_callback_flips_flag_and_stores_result(
         version.id, fid, str(match_path(version.id, fid))
     )
 
-    # Synthesize the job dict + Future that submit_save_match would have
-    # produced, then drive the done-callback.
-    job_id = "test-lifecycle-job"
-    jobs._jobs[job_id] = {
-        "id": job_id, "version_id": version.id, "file_id": fid,
-        "kind": "save_match",
-        "status": "running", "submitted_at": time.time(),
-        "started_at": time.time(), "completed_at": None, "error": None,
-    }
-    fut: Future = Future()
-    fut.set_result(result)
-    jobs._on_save_match_done(job_id, fut)
+    # Synthesize the job row submit_save_match would have produced, then
+    # drive the completion path the worker loop runs (apply + complete).
+    job_id = jobs.JOB_STORE.insert(
+        kind="save_match", payload={},
+        version_id=version.id, file_id=fid, status="running",
+    )
+    job = jobs.JOB_STORE.get(job_id)
+    assert jobs.apply_success(job, result) is None
+    jobs.JOB_STORE.complete(job_id, result)
 
-    entry = jobs._jobs[job_id]
+    entry = jobs.get(job_id)
     assert entry["status"] == "done"
     assert entry["error"] is None
     assert entry["completed_at"] is not None
@@ -575,23 +572,21 @@ def test_save_match_done_callback_does_not_flip_flag_on_worker_error(
 
     assert FILE_STORE.get(version.id, fid).match_saved is False
 
-    job_id = "test-lifecycle-error-job"
-    jobs._jobs[job_id] = {
-        "id": job_id, "version_id": version.id, "file_id": fid,
-        "kind": "save_match",
-        "status": "running", "submitted_at": time.time(),
-        "started_at": time.time(), "completed_at": None, "error": None,
-    }
-    fut: Future = Future()
-    fut.set_exception(RuntimeError("simulated worker crash"))
-    jobs._on_save_match_done(job_id, fut)
+    job_id = jobs.JOB_STORE.insert(
+        kind="save_match", payload={},
+        version_id=version.id, file_id=fid, status="running",
+    )
+    job = jobs.JOB_STORE.get(job_id)
+    exc = RuntimeError("simulated worker crash")
+    jobs.apply_failure(job, exc, "traceback…")
+    jobs.JOB_STORE.fail(job_id, f"{exc}")
 
-    entry = jobs._jobs[job_id]
+    entry = jobs.get(job_id)
     assert entry["status"] == "error"
     assert isinstance(entry["error"], str) and entry["error"]
     assert "simulated worker crash" in entry["error"]
     assert entry["completed_at"] is not None
-    assert "result" not in entry
+    assert entry["result"] is None
     # match_saved stays False on worker error → rule-check submit gate
     # (which checks this flag) keeps rejecting the role.
     assert FILE_STORE.get(version.id, fid).match_saved is False
@@ -619,8 +614,8 @@ def test_save_match_post_with_missing_parsed_file_returns_synchronous_error(
 
     def _save_match_jobs():
         return {
-            j for j, v in jobs._jobs.items()
-            if v.get("kind") == "save_match"
+            j["id"] for j in jobs.list_jobs()
+            if j.get("kind") == "save_match"
         }
 
     with TestClient(app) as client:

@@ -48,6 +48,8 @@ x-web: &web
     SESSION_SECRET: dev-session-secret-change-me
     COOKIE_SECURE: "false"
     BOOTSTRAP_ADMINS: admin1
+    # Webs only enqueue; the worker service claims and executes (Phase 2).
+    SMDR2_EMBEDDED_WORKER: "0"
   volumes:
     # Shared scratch so both replicas see the same SQLite + data/ for now.
     # Phase 1 moves blobs to MinIO and the DB to MariaDB; this volume then
@@ -78,10 +80,9 @@ services:
   web-2:
     <<: *web
 
-  # Phase 2 — uncomment once the MariaDB-backed jobs table + worker loop land.
-  # worker:
-  #   <<: *web
-  #   command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
+  worker:
+    <<: *web
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
 
   mariadb:
     image: mariadb:11.4

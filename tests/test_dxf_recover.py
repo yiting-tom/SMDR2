@@ -150,8 +150,6 @@ def test_on_preprocess_done_persists_recover_notes(monkeypatch, tmp_path):
     """End-to-end: the preprocess done-callback SHALL forward
     `result["dxf_recover_notes"]` into `FILE_STORE.set_dxf_recover_notes`,
     and the file's status SHALL still reach `ready_to_match`."""
-    import time
-    from concurrent.futures import Future
     from app import jobs
     from app.files import FILE_STORE, READY
 
@@ -159,15 +157,10 @@ def test_on_preprocess_done_persists_recover_notes(monkeypatch, tmp_path):
     FILE_STORE.register_content(fid, "f.dxf", 1)
     FILE_STORE.bind("v1", "BD", fid, initial_status="preprocessing")
 
-    job_id = "test-rn-job"
-    with jobs._lock:
-        jobs._jobs[job_id] = {
-            "id": job_id, "version_id": "v1", "file_id": fid, "library_id": "lib1",
-            "kind": "preprocess", "status": "running",
-            "submitted_at": time.time(), "started_at": time.time(),
-            "completed_at": None, "error": None,
-            "user_unit_override_requested": None,
-        }
+    job_id = jobs.JOB_STORE.insert(
+        kind="preprocess", payload={"library_id": "lib1"},
+        version_id="v1", file_id=fid, status="running",
+    )
 
     notes = {
         "strict_error": "DXFStructureError: invalid header tag",
@@ -186,10 +179,8 @@ def test_on_preprocess_done_persists_recover_notes(monkeypatch, tmp_path):
         "prematch_total": 0,
         "dxf_recover_notes": notes,
     }
-    fut: Future = Future()
-    fut.set_result(result)
-
-    jobs._on_preprocess_done(job_id, fut)
+    job = jobs.JOB_STORE.get(job_id)
+    assert jobs.apply_success(job, result) is None
 
     rec = FILE_STORE.get("v1", fid)
     assert rec.status == READY
@@ -201,8 +192,6 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
 ):
     """A strict-OK preprocess (result carries `dxf_recover_notes=None`)
     SHALL leave the FileRecord with `dxf_recover_notes is None`."""
-    import time
-    from concurrent.futures import Future
     from app import jobs
     from app.files import FILE_STORE, READY
 
@@ -215,15 +204,10 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
         "audit_messages": [],
     })
 
-    job_id = "test-rn-strict-job"
-    with jobs._lock:
-        jobs._jobs[job_id] = {
-            "id": job_id, "version_id": "v1", "file_id": fid, "library_id": "lib1",
-            "kind": "preprocess", "status": "running",
-            "submitted_at": time.time(), "started_at": time.time(),
-            "completed_at": None, "error": None,
-            "user_unit_override_requested": None,
-        }
+    job_id = jobs.JOB_STORE.insert(
+        kind="preprocess", payload={"library_id": "lib1"},
+        version_id="v1", file_id=fid, status="running",
+    )
 
     result = {
         "file_id": fid,
@@ -237,10 +221,8 @@ def test_on_preprocess_done_clears_recover_notes_on_strict_path(
         "prematch_total": 0,
         "dxf_recover_notes": None,
     }
-    fut: Future = Future()
-    fut.set_result(result)
-
-    jobs._on_preprocess_done(job_id, fut)
+    job = jobs.JOB_STORE.get(job_id)
+    assert jobs.apply_success(job, result) is None
 
     rec = FILE_STORE.get("v1", fid)
     assert rec.status == READY

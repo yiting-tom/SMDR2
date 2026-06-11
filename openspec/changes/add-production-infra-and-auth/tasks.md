@@ -21,12 +21,12 @@
 
 ## 4. Phase 2 — jobs 表與 worker 拆分(依賴 §2 §3)
 
-- [ ] 4.1 Alembic migration:`jobs` 表(schema 文件 §7)
-- [ ] 4.2 `app/jobs.py` submit 五式改 INSERT(簽名不變);`GET /api/jobs/{id}` 與去重改 DB 查詢
-- [ ] 4.3 `app/worker_loop.py`:兩步樂觀認領、heartbeat 30s、回收(>120s requeue,attempts≥3 → error)、done-callback 副作用逐一搬入、7 天 prune
-- [ ] 4.4 移除 in-memory `_jobs` dict 與 web 進程 executor;`LIBRARIES` 快取改 fresh read;dev_overrides prod 停用
-- [ ] 4.5 compose 解開 worker service;雙 web + worker 全流程驗證(job 輪詢跨 replica、kill worker 後 job 復活)
-- [ ] 4.6 suite 全綠 → **k8s replicas=2 解鎖點**
+- [x] 4.1 Alembic migration:`jobs` 表(schema 文件 §7)
+- [x] 4.2 `app/jobs.py` submit 五式改 INSERT(簽名不變);`GET /api/jobs/{id}` 與去重改 DB 查詢
+- [x] 4.3 `app/worker_loop.py`:兩步樂觀認領、heartbeat 30s、回收(>120s requeue,attempts≥3 → error)、done-callback 副作用逐一搬入、7 天 prune
+- [x] 4.4 移除 in-memory `_jobs` dict 與 web 進程 executor;`LIBRARIES` 快取改 fresh read;dev_overrides prod 停用
+- [x] 4.5 compose 解開 worker service;雙 web + worker 全流程驗證(job 輪詢跨 replica、kill worker 後 job 復活)
+- [x] 4.6 suite 全綠 → **k8s replicas=2 解鎖點**
 
 ## 5. Phase 3 — BFF 登入與 session(卡 Keycloak 資訊;compose 替身可先行)
 

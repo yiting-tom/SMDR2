@@ -17,6 +17,22 @@ from __future__ import annotations
 
 from app import jobs
 from app.files import FileStore
+from app.jobstore import JobStore
+
+
+def _isolate_queue(tmp_path, monkeypatch):
+    """Fresh job store + no embedded worker: children stay queued so the
+    test can inspect exactly what would reach a worker."""
+    monkeypatch.setattr(jobs, "JOB_STORE", JobStore(tmp_path / "jobs.sqlite"))
+    monkeypatch.setattr(jobs, "_ensure_worker", lambda: None)
+
+
+def _child_worker_args(parent_id):
+    children = [
+        j for j in jobs.JOB_STORE.list_all()
+        if j.get("parent_id") == parent_id
+    ]
+    return [jobs.execution_plan(c)[1] for c in children]
 
 
 # Worker positional signature, for indexing the captured submit() args:
@@ -73,13 +89,12 @@ def test_reprocess_all_threads_override_and_version(tmp_path, monkeypatch):
     _ready_binding(fs, "v1", "f1", insunits=4, bbox=(0, 0, 300, 300))
     fs.set_user_unit_override("v1", "f1", "mm")
 
-    fake = _FakeExecutor()
-    monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
+    _isolate_queue(tmp_path, monkeypatch)
+    parent_id = jobs.submit_reprocess_all()
 
-    jobs.submit_reprocess_all()
-
-    assert len(fake.calls) == 1
-    args = fake.calls[0]
+    calls = _child_worker_args(parent_id)
+    assert len(calls) == 1
+    args = calls[0]
     assert args[_VERSION_ARG] == "v1"
     assert args[_FILE_ARG] == "f1"
     assert args[_LIBRARY_ARG] == "lib1", "version's library must reach the worker"
@@ -93,14 +108,12 @@ def test_reprocess_all_passes_none_override_for_unset_binding(tmp_path, monkeypa
 
     _ready_binding(fs, "v1", "f2", insunits=4, bbox=(0, 0, 300, 300))
 
-    fake = _FakeExecutor()
-    monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
+    _isolate_queue(tmp_path, monkeypatch)
+    parent_id = jobs.submit_reprocess_all()
 
-    jobs.submit_reprocess_all()
-
-    assert len(fake.calls) == 1
-    args = fake.calls[0]
-    assert args[_OVERRIDE_ARG] is None
+    calls = _child_worker_args(parent_id)
+    assert len(calls) == 1
+    assert calls[0][_OVERRIDE_ARG] is None
 
 
 def test_reprocess_all_skips_signed_off_versions(tmp_path, monkeypatch):
@@ -119,11 +132,10 @@ def test_reprocess_all_skips_signed_off_versions(tmp_path, monkeypatch):
     _ready_binding(fs, "vs", "ff", insunits=4, bbox=(0, 0, 300, 300))
     _ready_binding(fs, "vo", "fo", insunits=4, bbox=(0, 0, 300, 300))
 
-    fake = _FakeExecutor()
-    monkeypatch.setattr(jobs, "_get_executor", lambda: fake)
-
+    _isolate_queue(tmp_path, monkeypatch)
     parent_id = jobs.submit_reprocess_all()
 
-    assert len(fake.calls) == 1
-    assert fake.calls[0][_VERSION_ARG] == "vo"
-    assert jobs._jobs[parent_id]["skipped"] >= 1
+    calls = _child_worker_args(parent_id)
+    assert len(calls) == 1
+    assert calls[0][_VERSION_ARG] == "vo"
+    assert jobs.get(parent_id)["skipped"] >= 1

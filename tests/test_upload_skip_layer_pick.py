@@ -118,7 +118,7 @@ def test_skip_layer_pick_true_routes_directly_to_preprocess(tmp_path):
 
             # The submitted job's kind is `preprocess`, not the
             # Phase 1 `discover`.
-            job = jobs._jobs[up["job_id"]]
+            job = jobs.get(up["job_id"])
             assert job["kind"] == "preprocess", job
 
             # The binding carries `selected_layers = NULL` because
@@ -156,7 +156,7 @@ def test_skip_flag_absent_uses_phase1_as_today(tmp_path):
         try:
             up = _upload(client, vid, dxf)
             assert up["status"] == "discovering_layers", up
-            job = jobs._jobs[up["job_id"]]
+            job = jobs.get(up["job_id"])
             assert job["kind"] == "discover", job
         finally:
             client.delete(f"/api/products/{pid}")
@@ -175,7 +175,7 @@ def test_skip_flag_false_uses_phase1_as_today(tmp_path):
         try:
             up = _upload(client, vid, dxf, skip_layer_pick=False)
             assert up["status"] == "discovering_layers", up
-            job = jobs._jobs[up["job_id"]]
+            job = jobs.get(up["job_id"])
             assert job["kind"] == "discover", job
         finally:
             client.delete(f"/api/products/{pid}")
@@ -217,7 +217,7 @@ def test_dedup_bind_with_skip_flag_routes_to_phase2(tmp_path):
             assert up_b["file_id"] == fid, "dedup must reuse file_id"
             assert up_b["deduped"] is True, up_b
             assert up_b["status"] == "preprocessing", up_b
-            job_b = jobs._jobs[up_b["job_id"]]
+            job_b = jobs.get(up_b["job_id"])
             assert job_b["kind"] == "preprocess", job_b
 
             # Version B's binding reflects the skip-path state: status

@@ -33,23 +33,14 @@ def _new_version(client, name: str) -> tuple[str, str]:
     return body["id"], body["versions"][0]["id"]
 
 
-def _register_preprocess_job(job_id: str, version_id: str, file_id: str) -> dict:
-    """Insert a minimal running preprocess job into jobs._jobs and return it."""
+def _register_preprocess_job(version_id: str, file_id: str) -> dict:
+    """Insert a minimal running preprocess row and return its dict."""
     from app import jobs
-    job = {
-        "id": job_id,
-        "version_id": version_id,
-        "file_id": file_id,
-        "kind": "preprocess",
-        "status": "running",
-        "submitted_at": 0.0,
-        "started_at": 0.0,
-        "completed_at": None,
-        "error": None,
-    }
-    with jobs._lock:
-        jobs._jobs[job_id] = job
-    return job
+    job_id = jobs.JOB_STORE.insert(
+        kind="preprocess", payload={"library_id": "lib1"},
+        version_id=version_id, file_id=file_id, status="running",
+    )
+    return jobs.JOB_STORE.get(job_id)
 
 
 def _done_future(value) -> Future:
@@ -70,18 +61,18 @@ def test_preprocess_success_emits_info_log(monkeypatch, caplog):
     monkeypatch.setattr(jobs, "_maybe_clear_redundant_unit_override", lambda *a, **k: None)
     monkeypatch.setattr(jobs, "_invalidate_match_after_rescale", lambda *a, **k: None)
 
-    _register_preprocess_job("obs-job-info", "obs-ver-info", "obs-file-info")
-    fut = _done_future({
+    job = _register_preprocess_job("obs-ver-info", "obs-file-info")
+    result = {
         "primitive_count": 42,
         "bbox": [0, 0, 1, 1],
         "background": "#ffffff",
-    })
+    }
 
     with caplog.at_level(logging.INFO, logger="app.jobs"):
-        jobs._on_preprocess_done("obs-job-info", fut)
+        assert jobs.apply_success(job, result) is None
+    jobs.JOB_STORE.complete(job["id"], result)
 
-    with jobs._lock:
-        assert jobs._jobs["obs-job-info"]["status"] == "done"
+    assert jobs.get(job["id"])["status"] == "done"
     msgs = [r.getMessage() for r in caplog.records if r.name == "app.jobs"]
     assert any("preprocess_done" in m and "primitive_count=42" in m for m in msgs), msgs
 
@@ -98,21 +89,22 @@ def test_preprocess_callback_exception_marks_error_not_done(monkeypatch, caplog)
     # Make the post-result FILE_STORE mutation throw.
     monkeypatch.setattr(FILE_STORE, "update_parsed", _boom)
 
-    _register_preprocess_job("obs-job-crash", "obs-ver-crash", "obs-file-crash")
-    fut = _done_future({
+    job = _register_preprocess_job("obs-ver-crash", "obs-file-crash")
+    result = {
         "primitive_count": 7,
         "bbox": [0, 0, 1, 1],
         "background": "#000000",
-    })
+    }
 
     with caplog.at_level(logging.ERROR, logger="app.jobs"):
-        jobs._on_preprocess_done("obs-job-crash", fut)
-
-    with jobs._lock:
-        job = jobs._jobs["obs-job-crash"]
-        # The whole point: not left "running", not falsely "done".
-        assert job["status"] == "error"
-        assert "disk on fire" in job["error"]
+        err = jobs.apply_success(job, result)
+    # The whole point: the callback failure surfaces as an error string
+    # (the worker loop then flips the row), never a silent "done".
+    assert err is not None and "disk on fire" in err
+    jobs.JOB_STORE.fail(job["id"], err)
+    row = jobs.get(job["id"])
+    assert row["status"] == "error"
+    assert "disk on fire" in row["error"]
     errs = [r for r in caplog.records if r.name == "app.jobs" and r.levelno >= logging.ERROR]
     assert any("preprocess_callback_failed" in r.getMessage() for r in errs), errs
 

@@ -1614,14 +1614,24 @@ async def get_drc_bundle(version_id: str) -> Response:
 # ---- Developer-mode parameter overrides ---------------------------------
 # Process-wide, in-memory only. See `app/dev_overrides.py` and the
 # `expose-dev-parameter-overrides` OpenSpec change for the contract.
+# Process-local state is exactly what multi-replica deployments must not
+# expose (two pods would silently diverge) — production disables the whole
+# surface with SMDR2_DEV_TOOLS=0.
+def _require_dev_tools() -> None:
+    if os.environ.get("SMDR2_DEV_TOOLS", "1") == "0":
+        raise HTTPException(status_code=404, detail="dev tools disabled")
+
+
 @app.get("/api/dev/settings")
 async def dev_settings_get() -> dict:
+    _require_dev_tools()
     from app import dev_overrides
     return {"settings": dev_overrides.read_state()}
 
 
 @app.post("/api/dev/settings")
 async def dev_settings_post(payload: dict) -> dict:
+    _require_dev_tools()
     from app import dev_overrides
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="expected JSON object")
@@ -1639,5 +1649,6 @@ async def dev_settings_post(payload: dict) -> dict:
 
 @app.post("/api/dev/reprocess-all")
 async def dev_reprocess_all() -> dict:
+    _require_dev_tools()
     job_id = jobs.submit_reprocess_all()
     return {"job_id": job_id}

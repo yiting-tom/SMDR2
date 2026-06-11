@@ -821,19 +821,18 @@ class LibraryRegistry:
 
     def __init__(self, store: Store) -> None:
         self.store = store
-        self._libs: dict[str, Library] = {}
         self._lock = threading.RLock()
 
     def get(self, library_id: str) -> Library:
+        # Fresh read per call (design D5): a cached Library only learns
+        # about templates added through THIS process, so with two web
+        # replicas one pod would serve a stale template set forever.
+        # Construction = one load_library() — cheap at this scale; the
+        # instance keeps write-through semantics for the request using it.
         with self._lock:
-            lib = self._libs.get(library_id)
-            if lib is None:
-                # Ensure the library row exists before constructing a cache.
-                if self.store.get_library(library_id) is None:
-                    raise KeyError(f"library {library_id!r} not found")
-                lib = Library(library_id, self.store)
-                self._libs[library_id] = lib
-            return lib
+            if self.store.get_library(library_id) is None:
+                raise KeyError(f"library {library_id!r} not found")
+            return Library(library_id, self.store)
 
     def create(self, name: str) -> Library:
         library_id = str(uuid.uuid4())[:12]
@@ -843,13 +842,11 @@ class LibraryRegistry:
     def delete(self, library_id: str) -> None:
         with self._lock:
             self.store.delete_library(library_id)
-            self._libs.pop(library_id, None)
 
     def evict(self, library_id: str) -> None:
-        """Drop the in-memory cache for a library whose rows were written
-        or removed by another connection (version clone / product cascade)."""
-        with self._lock:
-            self._libs.pop(library_id, None)
+        """No-op since `get` returns a fresh instance per call; kept so
+        cross-connection writers (version clone / product cascade) don't
+        need call-site changes."""
 
     def list_summaries(self) -> list[dict]:
         rows = self.store.list_libraries()
