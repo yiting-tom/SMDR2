@@ -24,7 +24,7 @@ junction。建新版 = clone 上一版（library + 綁定）；衍生 artifact �
 `(version_id, file_id)` 為 key，舊版永久可回看；**畫押（sign-off）**把
 version 凍結成唯讀（`versions.signed_off_by/at`，server 端守門）。規則
 （rule-check 契約）掛 product、跨版不變。完整設計見
-`docs/product-versioning.md` 與 `docs/system-design.md`。
+`docs/product-versioning.md` 與根目錄 `SYSTEM_DESIGN.md`(完整設計書+全部視圖,取代舊 docs/system-design.md 與 docs/system-diagrams.md)。
 
 ```
               ┌─────────────── parent FastAPI process ───────────────┐
