@@ -40,7 +40,8 @@ from pathlib import Path
 from app.dxf import SCALE_TO_UNIT
 from app.files import FileRecord
 from app.products import Product
-from app.storage import match_path, upload_path
+from app.blobstore import get_blobstore
+from app.storage import match_key, upload_key
 from app.versions import Version
 
 
@@ -183,11 +184,15 @@ def build_bundle(
             MANIFEST_FILENAME,
             json.dumps(manifest, indent=2, ensure_ascii=False),
         )
+        blobs = get_blobstore()
         for rec in files:
-            dxf_src = upload_path(rec.id)
-            match_src = match_path(version.id, rec.id)
-            zf.write(dxf_src, arcname=f"{DXF_DIR}/{rec.id}.dxf")
-            zf.write(match_src, arcname=f"{MATCH_DIR}/{rec.id}.json")
+            zf.writestr(
+                f"{DXF_DIR}/{rec.id}.dxf", blobs.get_bytes(upload_key(rec.id))
+            )
+            zf.writestr(
+                f"{MATCH_DIR}/{rec.id}.json",
+                blobs.get_bytes(match_key(version.id, rec.id)),
+            )
     return buf.getvalue(), f"drc-bundle-{product.id}-{version.id}.zip"
 
 
@@ -220,11 +225,14 @@ def build_bundle_dir(
     (dst / MANIFEST_FILENAME).write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)
     )
+    blobs = get_blobstore()
     for rec in files:
-        shutil.copyfile(upload_path(rec.id), dst / DXF_DIR / f"{rec.id}.dxf")
-        shutil.copyfile(
-            match_path(version.id, rec.id), dst / MATCH_DIR / f"{rec.id}.json"
-        )
+        with open(dst / DXF_DIR / f"{rec.id}.dxf", "wb") as out, \
+                blobs.open_stream(upload_key(rec.id)) as src:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
+        with open(dst / MATCH_DIR / f"{rec.id}.json", "wb") as out, \
+                blobs.open_stream(match_key(version.id, rec.id)) as src:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
     return dst
 
 

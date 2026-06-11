@@ -105,28 +105,31 @@ def test_match_json_invalidated_when_applied_scale_changes(tmp_path, monkeypatch
     from app import jobs, storage
     from app.files import FileStore
 
-    # Isolate disk + DB so the test doesn't disturb real state.
-    monkeypatch.setattr(storage, "MATCH_DIR", tmp_path / "match")
-    (storage.MATCH_DIR / "v1").mkdir(parents=True, exist_ok=True)
+    from app.blobstore import get_blobstore
+
+    # Isolate DB; the match artifact goes through the blobstore under a
+    # version id unique to this test (shared DATA_DIR across the session).
+    vid = f"v1-{tmp_path.name}"
+    blobs = get_blobstore()
     fs = FileStore(tmp_path / "library.sqlite")
     monkeypatch.setattr("app.files.FILE_STORE", fs)
 
     fs.register_content("X", "x.dxf", 1)
-    fs.bind("v1", "BD", "X")
-    fs.update_parsed("v1", "X", 1, (0, 0, 100, 100), "#000",
+    fs.bind(vid, "BD", "X")
+    fs.update_parsed(vid, "X", 1, (0, 0, 100, 100), "#000",
                      insunits=0, applied_scale=1.0)
-    fs.set_match_saved("v1", "X", True)
-    mp = storage.match_path("v1", "X")
-    mp.write_text(json.dumps({"bga_ball.0": [["h1"], ["h2"]]}))
+    fs.set_match_saved(vid, "X", True)
+    mk = storage.match_key(vid, "X")
+    blobs.put_json(mk, {"bga_ball.0": [["h1"], ["h2"]]})
 
     # Operator overrides to inch → applied_scale flips to 25.4.
-    factor_changed = fs.update_parsed("v1", "X", 1, (0, 0, 2540, 2540), "#000",
+    factor_changed = fs.update_parsed(vid, "X", 1, (0, 0, 2540, 2540), "#000",
                                        insunits=0, applied_scale=25.4)
     assert factor_changed is True
-    jobs._invalidate_match_after_rescale("v1", "X")
+    jobs._invalidate_match_after_rescale(vid, "X")
 
-    assert not mp.exists(), "match JSON should be deleted after rescale"
-    assert fs.get("v1", "X").match_saved is False
+    assert not blobs.exists(mk), "match JSON should be deleted after rescale"
+    assert fs.get(vid, "X").match_saved is False
 
 
 def test_match_json_left_alone_when_factor_unchanged(tmp_path, monkeypatch):

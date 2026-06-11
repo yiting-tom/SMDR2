@@ -19,7 +19,6 @@ import json
 import logging
 import math
 import os
-import shutil
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -61,18 +60,22 @@ from app.products import PRODUCT_STORE, VALID_ROLES
 from app.versions import DuplicateLabel, VERSION_STORE, Version
 from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
+from app.blobstore import get_blobstore
 from app.storage import (
     DATA_DIR,
-    layer_manifest_path,
-    layer_preview_dir,
-    layer_preview_svg_path,
-    layout_manifest_path,
-    layout_preview_svg_path,
-    match_path,
-    parsed_path,
-    prematch_path,
-    rule_check_path,
-    upload_path,
+    layer_manifest_key,
+    layer_preview_svg_key,
+    layer_preview_version_prefix,
+    layout_manifest_key,
+    layout_preview_svg_key,
+    match_key,
+    match_prefix,
+    parsed_key,
+    parsed_prefix,
+    prematch_key,
+    prematch_prefix,
+    rule_check_key,
+    upload_key,
 )
 
 TEST_DXF = DATA_DIR / "test.dxf"
@@ -99,8 +102,7 @@ def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
     re-raise the stale error on later cache hits with the same key.
     """
     try:
-        with open(path) as f:
-            return json.load(f)
+        return get_blobstore().get_json(path)
     except (json.JSONDecodeError, OSError) as exc:
         raise HTTPException(
             status_code=400,
@@ -112,14 +114,13 @@ def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
 # The path embeds (version_id, file_id) since the artifact re-keying, so the
 # (path, mtime_ns) cache key is naturally version-scoped.
 @lru_cache(maxsize=4)
-def _cached_parsed(path: str, mtime_ns: int) -> dict:  # noqa: ARG001
-    with open(path) as f:
-        return json.load(f)
+def _cached_parsed(key: str, token: str) -> dict:  # noqa: ARG001
+    return get_blobstore().get_json(key)
 
 
 @lru_cache(maxsize=4)
-def _cached_shapes(path: str, mtime_ns: int) -> tuple[dict[str, list[int]], dict[str, EntityShape]]:  # noqa: ARG001
-    data = _cached_parsed(path, mtime_ns)
+def _cached_shapes(key: str, token: str) -> tuple[dict[str, list[int]], dict[str, EntityShape]]:  # noqa: ARG001
+    data = _cached_parsed(key, token)
     hi = build_handle_index(data["primitives"])
     shapes = build_entity_shapes(data["primitives"], hi)
     return hi, shapes
@@ -160,24 +161,28 @@ def _resolve_file(version_id: str, file_id: str, require_ready: bool = True) -> 
 
 
 def _shapes_for(version_id: str, file_id: str) -> tuple[dict[str, list[int]], dict[str, EntityShape]]:
-    pp = parsed_path(version_id, file_id)
-    if not pp.exists():
+    pk = parsed_key(version_id, file_id)
+    try:
+        token = get_blobstore().stat(pk)
+    except FileNotFoundError:
         raise HTTPException(status_code=500, detail="parsed file missing on disk")
-    return _cached_shapes(str(pp), pp.stat().st_mtime_ns)
+    return _cached_shapes(pk, token)
 
 
 def _parsed_for(version_id: str, file_id: str) -> dict:
-    pp = parsed_path(version_id, file_id)
-    if not pp.exists():
+    pk = parsed_key(version_id, file_id)
+    try:
+        token = get_blobstore().stat(pk)
+    except FileNotFoundError:
         raise HTTPException(status_code=500, detail="parsed file missing on disk")
     # Guard at the wrapper level (outside `_cached_parsed`'s lru_cache) so a
     # corrupt file yields a contextual 400, not an opaque 500.
     try:
-        return _cached_parsed(str(pp), pp.stat().st_mtime_ns)
+        return _cached_parsed(pk, token)
     except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"parsed file is unreadable/corrupt: {pp}: {exc}",
+            detail=f"parsed file is unreadable/corrupt: {pk}: {exc}",
         )
 
 
@@ -218,9 +223,9 @@ def _ensure_test_dxf_registered() -> None:
         version = VERSION_STORE.latest_for_product(sample.id)
         if version is None:
             version = VERSION_STORE.create_first(sample.id, "v1")
-    dst = upload_path(fid)
-    if not dst.exists():
-        shutil.copy2(TEST_DXF, dst)
+    if not get_blobstore().exists(upload_key(fid)):
+        with open(TEST_DXF, "rb") as f:
+            get_blobstore().put_stream(upload_key(fid), f)
     FILE_STORE.register_content(fid, "test.dxf", TEST_DXF.stat().st_size)
     rec = FILE_STORE.get(version.id, fid)
     if rec is None:
@@ -232,8 +237,8 @@ def _ensure_test_dxf_registered() -> None:
     # If the parsed cache + prematch are already good, leave it alone.
     if (rec is not None
             and rec.status == READY
-            and parsed_path(version.id, fid).exists()
-            and prematch_path(version.id, fid).exists()):
+            and get_blobstore().exists(parsed_key(version.id, fid))
+            and get_blobstore().exists(prematch_key(version.id, fid))):
         return
     # Otherwise restart from Phase 1 — discover layers, wait for user.
     FILE_STORE.update_status(version.id, fid, DISCOVERING_LAYERS)
@@ -303,7 +308,7 @@ def _file_payload(rec: FileRecord) -> dict:
     binding, i.e. its geometry spans more than one paper-space layout so the
     operator can (re-)pick which tab to load."""
     d = rec.to_dict()
-    d["has_layout_options"] = layout_manifest_path(rec.version_id, rec.id).exists()
+    d["has_layout_options"] = get_blobstore().exists(layout_manifest_key(rec.version_id, rec.id))
     return d
 
 
@@ -366,7 +371,7 @@ def _version_payload(v: Version) -> dict:
             "total": len(uploaded),
         },
         "ready_for_rule_check": bool(uploaded) and all(f.match_saved for f in uploaded),
-        "rule_check_available": rule_check_path(v.id).exists(),
+        "rule_check_available": get_blobstore().exists(rule_check_key(v.id)),
         "latest_rule_check_job": _project_rule_check_job(
             jobs.latest_rule_check_job(v.id)
         ),
@@ -425,19 +430,17 @@ async def delete_product(product_id: str) -> dict:
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
     removed = VERSION_STORE.delete_for_product(product_id)
+    blobs = get_blobstore()
     for v in removed:
         LIBRARIES.evict(v.library_id)
-        for d in (
-            parsed_path(v.id, "x").parent,
-            prematch_path(v.id, "x").parent,
-            match_path(v.id, "x").parent,
-            layer_preview_dir(v.id, "x").parent,
+        for prefix in (
+            parsed_prefix(v.id),
+            prematch_prefix(v.id),
+            match_prefix(v.id),
+            layer_preview_version_prefix(v.id),
         ):
-            shutil.rmtree(d, ignore_errors=True)
-        try:
-            rule_check_path(v.id).unlink()
-        except FileNotFoundError:
-            pass
+            blobs.delete_prefix(prefix)
+        blobs.delete(rule_check_key(v.id))
     PRODUCT_STORE.delete(product_id)
     return {"deleted": product_id, "versions_removed": len(removed)}
 
@@ -598,15 +601,11 @@ async def upload_version_file(
                 detail="replace_file_id does not match a file in this version+role",
             )
         FILE_STORE.unbind(version_id, replace_file_id)
-        try:
-            match_path(version_id, replace_file_id).unlink()
-        except FileNotFoundError:
-            pass
+        get_blobstore().delete(match_key(version_id, replace_file_id))
 
     fid = _file_id_from_bytes(content)
-    dst = upload_path(fid)
-    if not dst.exists():
-        dst.write_bytes(content)
+    if not get_blobstore().exists(upload_key(fid)):
+        get_blobstore().put_bytes(upload_key(fid), content)
     deduped_bytes = FILE_STORE.content_exists(fid)
     FILE_STORE.register_content(fid, file.filename, len(content))
     initial_status = PREPROCESSING if skip_layer_pick else DISCOVERING_LAYERS
@@ -644,10 +643,7 @@ async def delete_version_file(version_id: str, file_id: str) -> Response:
         raise HTTPException(status_code=404, detail="file not found in this version")
     FILE_STORE.unbind(version_id, file_id)
     # Drop this version's match artifact so it doesn't haunt a future rebind.
-    try:
-        match_path(version_id, file_id).unlink()
-    except FileNotFoundError:
-        pass
+    get_blobstore().delete(match_key(version_id, file_id))
     return Response(status_code=204)
 
 
@@ -758,11 +754,7 @@ async def patch_side_regions(
 
     # Invalidate the saved match JSON — its keys are stale w.r.t. the new
     # rectangles. The user has to re-run Save Match to regenerate.
-    mp = match_path(version_id, file_id)
-    try:
-        mp.unlink()
-    except FileNotFoundError:
-        pass
+    get_blobstore().delete(match_key(version_id, file_id))
     FILE_STORE.set_match_saved(version_id, file_id, False)
 
     return {
@@ -799,11 +791,10 @@ async def get_job(job_id: str) -> dict:
 
 # ---- Layer selection (Phase 1 -> Phase 2 gate) --------------------------
 def _read_layer_manifest(version_id: str, file_id: str) -> dict | None:
-    mp = layer_manifest_path(version_id, file_id)
-    if not mp.exists():
+    try:
+        return get_blobstore().get_json(layer_manifest_key(version_id, file_id))
+    except FileNotFoundError:
         return None
-    with open(mp) as f:
-        return json.load(f)
 
 
 @app.get("/api/files/{file_id}/layers")
@@ -874,7 +865,7 @@ async def confirm_layers(
 async def get_layer_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one layer's SVG thumbnail. 404 when Phase 1 hasn't completed
     or the requested layer isn't in the binding's manifest."""
-    from fastapi.responses import FileResponse
+    from fastapi.responses import StreamingResponse
     rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found in this version")
@@ -884,10 +875,13 @@ async def get_layer_preview_svg(file_id: str, safe_name: str, version_id: str):
     valid = {layer["safe_name"] for layer in manifest["layers"]}
     if safe_name not in valid:
         raise HTTPException(status_code=404, detail="unknown layer for this file")
-    path = layer_preview_svg_path(version_id, file_id, safe_name)
-    if not path.exists():
+    try:
+        stream = get_blobstore().open_stream(
+            layer_preview_svg_key(version_id, file_id, safe_name)
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="preview SVG missing on disk")
-    return FileResponse(path, media_type="image/svg+xml")
+    return StreamingResponse(stream, media_type="image/svg+xml")
 
 
 @app.post("/api/files/{file_id}/discover-layers")
@@ -912,11 +906,10 @@ async def trigger_discover_layers(file_id: str, version_id: str) -> dict:
 # model-space and single-tab files skip this gate entirely (the parser
 # auto-resolves them). See `app.jobs._discover_layers_worker`.
 def _read_layout_manifest(version_id: str, file_id: str) -> dict | None:
-    mp = layout_manifest_path(version_id, file_id)
-    if not mp.exists():
+    try:
+        return get_blobstore().get_json(layout_manifest_key(version_id, file_id))
+    except FileNotFoundError:
         return None
-    with open(mp) as f:
-        return json.load(f)
 
 
 @app.get("/api/files/{file_id}/layouts")
@@ -969,11 +962,7 @@ async def confirm_layout(
     # `patch_side_regions`) so a rule check can't run against a stale match
     # — the operator re-runs Save Match after the new tab is ready.
     if req.layout != rec.chosen_layout:
-        mp = match_path(version_id, file_id)
-        try:
-            mp.unlink()
-        except FileNotFoundError:
-            pass
+        get_blobstore().delete(match_key(version_id, file_id))
         FILE_STORE.set_match_saved(version_id, file_id, False)
     FILE_STORE.update_status(version_id, file_id, DISCOVERING_LAYERS)
     job_id = jobs.submit_discover_layers(version_id, file_id, layout_name=req.layout)
@@ -990,7 +979,7 @@ async def confirm_layout(
 async def get_layout_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one AutoCAD-tab SVG thumbnail for the layout picker. 404 when
     the binding has no layout manifest or the tab isn't in it."""
-    from fastapi.responses import FileResponse
+    from fastapi.responses import StreamingResponse
     rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found in this version")
@@ -1000,10 +989,13 @@ async def get_layout_preview_svg(file_id: str, safe_name: str, version_id: str):
     valid = {layout["safe_name"] for layout in manifest["layouts"]}
     if safe_name not in valid:
         raise HTTPException(status_code=404, detail="unknown layout for this file")
-    path = layout_preview_svg_path(version_id, file_id, safe_name)
-    if not path.exists():
+    try:
+        stream = get_blobstore().open_stream(
+            layout_preview_svg_key(version_id, file_id, safe_name)
+        )
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="preview SVG missing on disk")
-    return FileResponse(path, media_type="image/svg+xml")
+    return StreamingResponse(stream, media_type="image/svg+xml")
 
 
 # ---- Classes / templates within a version's library ----------------------
@@ -1439,11 +1431,11 @@ def scan_all(file_id: str, version_id: str) -> dict:  # sync → threadpool
 @app.get("/api/files/{file_id}/prematch")
 async def prematch(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
-    pp = prematch_path(version_id, file_id)
-    if not pp.exists():
+    pk = prematch_key(version_id, file_id)
+    if not get_blobstore().exists(pk):
         # The worker didn't get to this step yet — return empty.
         return {"by_class": {}, "total": 0, "stale": True}
-    return _load_json_or_http(pp, kind="prematch")
+    return _load_json_or_http(pk, kind="prematch")
 
 
 # ---- Match JSON ----------------------------------------------------------
@@ -1457,7 +1449,7 @@ async def prematch(file_id: str, version_id: str) -> dict:
 async def save_match_json(file_id: str, version_id: str) -> JSONResponse:
     require_unsigned(version_id)
     _resolve_file(version_id, file_id)
-    if not parsed_path(version_id, file_id).exists():
+    if not get_blobstore().exists(parsed_key(version_id, file_id)):
         raise HTTPException(
             status_code=500, detail="parsed file missing on disk",
         )
@@ -1471,10 +1463,10 @@ async def save_match_json(file_id: str, version_id: str) -> JSONResponse:
 @app.get("/api/files/{file_id}/match-json")
 async def get_match_json(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
-    mp = match_path(version_id, file_id)
-    if not mp.exists():
+    mk = match_key(version_id, file_id)
+    if not get_blobstore().exists(mk):
         raise HTTPException(status_code=404, detail="match JSON not yet generated")
-    return _load_json_or_http(mp, kind="match")
+    return _load_json_or_http(mk, kind="match")
 
 
 # ---- Rule checking (version-scoped bundle, product-keyed rules) ----------
@@ -1499,14 +1491,14 @@ async def run_rule_check(version_id: str) -> JSONResponse:
     # Validate that every role-bound file's Match JSON and DXF exist on
     # disk before submitting — the worker materialises a handoff bundle
     # from these and would fail late otherwise.
+    blobs = get_blobstore()
     for f in files:
-        mp = match_path(version_id, f.id)
-        if not mp.exists():
+        if not blobs.exists(match_key(version_id, f.id)):
             raise HTTPException(
                 status_code=400,
-                detail=f"{f.dxf_role}: Match JSON missing at {mp.name}",
+                detail=f"{f.dxf_role}: Match JSON missing at {f.id}.json",
             )
-        if not upload_path(f.id).exists():
+        if not blobs.exists(upload_key(f.id)):
             raise HTTPException(
                 status_code=500,
                 detail=f"{f.dxf_role}: source DXF missing at {f.id}.dxf",
@@ -1530,10 +1522,10 @@ async def get_rule_check(version_id: str) -> dict:
     """The version's most recently persisted rule-check result — readable
     indefinitely, signed-off or not (C4: old versions stay reviewable)."""
     version = _resolve_version(version_id)
-    rp = rule_check_path(version_id)
-    if not rp.exists():
+    rk = rule_check_key(version_id)
+    if not get_blobstore().exists(rk):
         raise HTTPException(status_code=404, detail="rule check not yet run")
-    result = _load_json_or_http(rp, kind="rule-check")
+    result = _load_json_or_http(rk, kind="rule-check")
     # Re-validate the persisted payload against the envelope contract so a
     # structurally-corrupt-but-parseable file surfaces loudly (400) instead
     # of producing silent wrong pass/fail counts.
@@ -1573,13 +1565,12 @@ async def upload_rule_check(version_id: str, request: Request) -> dict:
         _validate_envelope(payload)
     except RuleCheckOutputError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    rp = rule_check_path(version_id)
-    rp.parent.mkdir(parents=True, exist_ok=True)
-    rp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    rk = rule_check_key(version_id)
+    get_blobstore().put_json(rk, payload, ensure_ascii=False, indent=2)
     n_pass = sum(1 for v in payload.values() if v.get("pass"))
     return {
         "version_id": version_id,
-        "saved_to": str(rp),
+        "saved_to": rk,
         "rule_count": len(payload),
         "pass_count": n_pass,
         "fail_count": len(payload) - n_pass,

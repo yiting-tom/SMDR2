@@ -93,3 +93,74 @@ def layout_manifest_path(version_id: str, file_id: str) -> Path:
 
 def layout_preview_svg_path(version_id: str, file_id: str, safe_name: str) -> Path:
     return layout_preview_dir(version_id, file_id) / f"{safe_name}.svg"
+
+
+# ---- Blob keys --------------------------------------------------------------
+# String twins of the path helpers, consumed via app.blobstore. Keys ARE the
+# DATA_DIR-relative paths, so the local backend writes byte-identical layout
+# to today's tree (path-based assertions in tests keep holding) and the S3
+# backend needs no mental remapping.
+def key_of(path: Path) -> str:
+    """DATA_DIR-relative blob key for any artifact path."""
+    return path.relative_to(DATA_DIR).as_posix()
+
+
+def upload_key(file_id: str) -> str:
+    return f"uploads/{file_id}.dxf"
+
+
+def parsed_key(version_id: str, file_id: str) -> str:
+    return f"parsed/{version_id}/{file_id}.json"
+
+
+def prematch_key(version_id: str, file_id: str) -> str:
+    return f"prematch/{version_id}/{file_id}.json"
+
+
+def match_key(version_id: str, file_id: str) -> str:
+    return f"match/{version_id}/{file_id}.json"
+
+
+def rule_check_key(version_id: str) -> str:
+    return f"rule_check/{version_id}.json"
+
+
+def layer_preview_prefix(version_id: str, file_id: str) -> str:
+    return f"layer_preview/{version_id}/{file_id}"
+
+
+def layer_manifest_key(version_id: str, file_id: str) -> str:
+    return f"{layer_preview_prefix(version_id, file_id)}/layers.json"
+
+
+def layer_preview_svg_key(version_id: str, file_id: str, safe_name: str) -> str:
+    return f"{layer_preview_prefix(version_id, file_id)}/{safe_name}.svg"
+
+
+def layer_preview_primitives_key(version_id: str, file_id: str) -> str:
+    return f"{layer_preview_prefix(version_id, file_id)}/primitives.json"
+
+
+def layout_manifest_key(version_id: str, file_id: str) -> str:
+    return f"{layer_preview_prefix(version_id, file_id)}/layouts/layouts.json"
+
+
+def layout_preview_svg_key(version_id: str, file_id: str, safe_name: str) -> str:
+    return f"{layer_preview_prefix(version_id, file_id)}/layouts/{safe_name}.svg"
+
+
+# Version-level prefixes — delete-version cleanup sweeps these.
+def parsed_prefix(version_id: str) -> str:
+    return f"parsed/{version_id}"
+
+
+def prematch_prefix(version_id: str) -> str:
+    return f"prematch/{version_id}"
+
+
+def match_prefix(version_id: str) -> str:
+    return f"match/{version_id}"
+
+
+def layer_preview_version_prefix(version_id: str) -> str:
+    return f"layer_preview/{version_id}"

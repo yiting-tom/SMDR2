@@ -136,13 +136,14 @@ def _install_fakes(monkeypatch, shapes_by_handle, matches_per_class,
 
     monkeypatch.setattr(app.library.Store, "load_library", _wrapped_load)
     if tmp_path is not None:
-        stub = tmp_path / "stub_parsed.json"
-        stub.write_text('{"primitives": []}')
-        monkeypatch.setattr(app.jobs, "parsed_path", lambda *_a: stub)
-        # `app.main.save_match_json` pre-flight also calls parsed_path —
-        # its binding is the import-time `from app.storage import …`, so
-        # patch the `app.main` namespace too.
-        monkeypatch.setattr(app.main, "parsed_path", lambda *_a: stub)
+        # Worker + `app.main.save_match_json` pre-flight resolve the parsed
+        # artifact via `parsed_key` + the blobstore now: write a stub blob
+        # under a unique key and point both namespaces' `parsed_key` at it.
+        from app.blobstore import get_blobstore
+        stub_key = f"parsed/stub-{tmp_path.name}/stub.json"
+        get_blobstore().put_json(stub_key, {"primitives": []})
+        monkeypatch.setattr(app.jobs, "parsed_key", lambda *_a: stub_key)
+        monkeypatch.setattr(app.main, "parsed_key", lambda *_a: stub_key)
     return call_log
 
 
@@ -844,9 +845,10 @@ def test_save_match_worker_suppresses_contained_smd(monkeypatch, tmp_path):
     monkeypatch.setattr(app.library, "build_handle_index", lambda _p: {})
     monkeypatch.setattr(app.matching, "build_entity_shapes",
                         lambda _p, _hi: dict(shapes))
-    stub = tmp_path / "stub_parsed.json"
-    stub.write_text('{"primitives": []}')
-    monkeypatch.setattr(app.jobs, "parsed_path", lambda *_a: stub)
+    from app.blobstore import get_blobstore
+    stub_key = f"parsed/stub-{tmp_path.name}/stub.json"
+    get_blobstore().put_json(stub_key, {"primitives": []})
+    monkeypatch.setattr(app.jobs, "parsed_key", lambda *_a: stub_key)
 
     result = _save_match_worker(
         version.id, fid, str(match_path(version.id, fid))

@@ -116,64 +116,79 @@ def _version_payload(client, pid, vid) -> dict:
 
 
 # ---- discover-worker gate (unit, no process pool) ------------------------
+# Workers consume blob keys (an absolute path is a valid local-backend key),
+# and write their outputs through the blobstore — assertions go through the
+# same keys. Unique version ids per test keep the shared DATA_DIR clean.
 def test_discover_worker_parks_for_pick_on_multi_layout(tmp_path):
     from app import jobs
+    from app.blobstore import get_blobstore
+    from app.storage import layer_manifest_key, layout_manifest_key, layout_preview_svg_key
 
+    blobs = get_blobstore()
+    vid = f"v-{tmp_path.name}"
     dxf = _multi_paperspace_dxf(tmp_path)
-    preview = tmp_path / "preview"
-    result = jobs._discover_layers_worker("fx", str(dxf), str(preview))
+    result = jobs._discover_layers_worker(vid, "fx", str(dxf))
     assert result.get("needs_layout_pick") is True
     assert result["layout_count"] == 2
-    manifest = json.loads((preview / "layouts" / "layouts.json").read_text())
+    manifest = blobs.get_json(layout_manifest_key(vid, "fx"))
     names = {L["name"] for L in manifest["layouts"]}
     assert names == {"Layout1", "Layout2"}
     for L in manifest["layouts"]:
-        svg = (preview / "layouts" / L["svg_filename"]).read_text()
+        svg = blobs.get_text(layout_preview_svg_key(vid, "fx", L["safe_name"]))
         assert svg.startswith("<svg")
     # Layer manifest must NOT be written yet — we're gated on the tab pick.
-    assert not (preview / "layers.json").exists()
+    assert not blobs.exists(layer_manifest_key(vid, "fx"))
 
 
 def test_discover_worker_no_pick_for_single_layout(tmp_path):
     from app import jobs
+    from app.blobstore import get_blobstore
+    from app.storage import layer_manifest_key, layout_manifest_key
 
+    blobs = get_blobstore()
+    vid = f"v-{tmp_path.name}"
     dxf = _single_paperspace_dxf(tmp_path)
-    preview = tmp_path / "preview"
-    result = jobs._discover_layers_worker("fx", str(dxf), str(preview))
+    result = jobs._discover_layers_worker(vid, "fx", str(dxf))
     assert not result.get("needs_layout_pick")
     assert result["source_layout"] == "Layout1"
     # Layer manifest written; no layout picker.
-    assert (preview / "layers.json").exists()
-    assert not (preview / "layouts" / "layouts.json").exists()
+    assert blobs.exists(layer_manifest_key(vid, "fx"))
+    assert not blobs.exists(layout_manifest_key(vid, "fx"))
 
 
 def test_discover_worker_ignores_viewport_only_framing_tab(tmp_path):
     """A real-geometry layout + a viewport-only framing tab is NOT ambiguous:
     the framing tab counts as zero content, so no picker — straight to layers."""
     from app import jobs
+    from app.blobstore import get_blobstore
+    from app.storage import layer_manifest_key, layout_manifest_key
 
+    blobs = get_blobstore()
+    vid = f"v-{tmp_path.name}"
     dxf = _real_plus_viewport_dxf(tmp_path)
-    preview = tmp_path / "preview"
-    result = jobs._discover_layers_worker("fx", str(dxf), str(preview))
+    result = jobs._discover_layers_worker(vid, "fx", str(dxf))
     assert not result.get("needs_layout_pick")
     assert result["source_layout"] == "Layout1"
-    assert (preview / "layers.json").exists()
-    assert not (preview / "layouts" / "layouts.json").exists()
+    assert blobs.exists(layer_manifest_key(vid, "fx"))
+    assert not blobs.exists(layout_manifest_key(vid, "fx"))
 
 
 def test_discover_worker_explicit_layout_skips_gate(tmp_path):
     """Re-running with an explicit tab choice must not re-trigger the picker
     even though >1 layout has geometry."""
     from app import jobs
+    from app.blobstore import get_blobstore
+    from app.storage import layer_manifest_key
 
+    blobs = get_blobstore()
+    vid = f"v-{tmp_path.name}"
     dxf = _multi_paperspace_dxf(tmp_path)
-    preview = tmp_path / "preview"
     result = jobs._discover_layers_worker(
-        "fx", str(dxf), str(preview), layout_name="Layout2"
+        vid, "fx", str(dxf), layout_name="Layout2"
     )
     assert not result.get("needs_layout_pick")
     assert result["source_layout"] == "Layout2"
-    assert (preview / "layers.json").exists()
+    assert blobs.exists(layer_manifest_key(vid, "fx"))
 
 
 # ---- chosen_layout persistence (FileStore) -------------------------------

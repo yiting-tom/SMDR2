@@ -14,10 +14,10 @@
 
 ## 3. Phase 1 — BlobStore 與 MinIO
 
-- [ ] 3.1 `app/storage.py` 加 `BlobStore` protocol + local-FS 實作(預設,行為不變)
-- [ ] 3.2 boto3 S3 實作(`S3_ENDPOINT_URL` 觸發),key = 現行相對路徑;大檔 streaming 到 per-request scratch
-- [ ] 3.3 jobs worker 與 endpoint 的檔案讀寫全部改走 BlobStore;上傳限制 `SMDR2_MAX_UPLOAD_MB` 預設上修 200(SEC-001)
-- [ ] 3.4 compose 環境驗證:web-1 上傳 → worker 處理 → web-2 讀結果;150MB 大檔記憶體/scratch 實測(設計 Risk #1)
+- [x] 3.1 `app/storage.py` 加 `BlobStore` protocol + local-FS 實作(預設,行為不變)
+- [x] 3.2 boto3 S3 實作(`S3_ENDPOINT_URL` 觸發),key = 現行相對路徑;大檔 streaming 到 per-request scratch
+- [x] 3.3 jobs worker 與 endpoint 的檔案讀寫全部改走 BlobStore;上傳限制 `SMDR2_MAX_UPLOAD_MB` 預設上修 200(SEC-001)
+- [x] 3.4 compose 環境驗證:web-1 上傳 → worker 處理 → web-2 讀結果;150MB 大檔記憶體/scratch 實測(設計 Risk #1)
 
 ## 4. Phase 2 — jobs 表與 worker 拆分(依賴 §2 §3)
 

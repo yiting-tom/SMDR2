@@ -68,7 +68,18 @@ def _engine_for(url: str) -> sqlalchemy.Engine:
                     connect_args={"check_same_thread": False},
                 )
             else:
-                eng = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+                # READ COMMITTED: every statement sees the latest committed
+                # row versions. InnoDB's REPEATABLE READ default pins a
+                # snapshot per transaction — combined with a long-lived
+                # connection, one replica can keep serving a frozen view of
+                # rows another replica just updated (observed: stale file
+                # status across web replicas).
+                eng = create_engine(
+                    url,
+                    pool_pre_ping=True,
+                    pool_recycle=3600,
+                    isolation_level="READ COMMITTED",
+                )
             _engines[url] = eng
         return eng
 

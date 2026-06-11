@@ -32,26 +32,27 @@ worker code; see tests.) The long-form rationale lives in `_save_match_worker`.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
 import traceback
 import uuid
 from concurrent.futures import Future, ProcessPoolExecutor
-from pathlib import Path
 from threading import RLock
 from typing import Any
 
+from app.blobstore import get_blobstore
 from app.storage import (
-    DATA_DIR,
-    layer_preview_dir,
-    layer_preview_primitives_path,
-    match_path,
-    parsed_path,
-    prematch_path,
-    rule_check_path,
-    upload_path,
+    layer_manifest_key,
+    layer_preview_primitives_key,
+    layer_preview_svg_key,
+    layout_manifest_key,
+    layout_preview_svg_key,
+    match_key,
+    parsed_key,
+    prematch_key,
+    rule_check_key,
+    upload_key,
 )
 
 
@@ -124,17 +125,17 @@ def _preprocess_worker(
     # The Phase-1 transient cache is rendered from the SAME `chosen_layout`
     # as this preprocess (both resolve it off the file row), so reusing it
     # is layout-consistent — no extra cache key needed for `layout_name`.
+    blobs = get_blobstore()
     use_cache = (
         user_unit_override is None
         and transient_primitives
-        and Path(transient_primitives).exists()
+        and blobs.exists(transient_primitives)
     )
     recover_notes: dict[str, Any] | None = None
     source_layout: str | None = None
     source_is_paperspace: bool = False
     if use_cache:
-        with open(transient_primitives) as f:
-            cached = json.load(f)
+        cached = blobs.get_json(transient_primitives)
         primitives = cached["primitives"]
         bbox = tuple(cached["bbox"]) if cached.get("bbox") else None
         background = cached.get("background", "#ffffff")
@@ -149,10 +150,11 @@ def _preprocess_worker(
         source_layout = cached.get("source_layout")
         source_is_paperspace = bool(cached.get("source_is_paperspace", False))
     else:
-        out = flatten_for_render(
-            src, user_unit_override=user_unit_override, file_id=file_id,
-            layout_name=layout_name,
-        )
+        with blobs.local_input(src) as src_path:
+            out = flatten_for_render(
+                str(src_path), user_unit_override=user_unit_override,
+                file_id=file_id, layout_name=layout_name,
+            )
         primitives = out.primitives
         bbox = out.bbox
         background = out.background
@@ -166,20 +168,15 @@ def _preprocess_worker(
     if selected_layers is not None:
         primitives = filter_primitives(primitives, selected_layers)
 
-    Path(parsed_dst).parent.mkdir(parents=True, exist_ok=True)
-    with open(parsed_dst, "w") as f:
-        json.dump(
-            {
-                "primitives": primitives,
-                "bbox": bbox,
-                "background": background,
-                "selected_layers": (
-                    list(selected_layers) if selected_layers is not None else None
-                ),
-                "source_layout": source_layout,
-            },
-            f,
-        )
+    blobs.put_json(parsed_dst, {
+        "primitives": primitives,
+        "bbox": bbox,
+        "background": background,
+        "selected_layers": (
+            list(selected_layers) if selected_layers is not None else None
+        ),
+        "source_layout": source_layout,
+    })
 
     # 3. Build shape index for matching
     handle_index = build_handle_index(primitives)
@@ -248,19 +245,14 @@ def _preprocess_worker(
         k: sorted(v) for k, v in by_class_sets.items()
     }
 
-    Path(prematch_dst).parent.mkdir(parents=True, exist_ok=True)
-    with open(prematch_dst, "w") as f:
-        json.dump(
-            {"by_class": by_class, "total": sum(len(v) for v in by_class.values())},
-            f,
-        )
+    blobs.put_json(prematch_dst, {
+        "by_class": by_class,
+        "total": sum(len(v) for v in by_class.values()),
+    })
 
     # 5. Discard the transient primitives cache — Phase 2 succeeded.
     if transient_primitives:
-        try:
-            Path(transient_primitives).unlink()
-        except FileNotFoundError:
-            pass
+        blobs.delete(transient_primitives)
 
     # `detector_factor` is what the auto-rescale detector *would* have
     # chosen for this file's `(insunits, pre-rescale diagonal)`. The
@@ -348,17 +340,17 @@ def submit_preprocess(
             "error": None,
             "user_unit_override_requested": user_unit_override,
         }
-    transient = layer_preview_primitives_path(version_id, file_id)
+    transient = layer_preview_primitives_key(version_id, file_id)
     fut = _get_executor().submit(
         _preprocess_worker,
         version_id,
         file_id,
-        str(upload_path(file_id)),
-        str(parsed_path(version_id, file_id)),
-        str(prematch_path(version_id, file_id)),
+        upload_key(file_id),
+        parsed_key(version_id, file_id),
+        prematch_key(version_id, file_id),
         library_id,
         list(selected_layers) if selected_layers is not None else None,
-        str(transient),
+        transient,
         _current_dev_overrides() or None,
         user_unit_override,
         layout_name,
@@ -490,13 +482,8 @@ def _invalidate_match_after_rescale(version_id: str, file_id: str) -> None:
     cheaper and safer than scaling the JSON in place. See the
     `dxf-pipeline` spec / `auto-normalize-unit-suspect-dxf` change."""
     from app.files import FILE_STORE
-    from app.storage import match_path
 
-    mp = match_path(version_id, file_id)
-    try:
-        mp.unlink()
-    except FileNotFoundError:
-        pass
+    get_blobstore().delete(match_key(version_id, file_id))
     FILE_STORE.set_match_saved(version_id, file_id, False)
 
 
@@ -541,8 +528,8 @@ def _maybe_clear_redundant_unit_override(
 # ---- Discover-layers worker (Phase 1) ------------------------------------
 def _build_layout_picker(
     src: str,
+    version_id: str,
     file_id: str,
-    preview: Path,
     content_layouts: list[dict[str, Any]],
 ) -> int:
     """Render one SVG thumbnail per candidate AutoCAD tab and write the
@@ -585,19 +572,21 @@ def _build_layout_picker(
         # Not genuinely ambiguous — don't write a manifest (keeps
         # has_layout_options false and lets the worker proceed normally).
         return len(rendered_entries)
-    layouts_dir = preview / "layouts"
-    layouts_dir.mkdir(parents=True, exist_ok=True)
+    blobs = get_blobstore()
     for svg, entry in rendered_entries:
-        (layouts_dir / entry["svg_filename"]).write_text(svg)
+        blobs.put_text(
+            layout_preview_svg_key(version_id, file_id, entry["safe_name"]),
+            svg,
+        )
     manifest = {"file_id": file_id, "layouts": [e for _, e in rendered_entries]}
-    (layouts_dir / "layouts.json").write_text(json.dumps(manifest))
+    blobs.put_json(layout_manifest_key(version_id, file_id), manifest)
     return len(rendered_entries)
 
 
 def _discover_layers_worker(
+    version_id: str,
     file_id: str,
     src: str,
-    preview_dir: str,
     layout_name: str | None = None,
 ) -> dict[str, Any]:
     """Parse a DXF once, render per-layer SVG thumbnails, and persist the
@@ -624,29 +613,33 @@ def _discover_layers_worker(
         sanitize_layer_name,
     )
 
-    out = flatten_for_render(src, file_id=file_id, layout_name=layout_name)
+    blobs = get_blobstore()
+    with blobs.local_input(src) as src_path:
+        src_local = str(src_path)
+        out = flatten_for_render(
+            src_local, file_id=file_id, layout_name=layout_name
+        )
 
-    preview = Path(preview_dir)
-    preview.mkdir(parents=True, exist_ok=True)
-
-    if layout_name is None and out.source_is_paperspace:
-        inventory = enumerate_layouts(src, file_id=file_id)
-        content_paper = [
-            L for L in inventory
-            if L["is_paperspace"] and L["entity_count"] > 0
-        ]
-        # `_build_layout_picker` flattens each candidate and only commits a
-        # manifest when >= 2 tabs actually render; a return < 2 means the
-        # ambiguity dissolved (viewport-/text-only tabs), so fall through to
-        # layer discovery on the already auto-resolved tab (`out`).
-        if len(content_paper) >= 2:
-            n = _build_layout_picker(src, file_id, preview, content_paper)
-            if n >= 2:
-                return {
-                    "file_id": file_id,
-                    "needs_layout_pick": True,
-                    "layout_count": n,
-                }
+        if layout_name is None and out.source_is_paperspace:
+            inventory = enumerate_layouts(src_local, file_id=file_id)
+            content_paper = [
+                L for L in inventory
+                if L["is_paperspace"] and L["entity_count"] > 0
+            ]
+            # `_build_layout_picker` flattens each candidate and only commits a
+            # manifest when >= 2 tabs actually render; a return < 2 means the
+            # ambiguity dissolved (viewport-/text-only tabs), so fall through to
+            # layer discovery on the already auto-resolved tab (`out`).
+            if len(content_paper) >= 2:
+                n = _build_layout_picker(
+                    src_local, version_id, file_id, content_paper
+                )
+                if n >= 2:
+                    return {
+                        "file_id": file_id,
+                        "needs_layout_pick": True,
+                        "layout_count": n,
+                    }
 
     by_layer = group_primitives_by_layer(out.primitives)
 
@@ -658,7 +651,7 @@ def _discover_layers_worker(
         svg = render_layer_svg(
             out.primitives, indices, out.bbox, background=out.background,
         )
-        (preview / f"{safe}.svg").write_text(svg)
+        blobs.put_text(layer_preview_svg_key(version_id, file_id, safe), svg)
         layers.append({
             "name": name,
             "safe_name": safe,
@@ -673,13 +666,13 @@ def _discover_layers_worker(
         "background": out.background,
         "source_layout": out.source_layout,
     }
-    (preview / "layers.json").write_text(json.dumps(manifest))
+    blobs.put_json(layer_manifest_key(version_id, file_id), manifest)
 
     # Transient primitives cache — Phase 2 picks it up to skip re-parsing.
     # The `recover_notes` carry-over lets Phase 2 persist the audit summary
     # without re-opening the DXF when it reuses this cache; `source_layout`
     # lets Phase 2 stamp the "tab: <name>" badge without re-opening either.
-    (preview / "primitives.json").write_text(json.dumps({
+    blobs.put_json(layer_preview_primitives_key(version_id, file_id), {
         "primitives": out.primitives,
         "bbox": out.bbox,
         "background": out.background,
@@ -688,7 +681,7 @@ def _discover_layers_worker(
         "recover_notes": out.recover_notes,
         "source_layout": out.source_layout,
         "source_is_paperspace": out.source_is_paperspace,
-    }))
+    })
 
     return {
         "file_id": file_id,
@@ -731,9 +724,9 @@ def submit_discover_layers(
         }
     fut = _get_executor().submit(
         _discover_layers_worker,
+        version_id,
         file_id,
-        str(upload_path(file_id)),
-        str(layer_preview_dir(version_id, file_id)),
+        upload_key(file_id),
         layout_name,
     )
     fut.add_done_callback(lambda f: _on_discover_done(job_id, f))
@@ -817,16 +810,10 @@ def _rule_check_worker(
     with materialise_bundle(product, version_id, files) as bundle_dir:
         result = check_rules(product_id, bundle_dir)
 
-    dst_path = Path(dst)
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst_path, "w") as fp:
-        json.dump(result, fp, indent=2)
+    get_blobstore().put_json(dst, result, indent=2)
 
     n_pass = sum(1 for v in result.values() if v.get("pass"))
-    try:
-        saved_to = str(dst_path.relative_to(DATA_DIR.parent))
-    except ValueError:
-        saved_to = str(dst_path)
+    saved_to = dst
     return {
         "product_id": product_id,
         "version_id": version_id,
@@ -869,7 +856,7 @@ def submit_rule_check(
         product_id,
         version_id,
         list(file_ids),
-        str(rule_check_path(version_id)),
+        rule_check_key(version_id),
     )
     fut.add_done_callback(lambda f: _on_rule_check_done(job_id, f))
     with _lock:
@@ -961,11 +948,11 @@ def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any
     classes, configs_by_class, templates_by_class = store.load_library(
         version.library_id
     )
-    pp = parsed_path(version_id, file_id)
-    if not pp.exists():
-        raise RuntimeError(f"parsed file missing for {file_id!r}: {pp}")
-    with open(pp) as f:
-        parsed = json.load(f)
+    blobs = get_blobstore()
+    pk = parsed_key(version_id, file_id)
+    if not blobs.exists(pk):
+        raise RuntimeError(f"parsed file missing for {file_id!r}: {pk}")
+    parsed = blobs.get_json(pk)
     hi = build_handle_index(parsed["primitives"])
     shapes = build_entity_shapes(parsed["primitives"], hi)
 
@@ -1045,12 +1032,9 @@ def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any
         prefix = parsed[0] if parsed else None
         side_counts[prefix if prefix else "unassigned"] += len(instances)
 
-    dst_path = Path(dst)
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst_path, "w") as f:
-        # Compact separators: the rule-checker consumes this machine-to-machine,
-        # and indent=2 was ~2.3x larger on 10k-instance (BGA) saves.
-        json.dump(out, f, separators=(",", ":"))
+    # Compact separators: the rule-checker consumes this machine-to-machine,
+    # and indent=2 was ~2.3x larger on 10k-instance (BGA) saves.
+    blobs.put_json(dst, out, separators=(",", ":"))
 
     # Refresh the not-side-aware pre-match snapshot from this same live scan so
     # the auto-shown overlay on the next viewer load reflects the current
@@ -1061,26 +1045,17 @@ def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any
     # stays, i.e. no worse than before this change.
     try:
         pm_by_class = {k: sorted(v) for k, v in prematch_sets.items()}
-        pm_path = Path(prematch_path(version_id, file_id))
-        pm_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(pm_path, "w") as f:
-            json.dump(
-                {
-                    "by_class": pm_by_class,
-                    "total": sum(len(v) for v in pm_by_class.values()),
-                },
-                f,
-            )
+        blobs.put_json(prematch_key(version_id, file_id), {
+            "by_class": pm_by_class,
+            "total": sum(len(v) for v in pm_by_class.values()),
+        })
     except Exception:
         logger.warning(
             "save_match: failed to refresh pre-match snapshot for %s",
             file_id, exc_info=True,
         )
 
-    try:
-        saved_to = str(dst_path.relative_to(DATA_DIR.parent))
-    except ValueError:
-        saved_to = str(dst_path)
+    saved_to = dst
     return {
         "version_id": version_id,
         "file_id": file_id,
@@ -1119,7 +1094,7 @@ def submit_save_match(version_id: str, file_id: str) -> str:
         _save_match_worker,
         version_id,
         file_id,
-        str(match_path(version_id, file_id)),
+        match_key(version_id, file_id),
     )
     fut.add_done_callback(lambda f: _on_save_match_done(job_id, f))
     with _lock:
@@ -1244,9 +1219,9 @@ def submit_reprocess_all(*, kind: str = "reprocess-all") -> str:
             _preprocess_worker,
             rec.version_id,
             rec.id,
-            str(upload_path(rec.id)),
-            str(parsed_path(rec.version_id, rec.id)),
-            str(prematch_path(rec.version_id, rec.id)),
+            upload_key(rec.id),
+            parsed_key(rec.version_id, rec.id),
+            prematch_key(rec.version_id, rec.id),
             lib_by_version[rec.version_id],
             list(rec.selected_layers) if rec.selected_layers is not None else None,
             None,                     # transient_primitives: re-parse from source
