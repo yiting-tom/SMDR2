@@ -115,6 +115,11 @@ class WorkerLoop:
                     "stale jobs: requeued=%d failed=%d", requeued, failed
                 )
             store.prune(now)
+            try:
+                from app.auth import AUTH_STORE
+                AUTH_STORE.prune_sessions(now)
+            except Exception:
+                logger.exception("session prune failed; continuing")
             self._last_maintenance = now
         return activity
 

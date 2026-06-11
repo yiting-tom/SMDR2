@@ -25,7 +25,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -247,6 +252,12 @@ def _ensure_test_dxf_registered() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Idempotent BOOTSTRAP_ADMINS seeding (specs/authorization) — the only
+    # way the first admin comes into existence.
+    from app.auth import AUTH_STORE
+    admins = [u for u in os.environ.get("BOOTSTRAP_ADMINS", "").split(",") if u.strip()]
+    if admins:
+        AUTH_STORE.bootstrap_admins(admins)
     _ensure_test_dxf_registered()
     yield
     jobs.shutdown()
@@ -264,6 +275,107 @@ app = FastAPI(title="SMDR2", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+
+# ---- Auth (BFF) -----------------------------------------------------------
+# specs/auth-session: backend-only OIDC; HttpOnly session cookie; bypass
+# mode short-circuits everything (dev / tests).
+CSRF_COOKIE = "conform_csrf"
+
+
+def _cookie_secure() -> bool:
+    return os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true")
+
+
+async def current_identity(request: Request):
+    """The dependency every guarded endpoint hangs off (group 6 wires it
+    in). Bypass mode → synthetic admin; oidc mode → session cookie +
+    CSRF check for mutating methods."""
+    from app.auth import get_identity
+    return get_identity(request)
+
+
+@app.get("/auth/login")
+async def auth_login(next: str = "/"):
+    from app import oidc as oidc_mod
+    if os.environ.get("SMDR2_AUTH_MODE", "bypass") == "bypass":
+        return RedirectResponse("/", status_code=302)
+    if not next.startswith("/") or next.startswith("//"):
+        next = "/"  # open-redirect guard: only same-origin paths
+    cfg = oidc_mod.OidcConfig.from_env()
+    url, cookie = oidc_mod.build_login(cfg, next)
+    r = RedirectResponse(url, status_code=302)
+    r.set_cookie(
+        oidc_mod.STATE_COOKIE, cookie, max_age=600,
+        httponly=True, samesite="lax", secure=_cookie_secure(),
+    )
+    return r
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, code: str = "", state: str = ""):
+    from app import oidc as oidc_mod
+    from app.auth import AUTH_STORE, SESSION_COOKIE
+    state_cookie = request.cookies.get(oidc_mod.STATE_COOKIE)
+    if not state_cookie or not code:
+        raise HTTPException(status_code=400, detail="login flow state missing")
+    try:
+        claims, next_path = oidc_mod.exchange_code(
+            oidc_mod.OidcConfig.from_env(), code, state, state_cookie,
+        )
+    except oidc_mod.OidcError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    user, first_login = AUTH_STORE.upsert_user_from_claims(dict(claims))
+    token, csrf = AUTH_STORE.create_session(user.userid)
+    r = RedirectResponse(next_path, status_code=302)
+    r.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax",
+        secure=_cookie_secure(),
+    )
+    # CSRF token rides a readable cookie; the frontend echoes it back in
+    # the X-CSRF-Token header on every mutating request.
+    r.set_cookie(
+        CSRF_COOKIE, csrf, httponly=False, samesite="lax",
+        secure=_cookie_secure(),
+    )
+    r.delete_cookie(oidc_mod.STATE_COOKIE)
+    return r
+
+
+@app.post("/auth/logout")
+async def auth_logout(request: Request):
+    from app.auth import AUTH_STORE, SESSION_COOKIE
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        AUTH_STORE.delete_session(token)
+    r = JSONResponse({"logged_out": True})
+    r.delete_cookie(SESSION_COOKIE)
+    r.delete_cookie(CSRF_COOKIE)
+    return r
+
+
+@app.get("/api/me")
+async def me(request: Request):
+    from app.auth import AUTH_STORE, get_identity
+    ident = get_identity(request)
+    grants = [
+        g.to_dict() for g in (
+            AUTH_STORE.list_grants("user", ident.userid)
+            + (AUTH_STORE.list_grants("dept", ident.deptid)
+               if ident.deptid else [])
+        )
+    ]
+    return {
+        "userid": ident.userid,
+        "deptid": ident.deptid,
+        "name": ident.name,
+        "email": ident.email,
+        "source": ident.source,
+        "is_admin": ident.is_bypass or any(
+            g["role"] == "admin" for g in grants
+        ),
+        "grants": grants,
+    }
 
 
 # ---- Pages --------------------------------------------------------------

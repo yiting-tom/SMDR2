@@ -25,8 +25,10 @@ dept grants to editor later is a one-line change):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -45,6 +47,13 @@ _ROLE_RANK = {"viewer": 1, "editor": 2, "admin": 3}
 # Edit-lock parameters (decided 2026-06-10): heartbeat every 30s, a lock
 # whose heartbeat is older than TTL is a zombie and may be stolen.
 LOCK_TTL_SECONDS = 300.0
+
+# Session lifetimes (docs/schema-auth-jobs.md §4): idle 8h, absolute 24h.
+# The absolute cap is also the answer to "how long can a deactivated
+# account keep using an existing session".
+SESSION_IDLE_SECONDS = 8 * 3600.0
+SESSION_ABS_SECONDS = 24 * 3600.0
+SESSION_COOKIE = "conform_session"
 
 SEED_CUSTOMER_ID = "uncategorized"
 
@@ -105,6 +114,17 @@ CREATE TABLE IF NOT EXISTS product_edit_locks (
     acquired_at  REAL NOT NULL,
     heartbeat_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id           TEXT PRIMARY KEY,
+    userid       TEXT NOT NULL,
+    created_at   REAL NOT NULL,
+    last_seen_at REAL NOT NULL,
+    expires_at   REAL NOT NULL,
+    csrf_token   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user    ON sessions(userid);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 """
 
 
@@ -583,20 +603,104 @@ class AuthStore:
         return cur.rowcount > 0
 
 
+    # ---- sessions (BFF server-side; docs/schema-auth-jobs.md §4) ----------
+    def create_session(self, userid: str, now: float | None = None) -> tuple[str, str]:
+        """Mint a session. Returns (cookie_token, csrf_token) — the DB
+        stores only SHA-256(cookie_token), never the plaintext."""
+        now = time.time() if now is None else now
+        token = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        with self.lock, self.conn:
+            self.conn.execute(
+                "INSERT INTO sessions (id, userid, created_at, last_seen_at,"
+                " expires_at, csrf_token) VALUES (?,?,?,?,?,?)",
+                (hashlib.sha256(token.encode()).hexdigest(), userid,
+                 now, now, now + SESSION_ABS_SECONDS, csrf),
+            )
+        return token, csrf
+
+    def resolve_session(
+        self, token: str, now: float | None = None,
+    ) -> dict | None:
+        """Live session → {userid, deptid, name, email, csrf_token}, else
+        None. Enforces idle (8h since last_seen) and absolute (24h)
+        lifetimes; refreshes last_seen at most once a minute."""
+        now = time.time() if now is None else now
+        sid = hashlib.sha256(token.encode()).hexdigest()
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+        if row is None:
+            return None
+        if now > row["expires_at"] or now - row["last_seen_at"] > SESSION_IDLE_SECONDS:
+            return None
+        if now - row["last_seen_at"] > 60.0:
+            with self.lock, self.conn:
+                self.conn.execute(
+                    "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+                    (now, sid),
+                )
+        user = self.get_user(row["userid"])
+        return {
+            "userid": row["userid"],
+            "deptid": (user.deptid if user else "") or "",
+            "name": (user.name if user else "") or "",
+            "email": (user.email if user else "") or "",
+            "csrf_token": row["csrf_token"],
+        }
+
+    def delete_session(self, token: str) -> bool:
+        sid = hashlib.sha256(token.encode()).hexdigest()
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM sessions WHERE id = ?", (sid,)
+            )
+        return cur.rowcount > 0
+
+    def prune_sessions(self, now: float | None = None) -> int:
+        """Drop sessions past either lifetime (worker-loop maintenance)."""
+        now = time.time() if now is None else now
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM sessions WHERE expires_at < ?"
+                " OR last_seen_at < ?",
+                (now, now - SESSION_IDLE_SECONDS),
+            )
+        return cur.rowcount
+
+
+# Module-level singleton (same pattern as FILE_STORE / PRODUCT_STORE).
+AUTH_STORE = AuthStore()
+
+
 # ---- FastAPI dependency ----------------------------------------------------
-def get_identity() -> Identity:
+def get_identity(request=None) -> Identity:
     """Resolve the caller. Modes (SMDR2_AUTH_MODE):
 
-    - 'bypass' (default until the BFF lands): synthetic admin identity from
-      SMDR2_DEV_USER — current single-user behaviour, keeps the suite green
-      the day this dependency is wired into endpoints.
-    - 'oidc': session-cookie lookup; lands in Phase 3. Until then → 401.
+    - 'bypass' (default until cutover): synthetic admin identity from
+      SMDR2_DEV_USER — current single-user behaviour, keeps the suite
+      green with the dependency wired into endpoints.
+    - 'oidc': session-cookie lookup against AUTH_STORE; mutating methods
+      additionally require the X-CSRF-Token header to match the session.
 
     Tests override this via `app.dependency_overrides[get_identity]`.
     """
+    from fastapi import HTTPException
     mode = os.environ.get("SMDR2_AUTH_MODE", "bypass")
     if mode == "bypass":
         dev_user = os.environ.get("SMDR2_DEV_USER", "dev")
         return Identity(userid=dev_user, source="bypass")
-    from fastapi import HTTPException
-    raise HTTPException(status_code=401, detail="not authenticated")
+    token = request.cookies.get(SESSION_COOKIE) if request is not None else None
+    if not token:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    sess = AUTH_STORE.resolve_session(token)
+    if sess is None:
+        raise HTTPException(status_code=401, detail="session expired")
+    if request is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
+        if request.headers.get("X-CSRF-Token") != sess["csrf_token"]:
+            raise HTTPException(status_code=403, detail="CSRF token mismatch")
+    return Identity(
+        userid=sess["userid"], deptid=sess["deptid"],
+        name=sess["name"], email=sess["email"], source="session",
+    )

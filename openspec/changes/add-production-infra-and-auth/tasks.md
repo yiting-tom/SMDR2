@@ -30,11 +30,11 @@
 
 ## 5. Phase 3 — BFF 登入與 session(卡 Keycloak 資訊;compose 替身可先行)
 
-- [ ] 5.1 Alembic migration:`sessions` 表;Authlib OIDC client(雙 URL:ISSUER/INTERNAL_BASE)
-- [ ] 5.2 `/auth/login`、`/auth/callback`、`/auth/logout` 路由;login upsert 走 `AuthStore.upsert_user_from_claims`;session cookie(SHA-256 落庫、idle 8h/絕對 24h)
-- [ ] 5.3 CSRF(`X-CSRF-Token`)+ 內部端點豁免清單;session prune 掛 worker 迴圈
-- [ ] 5.4 `get_identity` 的 oidc 分支接 session 查詢;`BOOTSTRAP_ADMINS` 啟動 seeding
-- [ ] 5.5 compose Keycloak 四帳號端到端登入測試(admin1 首登即 admin;viewer1 無 grant 全空)
+- [x] 5.1 Alembic migration:`sessions` 表;Authlib OIDC client(雙 URL:ISSUER/INTERNAL_BASE)
+- [x] 5.2 `/auth/login`、`/auth/callback`、`/auth/logout` 路由;login upsert 走 `AuthStore.upsert_user_from_claims`;session cookie(SHA-256 落庫、idle 8h/絕對 24h)
+- [x] 5.3 CSRF(`X-CSRF-Token`)+ 內部端點豁免清單;session prune 掛 worker 迴圈
+- [x] 5.4 `get_identity` 的 oidc 分支接 session 查詢;`BOOTSTRAP_ADMINS` 啟動 seeding
+- [x] 5.5 compose Keycloak 四帳號端到端登入測試(admin1 首登即 admin;viewer1 無 grant 全空)
 
 ## 6. Phase 3 — 權限掛載與編輯鎖(依賴 §5)
 
