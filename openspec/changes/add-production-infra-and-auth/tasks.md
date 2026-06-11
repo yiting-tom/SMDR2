@@ -6,11 +6,11 @@
 
 ## 2. Phase 1 — DB 連線層與 MariaDB(卡 DBA 資訊;compose 可先行)
 
-- [ ] 2.1 引入 SQLAlchemy Core + Alembic;新增 `app/db.py` 連線模組(`DATABASE_URL`,未設 fallback SQLite 檔案;pool_pre_ping)
-- [ ] 2.2 第一份 Alembic migration:既有七張表 + auth 五張表(MariaDB 方言對照 schema 文件 §8)
-- [ ] 2.3 各 store(files/products/versions/library/auth)改走 `app/db.py`;`*_SCHEMA` 常數降級為測試用
-- [ ] 2.4 測試策略落地:suite 維持 SQLite;新增 compose MariaDB 上的 smoke(CI 可選跑)
-- [ ] 2.5 suite 全綠 + compose 環境對 MariaDB 手動 smoke(上傳→match→rule-check 全流程)
+- [x] 2.1 引入 SQLAlchemy Core + Alembic;新增 `app/db.py` 連線模組(`DATABASE_URL`,未設 fallback SQLite 檔案;pool_pre_ping)
+- [x] 2.2 第一份 Alembic migration:既有七張表 + auth 五張表(MariaDB 方言對照 schema 文件 §8)
+- [x] 2.3 各 store(files/products/versions/library/auth)改走 `app/db.py`;`*_SCHEMA` 常數降級為測試用
+- [x] 2.4 測試策略落地:suite 維持 SQLite;新增 compose MariaDB 上的 smoke(CI 可選跑)
+- [x] 2.5 suite 全綠 + compose 環境對 MariaDB 手動 smoke(上傳→match→rule-check 全流程)
 
 ## 3. Phase 1 — BlobStore 與 MinIO
 

@@ -19,13 +19,14 @@ from __future__ import annotations
 import json
 import logging
 import math
-import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+from app import db
 
 
 logger = logging.getLogger(__name__)
@@ -402,8 +403,7 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         from app.dbschema import ensure_versioned_schema
         ensure_versioned_schema(path)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = db.connect(path)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
@@ -482,7 +482,7 @@ class Store:
         rows = self.conn.execute(
             "SELECT library_id, name, rank, created_at FROM classes"
         ).fetchall()
-        per_lib: dict[str, list[sqlite3.Row]] = {}
+        per_lib: dict[str, list[db.Row]] = {}
         for r in rows:
             per_lib.setdefault(r["library_id"], []).append(r)
         for lib_id, lib_rows in per_lib.items():
@@ -509,13 +509,13 @@ class Store:
         with self.lock, self.conn:
             self.conn.execute("DELETE FROM libraries WHERE id = ?", (library_id,))
 
-    def list_libraries(self) -> list[sqlite3.Row]:
+    def list_libraries(self) -> list[db.Row]:
         with self.lock:
             return list(self.conn.execute(
                 "SELECT id, name, created_at FROM libraries ORDER BY created_at ASC"
             ))
 
-    def get_library(self, library_id: str) -> sqlite3.Row | None:
+    def get_library(self, library_id: str) -> db.Row | None:
         with self.lock:
             return self.conn.execute(
                 "SELECT id, name, created_at FROM libraries WHERE id = ?",

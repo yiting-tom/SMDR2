@@ -20,12 +20,12 @@ data/uploads/{file_id}.dxf (shared) and data/parsed/{version_id}/{file_id}.json
 from __future__ import annotations
 
 import json as _json
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
 
@@ -301,8 +301,7 @@ class FileStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         ensure_versioned_schema(path)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = db.connect(path)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
@@ -552,7 +551,7 @@ class FileStore:
         return [_row_to_record(r) for r in rows]
 
 
-def _row_to_record(row: sqlite3.Row) -> FileRecord:
+def _row_to_record(row: db.Row) -> FileRecord:
     bbox = None
     if row["bbox_xmin"] is not None:
         bbox = (row["bbox_xmin"], row["bbox_ymin"], row["bbox_xmax"], row["bbox_ymax"])

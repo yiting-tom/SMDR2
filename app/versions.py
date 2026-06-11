@@ -16,13 +16,13 @@ mutating endpoint must reject with 409 (enforced in app.main via the
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
 
@@ -81,7 +81,7 @@ class Version:
         }
 
 
-def _row_to_version(row: sqlite3.Row) -> Version:
+def _row_to_version(row: db.Row) -> Version:
     return Version(
         id=row["id"],
         product_id=row["product_id"],
@@ -110,8 +110,7 @@ class VersionStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         ensure_versioned_schema(path)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = db.connect(path)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
@@ -257,7 +256,7 @@ class VersionStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (vid, product_id, label, library_id, now),
             )
-        except sqlite3.IntegrityError as e:
+        except db.IntegrityError as e:
             raise DuplicateLabel(
                 f"version label {label!r} already exists for product {product_id}"
             ) from e

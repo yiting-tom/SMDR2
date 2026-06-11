@@ -11,12 +11,12 @@ Valid DXF roles are SBT, BD, POD, RING and LID — all five independent.
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
 
@@ -60,8 +60,7 @@ class ProductStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         ensure_versioned_schema(path)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = db.connect(path)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
@@ -94,7 +93,7 @@ def new_product_id() -> str:
     return str(uuid.uuid4())[:12]
 
 
-def _row_to_product(row: sqlite3.Row) -> Product:
+def _row_to_product(row: db.Row) -> Product:
     return Product(
         id=row["id"],
         name=row["name"],

@@ -27,13 +27,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
 
@@ -177,8 +177,7 @@ class AuthStore:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         ensure_versioned_schema(path)
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = db.connect(path)
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
@@ -352,7 +351,7 @@ class AuthStore:
                         "scope_id": scope_id,
                     },
                 )
-        except sqlite3.IntegrityError as e:
+        except db.IntegrityError as e:
             raise GrantError("duplicate grant") from e
         return Grant(gid, grantee_type, grantee_id, role, scope_type,
                      scope_id, granted_by, now)
@@ -497,25 +496,31 @@ class AuthStore:
         refreshes the heartbeat. A zombie lock (heartbeat older than TTL)
         is stolen atomically — two replicas racing cannot both win."""
         now = time.time() if now is None else now
-        with self.lock, self.conn:
-            cur = self.conn.execute(
-                "UPDATE product_edit_locks SET held_by=?, acquired_at=?,"
-                " heartbeat_at=? WHERE product_id=?"
-                " AND (held_by=? OR heartbeat_at < ?)",
-                (userid, now, now, product_id, userid,
-                 now - LOCK_TTL_SECONDS),
-            )
-            if cur.rowcount:
-                return LockStatus(True, userid, now)
-            try:
-                self.conn.execute(
-                    "INSERT INTO product_edit_locks"
-                    " (product_id, held_by, acquired_at, heartbeat_at)"
-                    " VALUES (?,?,?,?)",
-                    (product_id, userid, now, now),
+        # Each step is its own transaction: after an IntegrityError the
+        # failed transaction must be rolled back before the connection is
+        # reused (SQLAlchemy refuses further statements on it), so the
+        # losing-INSERT → who-holds-it SELECT cannot share one `with`.
+        with self.lock:
+            with self.conn:
+                cur = self.conn.execute(
+                    "UPDATE product_edit_locks SET held_by=?, acquired_at=?,"
+                    " heartbeat_at=? WHERE product_id=?"
+                    " AND (held_by=? OR heartbeat_at < ?)",
+                    (userid, now, now, product_id, userid,
+                     now - LOCK_TTL_SECONDS),
                 )
+                if cur.rowcount:
+                    return LockStatus(True, userid, now)
+            try:
+                with self.conn:
+                    self.conn.execute(
+                        "INSERT INTO product_edit_locks"
+                        " (product_id, held_by, acquired_at, heartbeat_at)"
+                        " VALUES (?,?,?,?)",
+                        (product_id, userid, now, now),
+                    )
                 return LockStatus(True, userid, now)
-            except sqlite3.IntegrityError:
+            except db.IntegrityError:
                 row = self.conn.execute(
                     "SELECT held_by, heartbeat_at FROM product_edit_locks"
                     " WHERE product_id=?", (product_id,),

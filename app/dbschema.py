@@ -62,6 +62,11 @@ def ensure_versioned_schema(path: Path | str) -> None:
     Idempotent and order-independent: every store calls this before its
     own CREATE TABLE; only the first call on a legacy file does work.
     """
+    from app.db import resolve_url
+    if not resolve_url(path).startswith("sqlite"):
+        # MariaDB schema is owned by Alembic migrations; the legacy-file
+        # guard is meaningless there (prod starts empty per C9).
+        return
     key = str(Path(path).resolve())
     with _guard_lock:
         if key in _checked_paths:
