@@ -1,8 +1,14 @@
 # 使用者權限管理與 SSO 串接規劃（Keycloak / RBAC）
 
-> 狀態：**討論中、尚未實作**。本文是決策文件（design / open questions），不是施工單。
-> 最後更新：2026-06-09。
-> 待下方 §3、§4 兩組問題定案後，才會收斂成 OpenSpec change（propose-first）。
+> 狀態：**已定案（2026-06-11），施工規格見 [schema-auth-jobs.md](schema-auth-jobs.md)**。
+> 最後更新：2026-06-11。
+>
+> **2026-06-11 勘誤(後出決策推翻本文三處舊結論):**
+> 1. **唯一識別改用 `preferred_username`**(§1 舊定案 `sub` 作廢;`sub` 僅留存備查)。
+> 2. **授權確定自建**,不接 A4(§2 的 A4 三問蒸發);角色三種(admin/editor/viewer),editor/viewer 支援 **global / customer / product 三種範圍**,grantee 支援**個人與部門(deptid)**;新增 **customer = product 上層分群**。
+> 3. **「登入即可看全部」作廢**(§4 第三項)——viewer 也分範圍,無 grant 者登入後看不到任何 product。
+>
+> 另:首登自動建帳(預設無權限)、第一個 admin 走 `BOOTSTRAP_ADMINS` env(§5 收斂)、editor 可簽核**自己**範圍內的版本(無 separation of duties)、session/CSRF/audit/編輯鎖的表結構全在 schema 定稿。
 
 本文回答一個問題：**SMDR2 要加上「非常簡單」的三級權限（Admin / Editor / Viewer），並串接公司 Keycloak SSO 時，模型怎麼設計、有哪些待釐清的決策。**
 
