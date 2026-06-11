@@ -1,0 +1,217 @@
+{
+  "realm": "conform",
+  "enabled": true,
+  "registrationAllowed": false,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "accessTokenLifespan": 300,
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":3,\"max\":255}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false}],\"groups\":[],\"unmanagedAttributePolicy\":\"ENABLED\"}"
+          ]
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "conform-web",
+      "name": "Conform web (BFF)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "dev-client-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://localhost:8080/auth/callback"],
+      "webOrigins": ["http://localhost:8080"],
+      "defaultClientScopes": ["profile", "email"],
+      "protocolMappers": [
+        {
+          "name": "deptid",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "deptid",
+            "claim.name": "deptid",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "deptname",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "deptname",
+            "claim.name": "deptname",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "company",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "company",
+            "claim.name": "company",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "twsitecode",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "twsitecode",
+            "claim.name": "twsitecode",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "supervisorid",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "supervisorid",
+            "claim.name": "supervisorid",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "location",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "location",
+            "claim.name": "location",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "description",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "description",
+            "claim.name": "description",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "app",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": {
+            "claim.name": "app",
+            "claim.value": "conform",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin1",
+      "enabled": true,
+      "email": "admin1@example.test",
+      "emailVerified": true,
+      "firstName": "Ming",
+      "lastName": "Chen",
+      "credentials": [{ "type": "password", "value": "dev", "temporary": false }],
+      "attributes": {
+        "deptid": ["D100"],
+        "deptname": ["封裝工程一部"],
+        "company": ["EXAMPLE-CO"],
+        "twsitecode": ["TW1"],
+        "supervisorid": ["E00001"],
+        "location": ["P3"],
+        "description": ["dev seed — listed in BOOTSTRAP_ADMINS"]
+      }
+    },
+    {
+      "username": "editor1",
+      "enabled": true,
+      "email": "editor1@example.test",
+      "emailVerified": true,
+      "firstName": "Hua",
+      "lastName": "Lin",
+      "credentials": [{ "type": "password", "value": "dev", "temporary": false }],
+      "attributes": {
+        "deptid": ["D100"],
+        "deptname": ["封裝工程一部"],
+        "company": ["EXAMPLE-CO"],
+        "twsitecode": ["TW1"],
+        "supervisorid": ["E00002"],
+        "location": ["P3"],
+        "description": ["dev seed — same dept as admin1"]
+      }
+    },
+    {
+      "username": "editor2",
+      "enabled": true,
+      "email": "editor2@example.test",
+      "emailVerified": true,
+      "firstName": "Wei",
+      "lastName": "Wang",
+      "credentials": [{ "type": "password", "value": "dev", "temporary": false }],
+      "attributes": {
+        "deptid": ["D200"],
+        "deptname": ["封裝工程二部"],
+        "company": ["EXAMPLE-CO"],
+        "twsitecode": ["TW2"],
+        "supervisorid": ["E00003"],
+        "location": ["P5"],
+        "description": ["dev seed — different dept, for dept-grant tests"]
+      }
+    },
+    {
+      "username": "viewer1",
+      "enabled": true,
+      "email": "viewer1@example.test",
+      "emailVerified": true,
+      "firstName": "Fang",
+      "lastName": "Huang",
+      "credentials": [{ "type": "password", "value": "dev", "temporary": false }],
+      "attributes": {
+        "deptid": ["D200"],
+        "deptname": ["封裝工程二部"],
+        "company": ["EXAMPLE-CO"],
+        "twsitecode": ["TW2"],
+        "supervisorid": ["E00003"],
+        "location": ["P5"],
+        "description": ["dev seed — no grants by default"]
+      }
+    }
+  ]
+}
