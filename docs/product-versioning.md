@@ -1,7 +1,8 @@
 # Product 版本管理規劃（同一 product、多版號）
 
-> 狀態：**討論中、尚未實作**。本文是決策文件（design / open questions），不是施工單。
-> 最後更新：2026-06-09。分支：`product-versioning`。
+> 狀態:**已實作完成(2026-06-10 定案、openspec `add-product-versioning`)**。
+> 本文保留為決策史(point-in-time);現行設計以根目錄 [`SYSTEM_DESIGN.md`](../SYSTEM_DESIGN.md) 為準。
+> 最後更新:2026-06-12(狀態標頭)。
 > 待下方 §3 的問題與 user 定案後，才會收斂成 OpenSpec change（propose-first）。
 
 本文回答一個問題：**同一個 product 會有不同版本（圖紙小改），user 要能輸入版號 —— 資料模型怎麼設計、有哪些要先跟 user 確認的決策。**

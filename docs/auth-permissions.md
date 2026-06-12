@@ -119,7 +119,7 @@
 
 #### 相依
 - **鎖粒度與 §4 拓樸相依**：editor 只能編自己的 product，鎖也只在該 product 範圍競爭；若改成「一 product 一 library」，鎖邊界會直接對齊 library。
-- **SQLite 寫入併發（與鎖無關、但必做）**：DB 是 SQLite（單寫入者），多人一上來就要設 **WAL + `busy_timeout`**，否則併發寫直接 `database is locked`。與 [docs/production-storage.md](production-storage.md) 的 DB 規劃一起看。
+- **SQLite 寫入併發（與鎖無關、但必做）**：DB 是 SQLite（單寫入者），多人一上來就要設 **WAL + `busy_timeout`**，否則併發寫直接 `database is locked`。(該規劃文件已刪;DB 最終走 IT 維運的 MariaDB,見 SYSTEM_DESIGN §5/§10。)
 
 ---
 

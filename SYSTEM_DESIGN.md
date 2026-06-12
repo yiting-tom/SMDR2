@@ -46,7 +46,7 @@
 
 - 即時共編(WebSocket)——被擋者唯讀 + 輪詢鎖狀態即可。
 - app 內規則選擇/編輯——規則由團隊走 code(add-rule),每次全跑。
-- 資料遷移——dev 資料不搬 prod,空庫開始。
+- 資料遷移——dev 資料不搬 prod,**上線前全部 purge、空庫開始**(2026-06-12 明確化:任何資料相容/回滾問題一律不考慮;legacy rename 與 SQLite boot migrations 只服務 purge 前的 dev DB,上線後是 cleanup 候選)。
 - Keycloak back-channel logout——session 絕對上限 24h 兜底。
 
 ## 3. 容量估算與實測
@@ -925,7 +925,7 @@ flowchart TD
 
 ## 13. 施工狀態與順序
 
-依 `openspec/changes/add-production-infra-and-auth/`(proposal/design/specs/tasks);dev 全程在 docker-compose 鏡像環境驗證,搬 k8s 只換 env。
+依 `openspec/changes/add-production-infra-and-auth/`(proposal/design/specs/tasks);dev 全程在 docker-compose 鏡像環境驗證,搬 k8s 只換 env。CI/CD = `azure-pipelines.yml`(CI 零依賴套件 ∥ 真引擎 smoke → build,tag=commit SHA → approval-gated deploy:重跑 migration Job → apply → 等 rollout)。
 
 | Phase | 內容 | 狀態 |
 |---|------|------|

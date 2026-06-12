@@ -1,7 +1,10 @@
 # SMDR2 待討論彙總（單一討論議程）
 
-> 狀態：**討論用議程**。本文把目前四份決策文件裡**所有待拍板的問題**整合成一張清單，依「該先定什麼」排序，方便一次跟 user / infra 談完。
-> 最後更新：2026-06-10。分支：`product-versioning`。
+> 狀態:**已全部定案、議程關閉(2026-06-11)**。本文保留為決策史;
+> 全部結論收斂在根目錄 [`SYSTEM_DESIGN.md`](../SYSTEM_DESIGN.md) 與
+> [`schema-auth-jobs.md`](schema-auth-jobs.md),實作於 openspec
+> `add-production-infra-and-auth`。
+> 最後更新:2026-06-12(狀態標頭;原議程日期 2026-06-10)。
 > 每節只列**決策點**；背景與理由在各自的細節文件裡（連結附上）。定案後再 propose-first 收成 OpenSpec change。
 
 ---
@@ -21,8 +24,8 @@
 各主題對應的細節文件：
 - 權限 / SSO / 編輯鎖 → [`auth-permissions.md`](auth-permissions.md)
 - 產品版本 → [`product-versioning.md`](product-versioning.md)
-- 多人併發總覽 → [`multi-user-readiness.md`](multi-user-readiness.md)
-- Production 儲存 / DB → [`production-storage.md`](production-storage.md)
+- 多人併發總覽 → multi-user-readiness.md(已刪;結論在 SYSTEM_DESIGN §6–7)
+- Production 儲存 / DB → production-storage.md(已刪;結論在 SYSTEM_DESIGN §5.2/§10)
 
 **已定案的大方向（不再討論，僅列出讓大家有共識）：**
 - 版本**不是**獨立 product；version = product 底下的 template 快照，rules 跨版共用。
@@ -101,7 +104,7 @@
 ---
 
 ## §G. Production 儲存 / DB（**問 infra，可平行**）
-> 細節：[`production-storage.md` §9](production-storage.md)
+> 細節:production-storage.md §9(已刪;結論在 SYSTEM_DESIGN §10)
 
 - [x] **G1. 已確認（2026-06-10）：** 公司 DB 是 **Oracle**（無 Postgres）。
 - [x] **G2. 已確認（2026-06-10）：** 內部工具資料**可以自管**。

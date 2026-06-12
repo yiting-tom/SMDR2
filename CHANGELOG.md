@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-06-12 — docs consolidated to current state
+
+README and ARCHITECTURE rewritten to the production-era reality (DB job
+queue + worker loop, BlobStore keys, auth/guards, 66-route quick-ref,
+compose/k8s/CI pointers, 20-class list, awaiting_layout state, purge
+policy). Two superseded planning docs deleted (production-storage,
+multi-user-readiness — conclusions live in SYSTEM_DESIGN); the three
+decision-history docs (DISCUSSION, auth-permissions, product-versioning)
+got closed/implemented status headers and dead links repaired.
+schema-auth-jobs gains the 0005 postscript. Doc hierarchy is now:
+README (use/tune) → ARCHITECTURE (how it works/how to change) →
+SYSTEM_DESIGN (why/full design) → docs/ (schema spec + frozen history).
+
+
 ## 2026-06-12 — LidOuter re-introduced (`add-lidouter-class`)
 
 Final structure-class set: Lid, LidOuter, RingOuter, RingInner (lid

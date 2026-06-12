@@ -1,7 +1,8 @@
 # Schema 定稿:Auth / Jobs / Edit-Lock(Phase 0 產物)
 
 > 狀態:**定稿(2026-06-11)**。本文是施工單層級的 schema 規格,Phase 1–3 直接照此實作。
-> 上游決策:[auth-permissions.md](auth-permissions.md)(權限模型)、[production-storage.md](production-storage.md)(MariaDB/MinIO)、memory 的 impl order。
+> 上游決策:[auth-permissions.md](auth-permissions.md)(權限模型)與已刪的 production-storage.md(MariaDB/MinIO;結論在 SYSTEM_DESIGN §5.2/§10)。
+> **2026-06-12 後記**:全部已實作(Alembic 0001–0005);0005 另在 `versions` 表加 `evidence_name`/`evidence_type`(簽核證明圖,見 openspec `add-signoff-evidence`),不在本文七表範圍。
 > 本文取代 auth-permissions.md 中與 2026-06-11 定案衝突的舊結論(見該文件頂部勘誤)。
 
 涵蓋七張新表 + 一個既有表變更:
