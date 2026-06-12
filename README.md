@@ -251,6 +251,13 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 整個 `data/` 目錄 portable — 備份/搬遷直接拷貝即可。
 
+> **Production 注意(2026-06-12)**:以上是本機/測試的預設。設了
+> `DATABASE_URL` 時關聯資料走 **MariaDB**(schema 由 Alembic 管理),設了
+> `S3_ENDPOINT_URL` 時所有 blob 走 **MinIO(boto3)**,`data/` 退化為
+> per-request scratch;auth 以 `SMDR2_AUTH_MODE=oidc` 開啟(Keycloak BFF)。
+> 完整架構與環境變數契約見 [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) 與
+> [`deploy/README.md`](deploy/README.md)。
+
 ### 8) 檔案狀態列舉 — `app/files.py`
 
 `status` 欄位可能值（行 27–33）：
