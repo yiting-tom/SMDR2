@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-06-12 — sign-off evidence image (`add-signoff-evidence`)
+
+Sign-off optionally carries one proof image (paper-signature scan,
+approval screenshot): multipart `evidence` on the existing sign-off
+POST (body-less calls unchanged), magic-byte-validated PNG/JPEG/WebP
+≤10MB, bytes at `sign_off_evidence/{vid}`, name/MIME columns written
+atomically with the freeze (alembic 0005 + SQLite boot migration).
+Readable by viewers in scope; cleared on admin unsign; not cloned;
+included in the product-delete cascade. Dashboard sign-off confirm is
+now a small dialog with the optional file field, and signed versions
+show a 📎 證明 link. Suite 696 green; 0005 verified on compose MariaDB.
+
+
 ## 2026-06-12 — CI/CD: azure-pipelines.yml + image fix
 
 Three-stage pipeline (CI: zero-dependency suite ∥ real-engine smokes via

@@ -340,6 +340,15 @@ function versionBar(p, version) {
       `已畫押 by ${version.signed_off_by} @ ${fmtSignedAt(version.signed_off_at)}`;
     badge.title = "此版本已凍結為唯讀;規則檢查結果仍可查看。";
     bar.appendChild(badge);
+    if (version.evidence_name) {
+      const proof = document.createElement("a");
+      proof.className = "signoff-evidence-link";
+      proof.textContent = "📎 證明";
+      proof.title = `查看畫押證明:${version.evidence_name}`;
+      proof.href = `/api/versions/${version.id}/sign-off/evidence`;
+      proof.target = "_blank";
+      bar.appendChild(proof);
+    }
   }
 
   const spacer = document.createElement("span");
@@ -423,15 +432,59 @@ async function createNewVersion(p, sourceVersion) {
   startPollingIfBusy();  // cloned bindings re-preprocess in the background
 }
 
+// Sign-off confirm dialog with an OPTIONAL proof image
+// (openspec/changes/add-signoff-evidence). Built as a throwaway <dialog>
+// so no template change is needed; product names go through textContent
+// (never innerHTML interpolation).
+function signOffDialog(p, version) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "signoff-dialog";
+    dlg.innerHTML =
+      '<form method="dialog">' +
+      '<p class="signoff-msg"></p>' +
+      '<label>證明圖片(選填,PNG/JPEG/WebP ≤10MB):<br>' +
+      '<input type="file" name="evidence" ' +
+      'accept="image/png,image/jpeg,image/webp"></label>' +
+      '<menu class="signoff-actions">' +
+      '<button value="cancel">取消</button>' +
+      '<button value="ok" class="primary">確認畫押</button>' +
+      "</menu></form>";
+    dlg.querySelector(".signoff-msg").textContent =
+      `確定要畫押 "${p.name} / ${version.label}" 嗎?` +
+      "畫押後此版本凍結為唯讀(上傳、比對、規則檢查皆停用)。";
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => {
+      const file = dlg.querySelector("input[name=evidence]").files[0] || null;
+      dlg.remove();
+      resolve(dlg.returnValue === "ok" ? { ok: true, file } : { ok: false });
+    });
+    dlg.showModal();
+  });
+}
+
 async function signOffVersion(p, version) {
-  if (!confirm(`確定要畫押 "${p.name} / ${version.label}" 嗎?\n畫押後此版本凍結為唯讀(上傳、比對、規則檢查皆停用)。`)) return;
-  const res = await fetch(`/api/versions/${version.id}/sign-off`, { method: "POST" });
+  const choice = await signOffDialog(p, version);
+  if (!choice.ok) return;
+  let opts = { method: "POST" };
+  if (choice.file) {
+    const fd = new FormData();
+    fd.append("evidence", choice.file);
+    opts = { method: "POST", body: fd };  // browser sets multipart boundary
+  }
+  const res = await fetch(`/api/versions/${version.id}/sign-off`, opts);
   if (!res.ok) {
     if (await handleSignedOff409(res)) { await refresh(); return; }
+    if (res.status === 413 || res.status === 415) {
+      alert("證明圖片無效:僅接受 PNG/JPEG/WebP 且不可超過 10MB。版本未畫押。");
+      return;
+    }
     $status.textContent = `sign-off failed: ${res.status}`;
     return;
   }
-  $status.textContent = `已畫押 "${p.name} / ${version.label}"`;
+  $status.textContent = choice.file
+    ? `已畫押 "${p.name} / ${version.label}"(含證明圖片)`
+    : `已畫押 "${p.name} / ${version.label}"`;
   await refresh();
 }
 

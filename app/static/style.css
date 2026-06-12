@@ -50,6 +50,36 @@ header .file-name {
   white-space: nowrap;
 }
 
+/* Sign-off proof image link next to the badge + the sign-off dialog
+   (openspec/changes/add-signoff-evidence). */
+.signoff-evidence-link {
+  font-size: 0.76rem;
+  color: #ffb84d;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.signoff-evidence-link:hover { text-decoration: underline; }
+
+dialog.signoff-dialog {
+  background: #1d232b;
+  color: #e6e9ed;
+  border: 1px solid #3a4350;
+  border-radius: 8px;
+  padding: 1.1rem 1.3rem;
+  max-width: 26rem;
+}
+dialog.signoff-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog.signoff-dialog .signoff-msg { margin-top: 0; line-height: 1.5; }
+dialog.signoff-dialog label { font-size: 0.85rem; color: #9aa5b1; }
+dialog.signoff-dialog input[type="file"] { margin-top: 0.4rem; }
+dialog.signoff-dialog .signoff-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding: 0;
+}
+
 header #product-context {
   font-family: ui-monospace, monospace;
   font-size: 0.78rem;

@@ -125,6 +125,13 @@ def rule_check_key(version_id: str) -> str:
     return f"rule_check/{version_id}.json"
 
 
+def sign_off_evidence_key(version_id: str) -> str:
+    """Optional sign-off proof image. No extension on purpose — the MIME
+    type lives in versions.evidence_type (DB), keeping the key derivable
+    without knowing the format (no-list bucket)."""
+    return f"sign_off_evidence/{version_id}"
+
+
 def layer_preview_prefix(version_id: str, file_id: str) -> str:
     return f"layer_preview/{version_id}/{file_id}"
 

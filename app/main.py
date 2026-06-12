@@ -89,6 +89,7 @@ from app.storage import (
     parsed_key,
     prematch_key,
     rule_check_key,
+    sign_off_evidence_key,
     upload_key,
 )
 
@@ -797,7 +798,7 @@ def _version_artifact_keys(blobs, version_id: str, file_ids: list[str]) -> list[
     the layer/layout manifests — never by listing the bucket (the company
     MinIO forbids the list API). Uploads are excluded on purpose: file_ids
     are shared across cloned versions."""
-    keys = [rule_check_key(version_id)]
+    keys = [rule_check_key(version_id), sign_off_evidence_key(version_id)]
     for fid in file_ids:
         keys += [
             parsed_key(version_id, fid),
@@ -922,16 +923,61 @@ async def create_version(product_id: str, req: CreateVersionRequest) -> dict:
     return _version_payload(ver)
 
 
+_EVIDENCE_MAX_BYTES = 10 * 1024 * 1024  # proof images, not drawings
+
+
+def _sniff_image_type(data: bytes) -> str | None:
+    """MIME from magic bytes — the client's Content-Type is not trusted
+    (openspec/changes/add-signoff-evidence D3)."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 @app.post("/api/versions/{version_id}/sign-off")
-async def sign_off_version(version_id: str, ident=Depends(editor_guard)) -> dict:
+async def sign_off_version(
+    version_id: str,
+    evidence: UploadFile | None = File(None),
+    ident=Depends(editor_guard),
+) -> dict:
     """Freeze the version. Editors may sign versions in their scope —
     including ones they created (no separation of duties, 2026-06-11).
-    Already-signed → 409."""
+    Already-signed → 409. `evidence` is an OPTIONAL proof image
+    (PNG/JPEG/WebP by magic bytes, ≤10MB); a plain body-less POST keeps
+    its exact pre-evidence behaviour."""
     from app.versions import SignedOff
     v0 = _resolve_version(version_id)
+    evidence_name = evidence_type = None
+    data = b""
+    if evidence is not None:
+        data = await evidence.read(_EVIDENCE_MAX_BYTES + 1)
+        if len(data) > _EVIDENCE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="evidence over 10MB")
+        if data:  # an empty part counts as "not attached"
+            evidence_type = _sniff_image_type(data)
+            if evidence_type is None:
+                raise HTTPException(
+                    status_code=415,
+                    detail="evidence must be a PNG/JPEG/WebP image",
+                )
+            evidence_name = evidence.filename or "evidence"
+    blobs = get_blobstore()
+    if evidence_name:
+        # Bytes first, metadata with the freeze: losing the (lock-guarded,
+        # so near-impossible) sign-off race below rolls the blob back.
+        blobs.put_bytes(sign_off_evidence_key(version_id), data)
     try:
-        v = VERSION_STORE.sign_off(version_id, ident.userid)
+        v = VERSION_STORE.sign_off(
+            version_id, ident.userid,
+            evidence_name=evidence_name, evidence_type=evidence_type,
+        )
     except SignedOff as exc:
+        if evidence_name:
+            blobs.delete(sign_off_evidence_key(version_id))
         raise HTTPException(
             status_code=409,
             detail={
@@ -944,15 +990,45 @@ async def sign_off_version(version_id: str, ident=Depends(editor_guard)) -> dict
         actor=ident.userid, action="version.sign_off",
         target_type="version", target_id=version_id,
         product_id=v0.product_id, version_id=version_id,
+        detail={"evidence": evidence_name},
     )
     return v.to_dict()
 
 
+@app.get(
+    "/api/versions/{version_id}/sign-off/evidence",
+    dependencies=[Depends(viewer_guard)],
+)
+async def get_sign_off_evidence(version_id: str) -> Response:
+    """The sign-off proof image (404 when the version has none). Frozen
+    content — cacheable for the session."""
+    v = _resolve_version(version_id)
+    if not v.evidence_name:
+        raise HTTPException(status_code=404, detail="no sign-off evidence")
+    try:
+        data = get_blobstore().get_bytes(sign_off_evidence_key(version_id))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="no sign-off evidence")
+    from urllib.parse import quote
+    return Response(
+        content=data,
+        media_type=v.evidence_type or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition":
+                f"inline; filename*=UTF-8''{quote(v.evidence_name)}",
+        },
+    )
+
+
 @app.delete("/api/versions/{version_id}/sign-off")
 async def unsign_version(version_id: str, ident=Depends(admin_guard)) -> dict:
-    """Reopen a signed version — admin only (specs/authorization)."""
+    """Reopen a signed version — admin only (specs/authorization). The
+    evidence belongs to the revoked sign-off: columns clear in the store,
+    the blob goes here (blind delete)."""
     v0 = _resolve_version(version_id)
     v = VERSION_STORE.unsign(version_id)
+    get_blobstore().delete(sign_off_evidence_key(version_id))
     AUTH_STORE.audit(
         actor=ident.userid, action="version.unsign",
         target_type="version", target_id=version_id,

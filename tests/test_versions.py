@@ -98,6 +98,7 @@ def test_product_delete_removes_blobs_without_listing():
             storage.prematch_key(vid, fid),
             storage.match_key(vid, fid),
             storage.rule_check_key(vid),
+            storage.sign_off_evidence_key(vid),
             storage.layer_preview_primitives_key(vid, fid),
             storage.layer_preview_svg_key(vid, fid, "L1"),
             storage.layer_manifest_key(vid, fid),
@@ -119,6 +120,83 @@ def test_product_delete_removes_blobs_without_listing():
         for key in survivors:
             assert blobs.exists(key), key
         c.delete(f"/api/products/{pid2}")
+
+
+# ---- sign-off evidence (openspec/changes/add-signoff-evidence) -------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+
+def test_sign_off_without_evidence_unchanged():
+    """Body-less POST = the pre-evidence contract, byte for byte."""
+    with _client() as c:
+        _, vid = _new_product(c)
+        r = c.post(f"/api/versions/{vid}/sign-off")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["signed_off_by"] and body["evidence_name"] is None
+        assert c.get(f"/api/versions/{vid}/sign-off/evidence").status_code == 404
+
+
+def test_sign_off_with_evidence_roundtrip():
+    with _client() as c:
+        _, vid = _new_product(c)
+        r = c.post(f"/api/versions/{vid}/sign-off",
+                   files={"evidence": ("證明 v1.png", PNG, "image/png")})
+        assert r.status_code == 200
+        assert r.json()["evidence_name"] == "證明 v1.png"
+        g = c.get(f"/api/versions/{vid}/sign-off/evidence")
+        assert g.status_code == 200
+        assert g.headers["content-type"].startswith("image/png")
+        assert g.content == PNG
+
+
+def test_evidence_magic_bytes_not_content_type():
+    """A text file lying about its Content-Type is rejected and the
+    version stays unsigned."""
+    with _client() as c:
+        pid, vid = _new_product(c)
+        r = c.post(f"/api/versions/{vid}/sign-off",
+                   files={"evidence": ("x.png", b"not an image", "image/png")})
+        assert r.status_code == 415
+        versions = c.get(f"/api/products/{pid}/versions").json()["versions"]
+        assert versions[0]["signed_off_by"] is None
+
+
+def test_evidence_size_cap():
+    big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (10 * 1024 * 1024)
+    with _client() as c:
+        _, vid = _new_product(c)
+        r = c.post(f"/api/versions/{vid}/sign-off",
+                   files={"evidence": ("big.png", big, "image/png")})
+        assert r.status_code == 413
+
+
+def test_unsign_clears_evidence():
+    with _client() as c:
+        pid, vid = _new_product(c)
+        c.post(f"/api/versions/{vid}/sign-off",
+               files={"evidence": ("p.png", PNG, "image/png")})
+        assert c.delete(f"/api/versions/{vid}/sign-off").status_code == 200
+        versions = c.get(f"/api/products/{pid}/versions").json()["versions"]
+        assert versions[0]["evidence_name"] is None
+        assert c.get(f"/api/versions/{vid}/sign-off/evidence").status_code == 404
+        # a fresh sign-off may attach a fresh image
+        r = c.post(f"/api/versions/{vid}/sign-off",
+                   files={"evidence": ("p2.png", PNG, "image/png")})
+        assert r.status_code == 200 and r.json()["evidence_name"] == "p2.png"
+
+
+def test_clone_does_not_copy_evidence():
+    with _client() as c:
+        pid, vid = _new_product(c)
+        c.post(f"/api/versions/{vid}/sign-off",
+               files={"evidence": ("p.png", PNG, "image/png")})
+        r = c.post(f"/api/products/{pid}/versions",
+                   json={"label": "v2", "clone_from": vid})
+        assert r.status_code == 200
+        assert r.json()["evidence_name"] is None
+        assert r.json()["signed_off_by"] is None
 
 
 # ---- 6.2 clone -------------------------------------------------------------

@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS versions (
     library_id    TEXT NOT NULL UNIQUE,
     signed_off_by TEXT,
     signed_off_at REAL,
+    evidence_name TEXT,
+    evidence_type TEXT,
     created_at    REAL NOT NULL,
     UNIQUE (product_id, label)
 );
@@ -64,6 +66,8 @@ class Version:
     signed_off_by: str | None
     signed_off_at: float | None
     created_at: float
+    evidence_name: str | None = None
+    evidence_type: str | None = None
 
     @property
     def is_signed_off(self) -> bool:
@@ -77,6 +81,7 @@ class Version:
             "library_id": self.library_id,
             "signed_off_by": self.signed_off_by,
             "signed_off_at": self.signed_off_at,
+            "evidence_name": self.evidence_name,
             "created_at": self.created_at,
         }
 
@@ -90,6 +95,8 @@ def _row_to_version(row: db.Row) -> Version:
         signed_off_by=row["signed_off_by"],
         signed_off_at=row["signed_off_at"],
         created_at=row["created_at"],
+        evidence_name=row["evidence_name"],
+        evidence_type=row["evidence_type"],
     )
 
 
@@ -119,6 +126,19 @@ class VersionStore:
             from app.library import SCHEMA as LIBRARY_SCHEMA
             self.conn.executescript(LIBRARY_SCHEMA)
             self.conn.executescript(VERSIONS_SCHEMA)
+            self._migrate_evidence()
+
+    def _migrate_evidence(self) -> None:
+        """Idempotent per-boot upkeep: pre-evidence SQLite dev DBs gain
+        the columns (MariaDB schema is Alembic-owned, rev 0005)."""
+        if not self.conn.is_sqlite:
+            return
+        cols = [r[1] for r in self.conn.execute(
+            "PRAGMA table_info(versions)"
+        ).fetchall()]
+        for col in ("evidence_name", "evidence_type"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE versions ADD COLUMN {col} TEXT")
 
     # ---- reads -----------------------------------------------------------
     def get(self, version_id: str) -> Version | None:
@@ -273,7 +293,17 @@ class VersionStore:
         )
 
     # ---- sign-off --------------------------------------------------------
-    def sign_off(self, version_id: str, by: str) -> Version:
+    def sign_off(
+        self,
+        version_id: str,
+        by: str,
+        *,
+        evidence_name: str | None = None,
+        evidence_type: str | None = None,
+    ) -> Version:
+        """Freeze the version; the optional evidence metadata is written
+        atomically with the freeze (the image bytes live at
+        sign_off_evidence_key — the caller persists them first)."""
         with self.lock, self.conn:
             row = self.conn.execute(
                 "SELECT * FROM versions WHERE id = ?", (version_id,)
@@ -283,18 +313,22 @@ class VersionStore:
             if row["signed_off_by"] is not None:
                 raise SignedOff(row["signed_off_by"], row["signed_off_at"])
             self.conn.execute(
-                "UPDATE versions SET signed_off_by = ?, signed_off_at = ? WHERE id = ?",
-                (by, time.time(), version_id),
+                "UPDATE versions SET signed_off_by = ?, signed_off_at = ?, "
+                "evidence_name = ?, evidence_type = ? WHERE id = ?",
+                (by, time.time(), evidence_name, evidence_type, version_id),
             )
         v = self.get(version_id)
         assert v is not None
         return v
 
     def unsign(self, version_id: str) -> Version:
-        """Admin-only once auth lands; unrestricted in the dev window."""
+        """Admin-only. Evidence metadata is cleared with the freeze — the
+        proof belongs to the sign-off event being revoked (the caller
+        deletes the blob)."""
         with self.lock, self.conn:
             cur = self.conn.execute(
-                "UPDATE versions SET signed_off_by = NULL, signed_off_at = NULL "
+                "UPDATE versions SET signed_off_by = NULL, signed_off_at = NULL, "
+                "evidence_name = NULL, evidence_type = NULL "
                 "WHERE id = ?",
                 (version_id,),
             )

@@ -100,7 +100,7 @@
 
 **讀路徑(viewer guard — 依範圍過濾)**:`GET /api/products`(`visible_products` 過濾,無 grant = 空)、`GET /api/products/{pid}[/versions|/version-diff]`、`GET /api/versions/{vid}/{classes|templates|rule-check|drc-bundle}`、`GET /api/files/{fid}[/layers|/layouts|/layer-preview/*.svg|/layout-preview/*.svg|/primitives|/scan-all|/prematch|/match-json|/debug-radius-buckets]`、`POST /api/files/{fid}/warm-shapes`(冪等預熱,viewer 級)、`GET /api/classes`、`GET /api/templates`、`GET /api/jobs/{id}`(job_viewer_guard:從 job 的 version 反查 product 範圍)。
 
-**寫路徑(editor guard = 角色+鎖+未簽核 全鏈)**:`POST /api/products/{pid}/versions`(建新版 = clone)、`POST /api/versions/{vid}/sign-off`(editor 可簽自己建的版)、`POST/DELETE /api/versions/{vid}/files[/{fid}]`(上傳/換檔/解綁)、`POST /api/files/{fid}/{layers|layouts|discover-layers|unit-override|match|match-swap|commit|match-json}`、`PATCH /api/files/{fid}/side-regions`、`PUT /api/versions/{vid}/classes/{name}/strategy`、`POST /api/versions/{vid}/rule-check[/upload]`、`PATCH/DELETE /api/templates/{tid}`(template_editor_guard:由範本反查所屬 version→product 再走全鏈)。
+**寫路徑(editor guard = 角色+鎖+未簽核 全鏈)**:`POST /api/products/{pid}/versions`(建新版 = clone)、`POST /api/versions/{vid}/sign-off`(editor 可簽自己建的版;**選填 multipart `evidence` 證明圖片** — magic-bytes 驗 PNG/JPEG/WebP、≤10MB,讀取走 `GET …/sign-off/evidence` viewer guard,unsign 時清除,cascade 納入)、`POST/DELETE /api/versions/{vid}/files[/{fid}]`(上傳/換檔/解綁)、`POST /api/files/{fid}/{layers|layouts|discover-layers|unit-override|match|match-swap|commit|match-json}`、`PATCH /api/files/{fid}/side-regions`、`PUT /api/versions/{vid}/classes/{name}/strategy`、`POST /api/versions/{vid}/rule-check[/upload]`、`PATCH/DELETE /api/templates/{tid}`(template_editor_guard:由範本反查所屬 version→product 再走全鏈)。
 
 **狀態碼約定**:401 未登入(API)/302(頁面)、403 角色不足或 CSRF 失敗、**423 鎖被佔**(body 帶 holder/since)、409 簽核凍結/重複版號/語意衝突、413 超過上傳上限、422 缺欄位。403/423 的 body 形狀由 guards 的 `_enforce` 單一定義 — 前端只解析一種錯誤格式。
 
@@ -396,6 +396,7 @@ stateDiagram-v2
 ```
 
 - 簽核 guard 在**寫入守門鏈**統一擋(server 端,非前端);簽核後 reprocess-all 也跳過該版(frozen)。
+- 簽核可**選附一張證明圖片**(紙本簽名掃描等;非強制):bytes 在 blob `sign_off_evidence/{vid}`、中繼資料(檔名/MIME)與凍結同一筆 UPDATE 原子寫入;解簽即清除(證明屬於被撤銷的那次簽核)、clone 不複製。
 - clone:單交易複製 library + version_files;衍生 artifact 不 clone(新版重算,沿用檔+未改範本結果天然相同)。
 
 ### 7.5 比對管線(版本感知,✅ 已實作)
