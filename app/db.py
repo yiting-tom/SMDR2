@@ -122,14 +122,17 @@ class Row:
 
 
 def _qmark_to_format(sql: str) -> str:
-    """Translate `?` placeholders to `%s` for MySQL drivers, skipping
-    quoted literals. Also escapes literal `%` so PyMySQL's printf-style
-    interpolation never misfires on e.g. LIKE '%…%'."""
+    """Translate `?` placeholders to `%s` for MySQL drivers — but only
+    outside quoted literals (a literal '?' must survive). Literal `%` is
+    escaped EVERYWHERE, including inside quotes: PyMySQL's printf-style
+    interpolation applies to the whole statement, so an unescaped
+    LIKE '%x%' raises "unsupported format character" once parameters are
+    present."""
     out: list[str] = []
     quote: str | None = None
     for ch in sql:
         if quote:
-            out.append(ch)
+            out.append("%%" if ch == "%" else ch)
             if ch == quote:
                 quote = None
         elif ch in ("'", '"'):

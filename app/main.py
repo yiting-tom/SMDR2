@@ -66,11 +66,13 @@ from app.versions import DuplicateLabel, VERSION_STORE, Version
 from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
 from app.blobstore import get_blobstore
+from app.auth import AUTH_STORE
 from app.guards import (
     admin_guard,
     current_identity,
     editor_guard,
     editor_guard_nolock,
+    effective_role,
     job_viewer_guard,
     template_editor_guard,
     viewer_guard,
@@ -260,15 +262,45 @@ def _ensure_test_dxf_registered() -> None:
     jobs.submit_discover_layers(version.id, fid)
 
 
+def _assert_api_routes_guarded(app_: FastAPI) -> None:
+    """Default-deny backstop: every /api route must declare a guard
+    dependency. The per-route sweep is hand-maintained; this turns a
+    forgotten `dependencies=[...]` into a boot failure instead of a
+    silently-open endpoint (found the hard way: discover-layers)."""
+    from app import guards as g
+    guard_fns = {
+        g.viewer_guard, g.editor_guard, g.editor_guard_nolock,
+        g.admin_guard, g.job_viewer_guard, g.template_editor_guard,
+        g.current_identity,
+    }
+    exempt = {"/api/me"}  # resolves identity in the handler body
+    unguarded = []
+    for route in app_.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api") or path in exempt:
+            continue
+        deps = getattr(getattr(route, "dependant", None), "dependencies", [])
+        if not any(d.call in guard_fns for d in deps):
+            unguarded.append(path)
+    if unguarded:
+        raise RuntimeError(f"unguarded /api routes: {sorted(set(unguarded))}")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _assert_api_routes_guarded(_app)
     # Idempotent BOOTSTRAP_ADMINS seeding (specs/authorization) — the only
     # way the first admin comes into existence.
-    from app.auth import AUTH_STORE
     admins = [u for u in os.environ.get("BOOTSTRAP_ADMINS", "").split(",") if u.strip()]
     if admins:
         AUTH_STORE.bootstrap_admins(admins)
     _ensure_test_dxf_registered()
+    # Drain jobs persisted across a restart (the embedded worker otherwise
+    # starts lazily on first submit; queued rows from a previous process
+    # would sit untouched until then). No-op when SMDR2_EMBEDDED_WORKER=0
+    # (k8s webs — the worker pod drains).
+    from app.worker_loop import ensure_embedded
+    ensure_embedded()
     yield
     jobs.shutdown()
     from app.matching import shutdown_pool
@@ -302,8 +334,8 @@ async def auth_login(next: str = "/"):
     from app import oidc as oidc_mod
     if os.environ.get("SMDR2_AUTH_MODE", "bypass") == "bypass":
         return RedirectResponse("/", status_code=302)
-    if not next.startswith("/") or next.startswith("//"):
-        next = "/"  # open-redirect guard: only same-origin paths
+    if not next.startswith("/") or next.startswith("//") or "\\" in next:
+        next = "/"  # open-redirect guard: same-origin paths only ("\\" → // in browsers)
     cfg = oidc_mod.OidcConfig.from_env()
     url, cookie = oidc_mod.build_login(cfg, next)
     r = RedirectResponse(url, status_code=302)
@@ -317,7 +349,7 @@ async def auth_login(next: str = "/"):
 @app.get("/auth/callback")
 async def auth_callback(request: Request, code: str = "", state: str = ""):
     from app import oidc as oidc_mod
-    from app.auth import AUTH_STORE, SESSION_COOKIE
+    from app.auth import SESSION_COOKIE
     state_cookie = request.cookies.get(oidc_mod.STATE_COOKIE)
     if not state_cookie or not code:
         raise HTTPException(status_code=400, detail="login flow state missing")
@@ -346,7 +378,7 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
 
 @app.post("/auth/logout")
 async def auth_logout(request: Request):
-    from app.auth import AUTH_STORE, SESSION_COOKIE
+    from app.auth import SESSION_COOKIE
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         AUTH_STORE.delete_session(token)
@@ -356,9 +388,16 @@ async def auth_logout(request: Request):
     return r
 
 
+@app.get("/healthz")
+async def healthz() -> dict:
+    """Liveness/readiness — exempt from auth in every mode
+    (specs/auth-session: internal endpoint exemption)."""
+    return {"ok": True}
+
+
 @app.get("/api/me")
 async def me(request: Request):
-    from app.auth import AUTH_STORE, get_identity
+    from app.auth import get_identity
     ident = get_identity(request)
     grants = [
         g.to_dict() for g in (
@@ -373,9 +412,7 @@ async def me(request: Request):
         "name": ident.name,
         "email": ident.email,
         "source": ident.source,
-        "is_admin": ident.is_bypass or any(
-            g["role"] == "admin" for g in grants
-        ),
+        "is_admin": effective_role(ident, None) == "admin",
         "grants": grants,
     }
 
@@ -383,10 +420,12 @@ async def me(request: Request):
 # ---- Pages --------------------------------------------------------------
 def _page_identity(request: Request):
     """Page-level auth: API consumers get 401s, but a human hitting a
-    page should land on the Keycloak login — redirect with next=."""
-    from app.auth import get_identity
+    page should land on the Keycloak login — redirect with next=.
+    Resolves through `dependency_overrides[current_identity]` when set
+    (the same seam guarded API routes use), so page tests inject
+    identities the same way endpoint tests do."""
     try:
-        get_identity(request)
+        _resolve_page_identity(request)
         return None
     except HTTPException:
         return RedirectResponse(
@@ -547,11 +586,10 @@ class CreateGrantRequest(BaseModel):
     scope_id: str = ""
 
 
-@app.get("/api/customers", dependencies=[Depends(viewer_guard)])
+@app.get("/api/customers", dependencies=[Depends(current_identity)])
 async def list_customers() -> dict:
     """Readable by anyone authenticated — the dashboard groups products
     by customer; mutation stays admin-only."""
-    from app.auth import AUTH_STORE
     return {"customers": AUTH_STORE.list_customers()}
 
 
@@ -559,7 +597,7 @@ async def list_customers() -> dict:
 async def create_customer(
     req: CreateCustomerRequest, ident=Depends(admin_guard),
 ) -> dict:
-    from app.auth import AUTH_STORE, GrantError
+    from app.auth import GrantError
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name required")
@@ -576,7 +614,13 @@ async def create_customer(
 async def delete_customer(
     customer_id: str, ident=Depends(admin_guard),
 ) -> dict:
-    from app.auth import AUTH_STORE, GrantError
+    from app.auth import SEED_CUSTOMER_ID, GrantError
+    # Seed protection outranks everything — 'uncategorized' is never
+    # deletable, with or without products under it.
+    if customer_id == SEED_CUSTOMER_ID:
+        raise HTTPException(
+            status_code=400, detail="the seed customer cannot be deleted",
+        )
     # RESTRICT: a customer with products is not deletable (schema doc §2).
     if any(p.customer_id == customer_id for p in PRODUCT_STORE.list_all()):
         raise HTTPException(
@@ -595,7 +639,6 @@ async def delete_customer(
 async def list_grants(
     grantee_type: str | None = None, grantee_id: str | None = None,
 ) -> dict:
-    from app.auth import AUTH_STORE
     return {
         "grants": [g.to_dict() for g in AUTH_STORE.list_grants(grantee_type, grantee_id)],
         "known_deptids": AUTH_STORE.known_deptids(),
@@ -606,7 +649,7 @@ async def list_grants(
 async def create_grant(
     req: CreateGrantRequest, ident=Depends(admin_guard),
 ) -> dict:
-    from app.auth import AUTH_STORE, GrantError
+    from app.auth import GrantError
     # scope_id must point at something real (schema doc §3 — no FK can
     # express an either-or reference).
     if req.scope_type == "customer" and AUTH_STORE.get_customer(req.scope_id) is None:
@@ -626,7 +669,6 @@ async def create_grant(
 
 @app.delete("/api/grants/{grant_id}")
 async def revoke_grant(grant_id: str, ident=Depends(admin_guard)) -> dict:
-    from app.auth import AUTH_STORE
     if not AUTH_STORE.revoke_grant(grant_id, actor=ident.userid):
         raise HTTPException(status_code=404, detail="grant not found")
     return {"revoked": grant_id}
@@ -639,7 +681,6 @@ async def list_audit(
     actor: str | None = None,
     action: str | None = None,
 ) -> dict:
-    from app.auth import AUTH_STORE
     entries = AUTH_STORE.list_audit(min(limit, 500))
     if product_id:
         entries = [e for e in entries if e.get("product_id") == product_id]
@@ -653,7 +694,6 @@ async def list_audit(
 # ---- Product edit lock (specs/product-edit-lock) ---------------------------
 @app.get("/api/products/{product_id}/lock", dependencies=[Depends(viewer_guard)])
 async def lock_status(product_id: str) -> dict:
-    from app.auth import AUTH_STORE
     holder = AUTH_STORE.lock_holder(product_id)
     return {"product_id": product_id, "held_by": holder}
 
@@ -664,7 +704,6 @@ async def acquire_lock(
 ) -> JSONResponse:
     """Explicit start-editing action. 423 with the holder when occupied;
     re-acquiring one's own lock refreshes the heartbeat."""
-    from app.auth import AUTH_STORE
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
     st = AUTH_STORE.acquire_lock(product_id, ident.userid)
@@ -680,7 +719,6 @@ async def acquire_lock(
 async def heartbeat_lock(
     product_id: str, ident=Depends(editor_guard_nolock),
 ) -> dict:
-    from app.auth import AUTH_STORE
     ok = AUTH_STORE.heartbeat_lock(product_id, ident.userid)
     if not ok:
         raise HTTPException(status_code=409, detail="lock not held by you")
@@ -692,7 +730,6 @@ async def release_lock(
     product_id: str, force: bool = False, ident=Depends(current_identity),
 ) -> dict:
     """Owner release, or admin force-release (?force=1, audited)."""
-    from app.auth import AUTH_STORE
     from app.guards import effective_role
     if force:
         if effective_role(ident, None) != "admin":
@@ -744,7 +781,6 @@ async def create_product(
         # Pydantic enforces presence (422 on missing field); this catches
         # whitespace-only labels with the same status family.
         raise HTTPException(status_code=422, detail="version_label required")
-    from app.auth import AUTH_STORE
     customer_id = (req.customer_id or "uncategorized").strip()
     if AUTH_STORE.get_customer(customer_id) is None:
         raise HTTPException(status_code=400, detail="unknown customer")
@@ -765,7 +801,6 @@ async def delete_product(product_id: str, ident=Depends(admin_guard)) -> dict:
     every version-scoped artifact prefix."""
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
-    from app.auth import AUTH_STORE
     AUTH_STORE.audit(
         actor=ident.userid, action="product.delete",
         target_type="product", target_id=product_id, product_id=product_id,
@@ -866,7 +901,6 @@ async def sign_off_version(version_id: str, ident=Depends(editor_guard)) -> dict
     """Freeze the version. Editors may sign versions in their scope —
     including ones they created (no separation of duties, 2026-06-11).
     Already-signed → 409."""
-    from app.auth import AUTH_STORE
     from app.versions import SignedOff
     v0 = _resolve_version(version_id)
     try:
@@ -891,7 +925,6 @@ async def sign_off_version(version_id: str, ident=Depends(editor_guard)) -> dict
 @app.delete("/api/versions/{version_id}/sign-off")
 async def unsign_version(version_id: str, ident=Depends(admin_guard)) -> dict:
     """Reopen a signed version — admin only (specs/authorization)."""
-    from app.auth import AUTH_STORE
     v0 = _resolve_version(version_id)
     v = VERSION_STORE.unsign(version_id)
     AUTH_STORE.audit(
@@ -1237,7 +1270,7 @@ async def get_layer_preview_svg(file_id: str, safe_name: str, version_id: str):
     return StreamingResponse(stream, media_type="image/svg+xml")
 
 
-@app.post("/api/files/{file_id}/discover-layers")
+@app.post("/api/files/{file_id}/discover-layers", dependencies=[Depends(editor_guard)])
 async def trigger_discover_layers(file_id: str, version_id: str) -> dict:
     """Re-run Phase 1 for a binding (e.g. user clicked 'Edit layers' on a
     ready file)."""
@@ -1401,7 +1434,6 @@ async def set_class_strategy(
     lib = _library_for_version(v)
     if not lib.set_strategy(class_name, req.strategy, bbox_ratio):
         raise HTTPException(status_code=404, detail="class not found")
-    from app.auth import AUTH_STORE
     AUTH_STORE.audit(
         actor=ident.userid, action="class.strategy_change",
         target_type="class", target_id=class_name,
@@ -1473,7 +1505,6 @@ async def delete_template(
     if version is not None:
         require_unsigned(version.id)
     lib.delete_template(template_id)
-    from app.auth import AUTH_STORE
     AUTH_STORE.audit(
         actor=ident.userid, action="template.delete",
         target_type="template", target_id=template_id,
@@ -1501,7 +1532,6 @@ async def patch_template(
     if req.class_name not in {c["name"] for c in lib.summary()}:
         lib.add_class(req.class_name)
     lib.move_template(template_id, req.class_name)
-    from app.auth import AUTH_STORE
     AUTH_STORE.audit(
         actor=ident.userid, action="template.modify",
         target_type="template", target_id=template_id,
@@ -1717,7 +1747,6 @@ async def commit(
     tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
     stored, already_existed = lib.add_template_for_file(tmpl)
     if not already_existed:
-        from app.auth import AUTH_STORE
         AUTH_STORE.audit(
             actor=ident.userid, action="template.add",
             target_type="template", target_id=stored.id,

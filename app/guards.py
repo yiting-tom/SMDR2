@@ -18,9 +18,17 @@ from __future__ import annotations
 
 from fastapi import Depends, HTTPException, Request
 
-from app.auth import AUTH_STORE, Identity, get_identity
+from app import auth as _auth
+from app.auth import Identity, get_identity
 
 _RANK = {"viewer": 1, "editor": 2, "admin": 3}
+
+
+def _store():
+    """Resolve the auth store through the module attribute so tests that
+    monkeypatch `app.auth.AUTH_STORE` affect guards too (an import-time
+    binding would silently keep the old store)."""
+    return _auth.AUTH_STORE
 
 
 async def current_identity(request: Request) -> Identity:
@@ -56,9 +64,31 @@ def effective_role(ident: Identity, product_id: str | None) -> str | None:
         from app.products import PRODUCT_STORE
         product = PRODUCT_STORE.get(product_id)
         customer_id = product.customer_id if product else None
-    return AUTH_STORE.effective_role(
+    return _store().effective_role(
         ident, product_id=product_id, customer_id=customer_id,
     )
+
+
+def _enforce(
+    ident: Identity, product_id: str | None, min_role: str, with_lock: bool,
+) -> None:
+    """The shared guard body: role floor, then (for content writes) the
+    edit lock. Single definition so the 403/423 contracts can't drift
+    between the generic guards and the template guard."""
+    role = effective_role(ident, product_id)
+    if role is None or _RANK[role] < _RANK[min_role]:
+        raise HTTPException(
+            status_code=403,
+            detail=f"requires {min_role} on this "
+                   f"{'product' if product_id else 'system'}",
+        )
+    if with_lock and product_id is not None and not ident.is_bypass:
+        holder = _store().lock_holder(product_id)
+        if holder != ident.userid:
+            raise HTTPException(
+                status_code=423,
+                detail={"error": "edit lock required", "held_by": holder},
+            )
 
 
 def require_role(min_role: str, *, with_lock: bool = False):
@@ -68,24 +98,7 @@ def require_role(min_role: str, *, with_lock: bool = False):
     async def guard(
         request: Request, ident: Identity = Depends(current_identity),
     ) -> Identity:
-        product_id = _product_for(request)
-        role = effective_role(ident, product_id)
-        if role is None or _RANK[role] < _RANK[min_role]:
-            raise HTTPException(
-                status_code=403,
-                detail=f"requires {min_role} on this "
-                       f"{'product' if product_id else 'system'}",
-            )
-        if with_lock and product_id is not None and not ident.is_bypass:
-            holder = AUTH_STORE.lock_holder(product_id)
-            if holder != ident.userid:
-                raise HTTPException(
-                    status_code=423,
-                    detail={
-                        "error": "edit lock required",
-                        "held_by": holder,
-                    },
-                )
+        _enforce(ident, _product_for(request), min_role, with_lock)
         return ident
 
     return guard
@@ -120,15 +133,19 @@ async def job_viewer_guard(
 def _product_of_template(template_id: str) -> str | None:
     from app.library import LIBRARIES
     from app.versions import VERSION_STORE
-    row = LIBRARIES.store.conn.execute(
-        "SELECT library_id FROM templates WHERE id = ?", (template_id,)
-    ).fetchone()
+    # Hold each store's RLock around its connection use — db.Connection is
+    # a single stateful connection serialized by that lock everywhere else.
+    with LIBRARIES.store.lock:
+        row = LIBRARIES.store.conn.execute(
+            "SELECT library_id FROM templates WHERE id = ?", (template_id,)
+        ).fetchone()
     if row is None:
         return None
-    vrow = VERSION_STORE.conn.execute(
-        "SELECT product_id FROM versions WHERE library_id = ?",
-        (row["library_id"],),
-    ).fetchone()
+    with VERSION_STORE.lock:
+        vrow = VERSION_STORE.conn.execute(
+            "SELECT product_id FROM versions WHERE library_id = ?",
+            (row["library_id"],),
+        ).fetchone()
     return vrow["product_id"] if vrow else None
 
 
@@ -136,21 +153,11 @@ async def template_editor_guard(
     request: Request, ident: Identity = Depends(current_identity),
 ) -> Identity:
     """Template mutations carry only template_id — resolve template →
-    library → version → product, then editor + lock. Missing templates
-    pass through (handler 404s)."""
+    library → version → product, then the standard editor+lock checks.
+    Missing templates pass through (handler 404s)."""
     product_id = _product_of_template(request.path_params.get("template_id", ""))
-    if product_id is None:
-        return ident
-    role = effective_role(ident, product_id)
-    if role is None or _RANK[role] < _RANK["editor"]:
-        raise HTTPException(status_code=403, detail="requires editor on this product")
-    if not ident.is_bypass:
-        holder = AUTH_STORE.lock_holder(product_id)
-        if holder != ident.userid:
-            raise HTTPException(
-                status_code=423,
-                detail={"error": "edit lock required", "held_by": holder},
-            )
+    if product_id is not None:
+        _enforce(ident, product_id, "editor", with_lock=True)
     return ident
 
 
@@ -161,7 +168,7 @@ def visible_products(ident: Identity, products: list) -> list:
         return products
     out = []
     for p in products:
-        role = AUTH_STORE.effective_role(
+        role = _store().effective_role(
             ident, product_id=p.id, customer_id=p.customer_id,
         )
         if role is not None:

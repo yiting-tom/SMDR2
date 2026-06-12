@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from app import db
-from app.db import Row, _qmark_to_format
+from app.db import _qmark_to_format
 
 
 @pytest.fixture
@@ -36,10 +36,12 @@ def test_default_path_follows_database_url(monkeypatch):
 
 # ---- qmark translation --------------------------------------------------------
 def test_qmark_translation_skips_quoted_literals():
+    # '?' inside literals survives; '%' is escaped even inside literals
+    # (PyMySQL interpolates the whole statement, quotes included).
     sql = "SELECT * FROM t WHERE a = ? AND b = 'lit?eral' AND c LIKE '%x?%'"
     out = _qmark_to_format(sql)
     assert out == (
-        "SELECT * FROM t WHERE a = %s AND b = 'lit?eral' AND c LIKE '%x?%'"
+        "SELECT * FROM t WHERE a = %s AND b = 'lit?eral' AND c LIKE '%%x?%%'"
     )
 
 

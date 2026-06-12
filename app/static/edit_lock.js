@@ -21,13 +21,10 @@
   el.id = "edit-lock";
   slot.appendChild(el);
 
-  function csrfHeaders() {
-    const m = document.cookie.match(/(?:^|; )conform_csrf=([^;]+)/);
-    return m ? { "X-CSRF-Token": decodeURIComponent(m[1]) } : {};
-  }
-
+  // CSRF: csrf.js (loaded before this script) wraps window.fetch and
+  // injects X-CSRF-Token on every mutating request — no local handling.
   async function api(method, path) {
-    const r = await fetch(path, { method, headers: csrfHeaders() });
+    const r = await fetch(path, { method });
     return { status: r.status, body: await r.json().catch(() => ({})) };
   }
 
@@ -88,10 +85,9 @@
 
   window.addEventListener("beforeunload", () => {
     if (heartbeatTimer) {
-      navigator.sendBeacon &&
-        fetch(`/api/products/${productId}/lock`, {
-          method: "DELETE", headers: csrfHeaders(), keepalive: true,
-        });
+      fetch(`/api/products/${productId}/lock`, {
+        method: "DELETE", keepalive: true,
+      });
     }
   });
 

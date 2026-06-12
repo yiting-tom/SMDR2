@@ -40,6 +40,7 @@ class WorkerLoop:
         self._executor: ProcessPoolExecutor | None = None
         self._inflight: dict[str, tuple[dict, Future]] = {}
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._last_heartbeat = 0.0
         self._last_maintenance = 0.0
 
@@ -84,9 +85,14 @@ class WorkerLoop:
                 callback_error = jobs.apply_success(job, result)
                 if callback_error:
                     store.fail(job_id, callback_error)
+                    logger.warning(
+                        "job_callback_error id=%s kind=%s", job_id, job["kind"]
+                    )
                 else:
                     store.complete(job_id, result)
-                logger.info("job_done id=%s kind=%s", job_id, job["kind"])
+                    logger.info(
+                        "job_done id=%s kind=%s", job_id, job["kind"]
+                    )
 
         # 2. claim while slots free
         while len(self._inflight) < self.max_workers and not self._stop.is_set():
@@ -109,10 +115,20 @@ class WorkerLoop:
             store.heartbeat(self.identity, now)
             self._last_heartbeat = now
         if now - self._last_maintenance >= 60.0:
-            requeued, failed = store.requeue_stale(now)
-            if requeued or failed:
+            requeued = store.requeue_stale(now)
+            exhausted = store.stale_exhausted(now)
+            for job in exhausted:
+                # Same failure path a raising worker takes — FILE_STORE
+                # status flips and reprocess-all parents get their bump.
+                exc = RuntimeError(
+                    "worker died (heartbeat stale, attempts exhausted)"
+                )
+                jobs.apply_failure(job, exc, "")
+                store.fail(job["id"], str(exc))
+            if requeued or exhausted:
                 logger.warning(
-                    "stale jobs: requeued=%d failed=%d", requeued, failed
+                    "stale jobs: requeued=%d failed=%d",
+                    requeued, len(exhausted),
                 )
             store.prune(now)
             try:
@@ -123,15 +139,28 @@ class WorkerLoop:
             self._last_maintenance = now
         return activity
 
+    def kick(self) -> None:
+        """Wake an idle loop immediately (called on job submission in
+        embedded mode — keeps dev/test latency at claim-time zero while
+        the idle backoff keeps the DB quiet)."""
+        self._wake.set()
+
     def run_forever(self, poll_interval: float = 0.1) -> None:
         logger.info(
             "worker loop up identity=%s max_workers=%d",
             self.identity, self.max_workers,
         )
+        idle_sleep = poll_interval
         while not self._stop.is_set():
             try:
-                if not self.run_once():
-                    self._stop.wait(poll_interval)
+                if self.run_once():
+                    idle_sleep = poll_interval
+                else:
+                    # Exponential idle backoff (cap 1s): an idle fleet of
+                    # loops otherwise polls the queue 10x/s each, forever.
+                    self._wake.wait(idle_sleep)
+                    self._wake.clear()
+                    idle_sleep = min(idle_sleep * 2, 1.0)
             except Exception:
                 logger.exception("worker loop tick failed; continuing")
                 self._stop.wait(1.0)
@@ -144,18 +173,20 @@ _embedded_lock = threading.Lock()
 
 def ensure_embedded() -> None:
     """Start the in-process worker thread once (dev / tests / single
-    container). No-op when SMDR2_EMBEDDED_WORKER=0 (k8s webs)."""
+    container) and wake it. No-op when SMDR2_EMBEDDED_WORKER=0 (k8s
+    webs)."""
     global _embedded
     if os.environ.get("SMDR2_EMBEDDED_WORKER", "1") == "0":
         return
     with _embedded_lock:
-        if _embedded is not None:
-            return
-        _embedded = WorkerLoop()
-        t = threading.Thread(
-            target=_embedded.run_forever, name="conform-worker", daemon=True
-        )
-        t.start()
+        if _embedded is None:
+            _embedded = WorkerLoop()
+            t = threading.Thread(
+                target=_embedded.run_forever, name="conform-worker",
+                daemon=True,
+            )
+            t.start()
+        _embedded.kick()
 
 
 def shutdown_embedded() -> None:

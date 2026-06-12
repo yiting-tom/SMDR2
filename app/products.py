@@ -64,8 +64,6 @@ class ProductStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         ensure_versioned_schema(path)
         self.conn = db.connect(path)
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         with self.lock, self.conn:
             self.conn.executescript(PRODUCTS_SCHEMA)

@@ -79,7 +79,9 @@ spec:
             # (lru=4) — cap generously, monitor after launch.
             limits: {cpu: "2", memory: 4Gi}
           readinessProbe:
-            httpGet: {path: /api/products, port: 8000}
+            # /healthz is auth-exempt in every mode — /api/* would 401 the
+            # kubelet under SMDR2_AUTH_MODE=oidc and the rollout would hang.
+            httpGet: {path: /healthz, port: 8000}
             initialDelaySeconds: 5
             periodSeconds: 10
           volumeMounts:

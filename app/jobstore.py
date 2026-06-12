@@ -58,9 +58,6 @@ CREATE INDEX IF NOT EXISTS idx_jobs_binding ON jobs(kind, version_id, file_id, s
 CREATE INDEX IF NOT EXISTS idx_jobs_parent  ON jobs(parent_id);
 """
 
-_JSON_FIELDS = ("payload", "result", "error_obj")
-
-
 def _row_to_dict(row: db.Row) -> dict[str, Any]:
     d = dict(row)
     payload = json.loads(d.pop("payload") or "{}")
@@ -245,25 +242,33 @@ class JobStore:
             )
 
     # ---- maintenance ---------------------------------------------------------------
-    def requeue_stale(self, now: float | None = None) -> tuple[int, int]:
-        """Running jobs whose heartbeat went silent: requeue while
-        attempts remain, fail otherwise. Returns (requeued, failed)."""
+    def requeue_stale(self, now: float | None = None) -> int:
+        """Requeue running jobs whose heartbeat went silent and that have
+        attempts left. Attempt-exhausted ones are NOT touched here —
+        `stale_exhausted` hands them to the worker loop so the per-kind
+        failure side effects (FILE_STORE error status, reprocess-all
+        parent bookkeeping) run, same as any other failure."""
         now = time.time() if now is None else now
         cutoff = now - STALE_AFTER_SECONDS
         with self.lock, self.conn:
-            requeued = self.conn.execute(
+            return self.conn.execute(
                 "UPDATE jobs SET status='queued', claimed_by=NULL,"
                 " heartbeat_at=NULL WHERE status='running'"
                 " AND heartbeat_at < ? AND attempts < ?",
                 (cutoff, MAX_ATTEMPTS),
             ).rowcount
-            failed = self.conn.execute(
-                "UPDATE jobs SET status='error', completed_at=?,"
-                " error='worker died (heartbeat stale, attempts exhausted)'"
-                " WHERE status='running' AND heartbeat_at < ?",
-                (now, cutoff),
-            ).rowcount
-        return requeued, failed
+
+    def stale_exhausted(self, now: float | None = None) -> list[dict]:
+        """Running jobs that are heartbeat-stale with no attempts left.
+        The caller fails them through the normal failure path."""
+        now = time.time() if now is None else now
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM jobs WHERE status='running'"
+                " AND heartbeat_at < ? AND attempts >= ?",
+                (now - STALE_AFTER_SECONDS, MAX_ATTEMPTS),
+            ).fetchall()
+        return [_row_to_dict(r) for r in rows]
 
     def prune(self, now: float | None = None) -> int:
         now = time.time() if now is None else now

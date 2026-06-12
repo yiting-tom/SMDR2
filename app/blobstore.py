@@ -203,9 +203,10 @@ class S3BlobStore:
             raise
 
     def delete(self, key: str) -> bool:
-        existed = self.exists(key)
+        """Blind delete — S3 delete_object succeeds on missing keys and
+        callers ignore the bool, so skip the extra HEAD round-trip."""
         self._client.delete_object(Bucket=self.bucket, Key=key)
-        return existed
+        return True
 
     def delete_prefix(self, prefix: str) -> int:
         if not prefix.endswith("/"):

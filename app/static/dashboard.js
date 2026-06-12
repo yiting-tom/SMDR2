@@ -446,6 +446,52 @@ async function unsignVersion(p, version) {
   await refresh();
 }
 
+// Product edit lock control (specs/product-edit-lock): writes require the
+// explicit 開始編輯 lock; this is the dashboard-side acquire/release so a
+// brand-new product can receive its first upload without a viewer tab.
+// In bypass mode the server skips lock enforcement and this still works.
+let _meCache = null;
+async function whoAmI() {
+  if (_meCache) return _meCache;
+  try {
+    const r = await fetch("/api/me");
+    _meCache = r.ok ? await r.json() : { userid: null };
+  } catch (_) { _meCache = { userid: null }; }
+  return _meCache;
+}
+
+async function mountLockControl(el, productId) {
+  if (!el) return;
+  const me = await whoAmI();
+  async function render() {
+    let holder = null;
+    try {
+      const r = await fetch(`/api/products/${productId}/lock`);
+      if (r.ok) holder = (await r.json()).held_by;
+    } catch (_) { /* leave holder null */ }
+    if (holder && holder === me.userid) {
+      el.innerHTML = `<button class="lock-btn" type="button" title="釋放編輯鎖">結束編輯</button>`;
+      el.querySelector("button").onclick = async () => {
+        await fetch(`/api/products/${productId}/lock`, { method: "DELETE" });
+        render();
+      };
+    } else if (holder) {
+      el.innerHTML = `<span class="lock-other" title="此產品正被編輯">🔒 ${escapeHtml(holder)}</span>`;
+    } else {
+      el.innerHTML = `<button class="lock-btn" type="button" title="搶編輯鎖後才能上傳/建版/簽核">開始編輯</button>`;
+      el.querySelector("button").onclick = async () => {
+        const r = await fetch(`/api/products/${productId}/lock`, { method: "POST" });
+        if (r.status === 423) {
+          const b = await r.json().catch(() => ({}));
+          $status.textContent = `編輯鎖被 ${b.held_by || "?"} 持有`;
+        }
+        render();
+      };
+    }
+  }
+  render();
+}
+
 function productCard(p) {
   const card = document.createElement("section");
   card.className = "product-card";
@@ -457,10 +503,12 @@ function productCard(p) {
   const header = document.createElement("header");
   header.innerHTML =
     `<span class="product-name">${escapeHtml(p.name)}</span>` +
+    `<span class="product-lock" data-product-id="${p.id}"></span>` +
     `<span class="spacer"></span>` +
     `<button class="product-delete" type="button" title="Delete this product">Delete</button>`;
   header.querySelector(".product-delete").addEventListener("click", () => deleteProduct(p));
   card.appendChild(header);
+  mountLockControl(header.querySelector(".product-lock"), p.id);
 
   card.appendChild(versionBar(p, version));
 

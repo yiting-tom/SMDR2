@@ -496,8 +496,6 @@ def test_save_match_done_callback_flips_flag_and_stores_result(
     SHALL set the job to "done", populate `result` with the documented
     shape, flip `match_saved` on the binding, and leave the
     version-scoped match JSON on disk."""
-    import time
-    from concurrent.futures import Future
     from app import jobs
     from app.files import FILE_STORE
     from app.storage import match_path
@@ -555,8 +553,6 @@ def test_save_match_done_callback_does_not_flip_flag_on_worker_error(
     """If the worker raises, `_on_save_match_done` SHALL set
     `status=error`, populate `error`, leave `match_saved` False, and
     keep the rule-check submit gate honest about the missing role."""
-    import time
-    from concurrent.futures import Future
     from app import jobs
     from app.files import FILE_STORE
 

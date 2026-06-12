@@ -101,7 +101,6 @@ def test_match_json_invalidated_when_applied_scale_changes(tmp_path, monkeypatch
     """Re-preprocessing a file whose `applied_scale` flips (e.g. operator
     sets a unit override) SHALL delete `data/match/<file_id>.json` and
     clear `match_saved`."""
-    import json
     from app import jobs, storage
     from app.files import FileStore
 
