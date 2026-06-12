@@ -404,15 +404,20 @@ async def me(request: Request):
                if ident.deptid else [])
         )
     ]
-    return {
-        "userid": ident.userid,
-        "deptid": ident.deptid,
-        "name": ident.name,
-        "email": ident.email,
-        "source": ident.source,
-        "is_admin": effective_role(ident, None) == "admin",
-        "grants": grants,
-    }
+    return JSONResponse(
+        {
+            "userid": ident.userid,
+            "deptid": ident.deptid,
+            "name": ident.name,
+            "email": ident.email,
+            "source": ident.source,
+            "is_admin": effective_role(ident, None) == "admin",
+            "grants": grants,
+        },
+        # Auth status must never be cached — a logout/login or a grant
+        # change has to be seen on the very next request.
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---- Pages --------------------------------------------------------------
@@ -1000,8 +1005,7 @@ async def sign_off_version(
     dependencies=[Depends(viewer_guard)],
 )
 async def get_sign_off_evidence(version_id: str) -> Response:
-    """The sign-off proof image (404 when the version has none). Frozen
-    content — cacheable for the session."""
+    """The sign-off proof image (404 when the version has none)."""
     v = _resolve_version(version_id)
     if not v.evidence_name:
         raise HTTPException(status_code=404, detail="no sign-off evidence")
@@ -1013,8 +1017,11 @@ async def get_sign_off_evidence(version_id: str) -> Response:
     return Response(
         content=data,
         media_type=v.evidence_type or "application/octet-stream",
+        # No long cache: the same version URL changes meaning across an
+        # admin unsign / re-sign-off (different image, or now 404). The
+        # image is tiny and internal, so revalidating every time is free.
         headers={
-            "Cache-Control": "private, max-age=3600",
+            "Cache-Control": "no-cache",
             "Content-Disposition":
                 f"inline; filename*=UTF-8''{quote(v.evidence_name)}",
         },

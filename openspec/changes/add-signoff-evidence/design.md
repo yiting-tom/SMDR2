@@ -38,5 +38,7 @@ FastAPI `UploadFile | None = File(None)` 對「完全沒有 body 的 POST」回 
 ## D5 — 讀取端點回應
 
 `GET /api/versions/{vid}/sign-off/evidence`:viewer guard;200 回 bytes +
-DB 的 MIME + `Cache-Control: private, max-age=3600`(簽核後不可變;unsign 會換
-URL 內容但該版本同時也離開唯讀展示情境);無證明或未簽核 → 404。
+DB 的 MIME;無證明或未簽核 → 404。**`Cache-Control: no-cache`** — 同一個
+version URL 的意義會隨 admin unsign / 重簽改變(換圖、或變 404),長 cache
+會讓 client 看到 stale 200(Playwright e2e 2026-06-12 實測到);圖小、內網,
+每次 revalidate 成本可忽略。同理 `/api/me` 設 `no-store`(auth 狀態不可 cache)。
