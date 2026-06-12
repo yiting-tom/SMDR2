@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import (
     HTMLResponse,
@@ -66,6 +66,16 @@ from app.versions import DuplicateLabel, VERSION_STORE, Version
 from app.drc_bundle import build_bundle
 from app.side_regions import normalise_rect, parse_match_key, split_matches_by_side
 from app.blobstore import get_blobstore
+from app.guards import (
+    admin_guard,
+    current_identity,
+    editor_guard,
+    editor_guard_nolock,
+    job_viewer_guard,
+    template_editor_guard,
+    viewer_guard,
+    visible_products,
+)
 from app.storage import (
     DATA_DIR,
     layer_manifest_key,
@@ -287,14 +297,6 @@ def _cookie_secure() -> bool:
     return os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true")
 
 
-async def current_identity(request: Request):
-    """The dependency every guarded endpoint hangs off (group 6 wires it
-    in). Bypass mode → synthetic admin; oidc mode → session cookie +
-    CSRF check for mutating methods."""
-    from app.auth import get_identity
-    return get_identity(request)
-
-
 @app.get("/auth/login")
 async def auth_login(next: str = "/"):
     from app import oidc as oidc_mod
@@ -379,13 +381,30 @@ async def me(request: Request):
 
 
 # ---- Pages --------------------------------------------------------------
+def _page_identity(request: Request):
+    """Page-level auth: API consumers get 401s, but a human hitting a
+    page should land on the Keycloak login — redirect with next=."""
+    from app.auth import get_identity
+    try:
+        get_identity(request)
+        return None
+    except HTTPException:
+        return RedirectResponse(
+            f"/auth/login?next={request.url.path}", status_code=302,
+        )
+
+
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request) -> HTMLResponse:
+async def dashboard(request: Request):
+    if (redir := _page_identity(request)) is not None:
+        return redir
     return templates.TemplateResponse(request, "dashboard.html")
 
 
 @app.get("/viewer/{file_id}", response_class=HTMLResponse)
-async def viewer(request: Request, file_id: str, version_id: str) -> HTMLResponse:
+async def viewer(request: Request, file_id: str, version_id: str):
+    if (redir := _page_identity(request)) is not None:
+        return redir
     rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="file not found in this version")
@@ -398,6 +417,7 @@ async def viewer(request: Request, file_id: str, version_id: str) -> HTMLRespons
             "version_id": version_id,
             "version_label": version.label,
             "product_name": product.name if product else "",
+            "product_id": version.product_id,
             "signed_off": version.is_signed_off,
         }
     )
@@ -407,6 +427,7 @@ async def viewer(request: Request, file_id: str, version_id: str) -> HTMLRespons
 class CreateProductRequest(BaseModel):
     name: str
     version_label: str
+    customer_id: str = "uncategorized"
 
 
 class CreateVersionRequest(BaseModel):
@@ -490,12 +511,65 @@ def _version_payload(v: Version) -> dict:
     }
 
 
+# ---- Product edit lock (specs/product-edit-lock) ---------------------------
+@app.get("/api/products/{product_id}/lock", dependencies=[Depends(viewer_guard)])
+async def lock_status(product_id: str) -> dict:
+    from app.auth import AUTH_STORE
+    holder = AUTH_STORE.lock_holder(product_id)
+    return {"product_id": product_id, "held_by": holder}
+
+
+@app.post("/api/products/{product_id}/lock")
+async def acquire_lock(
+    product_id: str, ident=Depends(editor_guard_nolock),
+) -> JSONResponse:
+    """Explicit start-editing action. 423 with the holder when occupied;
+    re-acquiring one's own lock refreshes the heartbeat."""
+    from app.auth import AUTH_STORE
+    if PRODUCT_STORE.get(product_id) is None:
+        raise HTTPException(status_code=404, detail="product not found")
+    st = AUTH_STORE.acquire_lock(product_id, ident.userid)
+    if not st.acquired:
+        return JSONResponse(
+            status_code=423,
+            content={"held_by": st.held_by, "heartbeat_at": st.heartbeat_at},
+        )
+    return JSONResponse({"acquired": True, "held_by": ident.userid})
+
+
+@app.post("/api/products/{product_id}/lock/heartbeat")
+async def heartbeat_lock(
+    product_id: str, ident=Depends(editor_guard_nolock),
+) -> dict:
+    from app.auth import AUTH_STORE
+    ok = AUTH_STORE.heartbeat_lock(product_id, ident.userid)
+    if not ok:
+        raise HTTPException(status_code=409, detail="lock not held by you")
+    return {"ok": True}
+
+
+@app.delete("/api/products/{product_id}/lock")
+async def release_lock(
+    product_id: str, force: bool = False, ident=Depends(current_identity),
+) -> dict:
+    """Owner release, or admin force-release (?force=1, audited)."""
+    from app.auth import AUTH_STORE
+    from app.guards import effective_role
+    if force:
+        if effective_role(ident, None) != "admin":
+            raise HTTPException(status_code=403, detail="force release is admin-only")
+        AUTH_STORE.release_lock(product_id, ident.userid, force=True)
+        return {"released": True, "forced": True}
+    released = AUTH_STORE.release_lock(product_id, ident.userid)
+    return {"released": released}
+
+
 @app.get("/api/products")
-async def list_products() -> dict:
-    """Every product with its versions (each carrying role bindings and
-    rule-check readiness). Everyone logged in sees all products (A3)."""
+async def list_products(ident=Depends(current_identity)) -> dict:
+    """Products visible to the caller (viewer scope filtering —
+    grant-less users see an empty system), each with its versions."""
     items = []
-    for p in PRODUCT_STORE.list_all():
+    for p in visible_products(ident, PRODUCT_STORE.list_all()):
         versions = [
             _version_payload(v) for v in VERSION_STORE.list_by_product(p.id)
         ]
@@ -506,7 +580,7 @@ async def list_products() -> dict:
     return {"products": items}
 
 
-@app.get("/api/products/{product_id}")
+@app.get("/api/products/{product_id}", dependencies=[Depends(viewer_guard)])
 async def get_product(product_id: str) -> dict:
     p = PRODUCT_STORE.get(product_id)
     if p is None:
@@ -520,7 +594,9 @@ async def get_product(product_id: str) -> dict:
 
 
 @app.post("/api/products")
-async def create_product(req: CreateProductRequest) -> dict:
+async def create_product(
+    req: CreateProductRequest, ident=Depends(admin_guard),
+) -> dict:
     name = req.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="name required")
@@ -529,18 +605,32 @@ async def create_product(req: CreateProductRequest) -> dict:
         # Pydantic enforces presence (422 on missing field); this catches
         # whitespace-only labels with the same status family.
         raise HTTPException(status_code=422, detail="version_label required")
-    p, v = VERSION_STORE.create_product(name, label)
+    from app.auth import AUTH_STORE
+    customer_id = (req.customer_id or "uncategorized").strip()
+    if AUTH_STORE.get_customer(customer_id) is None:
+        raise HTTPException(status_code=400, detail="unknown customer")
+    p, v = VERSION_STORE.create_product(name, label, customer_id=customer_id)
     # Seed default classes into the new version's library.
     LIBRARIES.get(v.library_id)
+    AUTH_STORE.audit(
+        actor=ident.userid, action="product.create",
+        target_type="product", target_id=p.id, product_id=p.id,
+        detail={"name": name, "customer_id": customer_id},
+    )
     return {**p.to_dict(), "versions": [_version_payload(v)]}
 
 
 @app.delete("/api/products/{product_id}")
-async def delete_product(product_id: str) -> dict:
-    """Admin-only once auth lands. Cascades versions, their libraries,
-    bindings, and every version-scoped artifact dir."""
+async def delete_product(product_id: str, ident=Depends(admin_guard)) -> dict:
+    """Admin-only. Cascades versions, their libraries, bindings, and
+    every version-scoped artifact prefix."""
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
+    from app.auth import AUTH_STORE
+    AUTH_STORE.audit(
+        actor=ident.userid, action="product.delete",
+        target_type="product", target_id=product_id, product_id=product_id,
+    )
     removed = VERSION_STORE.delete_for_product(product_id)
     blobs = get_blobstore()
     for v in removed:
@@ -557,7 +647,7 @@ async def delete_product(product_id: str) -> dict:
     return {"deleted": product_id, "versions_removed": len(removed)}
 
 
-@app.get("/api/products/{product_id}/version-diff")
+@app.get("/api/products/{product_id}/version-diff", dependencies=[Depends(viewer_guard)])
 async def get_version_diff(
     product_id: str,
     from_id: str = Query(alias="from"),
@@ -579,7 +669,7 @@ async def get_version_diff(
     return diff_versions(v_from, v_to)
 
 
-@app.get("/api/products/{product_id}/versions")
+@app.get("/api/products/{product_id}/versions", dependencies=[Depends(viewer_guard)])
 async def list_versions(product_id: str) -> dict:
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -591,7 +681,7 @@ async def list_versions(product_id: str) -> dict:
     }
 
 
-@app.post("/api/products/{product_id}/versions")
+@app.post("/api/products/{product_id}/versions", dependencies=[Depends(editor_guard)])
 async def create_version(product_id: str, req: CreateVersionRequest) -> dict:
     """New version = clone of `clone_from` (default: the product's most
     recent version): library content + role bindings. Cloned bindings
@@ -633,13 +723,15 @@ async def create_version(product_id: str, req: CreateVersionRequest) -> dict:
 
 
 @app.post("/api/versions/{version_id}/sign-off")
-async def sign_off_version(version_id: str) -> dict:
-    """Freeze the version. Identity is the dev placeholder until auth
-    lands (SMDR2_DEV_USER). Already-signed → 409."""
+async def sign_off_version(version_id: str, ident=Depends(editor_guard)) -> dict:
+    """Freeze the version. Editors may sign versions in their scope —
+    including ones they created (no separation of duties, 2026-06-11).
+    Already-signed → 409."""
+    from app.auth import AUTH_STORE
     from app.versions import SignedOff
-    _resolve_version(version_id)
+    v0 = _resolve_version(version_id)
     try:
-        v = VERSION_STORE.sign_off(version_id, DEV_USER)
+        v = VERSION_STORE.sign_off(version_id, ident.userid)
     except SignedOff as exc:
         raise HTTPException(
             status_code=409,
@@ -649,20 +741,30 @@ async def sign_off_version(version_id: str) -> dict:
                 "signed_off_at": exc.at,
             },
         )
+    AUTH_STORE.audit(
+        actor=ident.userid, action="version.sign_off",
+        target_type="version", target_id=version_id,
+        product_id=v0.product_id, version_id=version_id,
+    )
     return v.to_dict()
 
 
 @app.delete("/api/versions/{version_id}/sign-off")
-async def unsign_version(version_id: str) -> dict:
-    """Reopen a signed version. Admin-only once auth lands; unrestricted
-    in the dev window (noted in the spec)."""
-    _resolve_version(version_id)
+async def unsign_version(version_id: str, ident=Depends(admin_guard)) -> dict:
+    """Reopen a signed version — admin only (specs/authorization)."""
+    from app.auth import AUTH_STORE
+    v0 = _resolve_version(version_id)
     v = VERSION_STORE.unsign(version_id)
+    AUTH_STORE.audit(
+        actor=ident.userid, action="version.unsign",
+        target_type="version", target_id=version_id,
+        product_id=v0.product_id, version_id=version_id,
+    )
     return v.to_dict()
 
 
 # ---- Version file bindings -------------------------------------------------
-@app.post("/api/versions/{version_id}/files")
+@app.post("/api/versions/{version_id}/files", dependencies=[Depends(editor_guard)])
 async def upload_version_file(
     version_id: str,
     file: UploadFile = File(...),
@@ -745,7 +847,7 @@ async def upload_version_file(
     }
 
 
-@app.delete("/api/versions/{version_id}/files/{file_id}", status_code=204)
+@app.delete("/api/versions/{version_id}/files/{file_id}", status_code=204, dependencies=[Depends(editor_guard)])
 async def delete_version_file(version_id: str, file_id: str) -> Response:
     """Remove one binding from a version. The content row (and the bytes
     under uploads/) stays — other versions may reference it."""
@@ -781,7 +883,7 @@ class SideRegionsRequest(BaseModel):
     side_view_rect: RectModel | None = None
 
 
-@app.post("/api/files/{file_id}/unit-override")
+@app.post("/api/files/{file_id}/unit-override", dependencies=[Depends(editor_guard)])
 async def post_unit_override(
     file_id: str, req: UnitOverrideRequest, version_id: str,
 ) -> JSONResponse:
@@ -841,7 +943,7 @@ def _affected_product_for_version(version_id: str) -> list[dict]:
     return [{"id": product.id, "name": product.name, "version_label": v.label}]
 
 
-@app.patch("/api/files/{file_id}/side-regions")
+@app.patch("/api/files/{file_id}/side-regions", dependencies=[Depends(editor_guard)])
 async def patch_side_regions(
     file_id: str, req: SideRegionsRequest, version_id: str,
 ) -> dict:
@@ -879,13 +981,13 @@ async def patch_side_regions(
     }
 
 
-@app.get("/api/files")
+@app.get("/api/files", dependencies=[Depends(admin_guard)])
 async def list_files() -> dict:
     """Every binding (the operational unit) — kept for debugging."""
     return {"files": [r.to_dict() for r in FILE_STORE.list_all()]}
 
 
-@app.get("/api/files/{file_id}")
+@app.get("/api/files/{file_id}", dependencies=[Depends(viewer_guard)])
 async def get_file(file_id: str, version_id: str) -> dict:
     rec = FILE_STORE.get(version_id, file_id)
     if rec is None:
@@ -893,7 +995,7 @@ async def get_file(file_id: str, version_id: str) -> dict:
     return rec.to_dict()
 
 
-@app.get("/api/jobs/{job_id}")
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(job_viewer_guard)])
 async def get_job(job_id: str) -> dict:
     j = jobs.get(job_id)
     if j is None:
@@ -909,7 +1011,7 @@ def _read_layer_manifest(version_id: str, file_id: str) -> dict | None:
         return None
 
 
-@app.get("/api/files/{file_id}/layers")
+@app.get("/api/files/{file_id}/layers", dependencies=[Depends(viewer_guard)])
 async def get_file_layers(file_id: str, version_id: str) -> dict:
     """Manifest + current selection for a binding. 404 if Phase 1 hasn't
     finished yet (no manifest on disk)."""
@@ -932,7 +1034,7 @@ class LayersConfirmRequest(BaseModel):
     layers: list[str]
 
 
-@app.post("/api/files/{file_id}/layers")
+@app.post("/api/files/{file_id}/layers", dependencies=[Depends(editor_guard)])
 async def confirm_layers(
     file_id: str, req: LayersConfirmRequest, version_id: str,
 ) -> dict:
@@ -973,7 +1075,7 @@ async def confirm_layers(
     }
 
 
-@app.get("/api/files/{file_id}/layer-preview/{safe_name}.svg")
+@app.get("/api/files/{file_id}/layer-preview/{safe_name}.svg", dependencies=[Depends(viewer_guard)])
 async def get_layer_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one layer's SVG thumbnail. 404 when Phase 1 hasn't completed
     or the requested layer isn't in the binding's manifest."""
@@ -1024,7 +1126,7 @@ def _read_layout_manifest(version_id: str, file_id: str) -> dict | None:
         return None
 
 
-@app.get("/api/files/{file_id}/layouts")
+@app.get("/api/files/{file_id}/layouts", dependencies=[Depends(viewer_guard)])
 async def get_file_layouts(file_id: str, version_id: str) -> dict:
     """Layout (AutoCAD-tab) picker manifest + current choice. 404 when no
     layout picker applies to this binding or discovery hasn't produced
@@ -1048,7 +1150,7 @@ class LayoutConfirmRequest(BaseModel):
     layout: str
 
 
-@app.post("/api/files/{file_id}/layouts")
+@app.post("/api/files/{file_id}/layouts", dependencies=[Depends(editor_guard)])
 async def confirm_layout(
     file_id: str, req: LayoutConfirmRequest, version_id: str,
 ) -> dict:
@@ -1087,7 +1189,7 @@ async def confirm_layout(
     }
 
 
-@app.get("/api/files/{file_id}/layout-preview/{safe_name}.svg")
+@app.get("/api/files/{file_id}/layout-preview/{safe_name}.svg", dependencies=[Depends(viewer_guard)])
 async def get_layout_preview_svg(file_id: str, safe_name: str, version_id: str):
     """Serve one AutoCAD-tab SVG thumbnail for the layout picker. 404 when
     the binding has no layout manifest or the tab isn't in it."""
@@ -1111,7 +1213,7 @@ async def get_layout_preview_svg(file_id: str, safe_name: str, version_id: str):
 
 
 # ---- Classes / templates within a version's library ----------------------
-@app.get("/api/versions/{version_id}/classes")
+@app.get("/api/versions/{version_id}/classes", dependencies=[Depends(viewer_guard)])
 async def classes_by_version(version_id: str) -> dict:
     v = _resolve_version(version_id)
     return {
@@ -1132,9 +1234,10 @@ class ClassStrategyRequest(BaseModel):
     bbox_ratio: float | None = None
 
 
-@app.put("/api/versions/{version_id}/classes/{class_name}/strategy")
+@app.put("/api/versions/{version_id}/classes/{class_name}/strategy", dependencies=[Depends(editor_guard)])
 async def set_class_strategy(
     version_id: str, class_name: str, req: ClassStrategyRequest,
+    ident=Depends(current_identity),
 ) -> dict:
     v = require_unsigned(version_id)
     if req.strategy not in ("chamfer", "signature"):
@@ -1159,6 +1262,13 @@ async def set_class_strategy(
     lib = _library_for_version(v)
     if not lib.set_strategy(class_name, req.strategy, bbox_ratio):
         raise HTTPException(status_code=404, detail="class not found")
+    from app.auth import AUTH_STORE
+    AUTH_STORE.audit(
+        actor=ident.userid, action="class.strategy_change",
+        target_type="class", target_id=class_name,
+        product_id=v.product_id, version_id=version_id,
+        detail={"strategy": req.strategy, "bbox_ratio": bbox_ratio},
+    )
     return {
         "version_id": version_id,
         "library_id": v.library_id,
@@ -1168,13 +1278,13 @@ async def set_class_strategy(
     }
 
 
-@app.get("/api/classes")
+@app.get("/api/classes", dependencies=[Depends(viewer_guard)])
 async def classes_for_version(version_id: str) -> dict:
     """Class summary for one version's library (viewer toolbar source)."""
     return await classes_by_version(version_id)
 
 
-@app.get("/api/versions/{version_id}/templates")
+@app.get("/api/versions/{version_id}/templates", dependencies=[Depends(viewer_guard)])
 async def list_templates_for_version(version_id: str) -> dict:
     """The version's complete template list (it owns its library 1:1)."""
     v = _resolve_version(version_id)
@@ -1197,7 +1307,7 @@ async def list_templates_for_version(version_id: str) -> dict:
     return {"templates": items, "version_id": version_id, "library_id": v.library_id}
 
 
-@app.get("/api/templates")
+@app.get("/api/templates", dependencies=[Depends(viewer_guard)])
 async def list_templates(version_id: str) -> dict:
     """Alias for the version-scoped templates endpoint."""
     return await list_templates_for_version(version_id)
@@ -1213,8 +1323,10 @@ def _find_template_owner(template_id: str):
     return None, None
 
 
-@app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: str) -> dict:
+@app.delete("/api/templates/{template_id}", dependencies=[Depends(template_editor_guard)])
+async def delete_template(
+    template_id: str, ident=Depends(current_identity),
+) -> dict:
     # Search across all libraries — template ids are globally unique (UUIDs).
     lib, version = _find_template_owner(template_id)
     if lib is None:
@@ -1222,6 +1334,13 @@ async def delete_template(template_id: str) -> dict:
     if version is not None:
         require_unsigned(version.id)
     lib.delete_template(template_id)
+    from app.auth import AUTH_STORE
+    AUTH_STORE.audit(
+        actor=ident.userid, action="template.delete",
+        target_type="template", target_id=template_id,
+        product_id=version.product_id if version else None,
+        version_id=version.id if version else None,
+    )
     return {"deleted": template_id, "library_id": lib.library_id}
 
 
@@ -1229,8 +1348,10 @@ class MoveTemplateRequest(BaseModel):
     class_name: str
 
 
-@app.patch("/api/templates/{template_id}")
-async def patch_template(template_id: str, req: MoveTemplateRequest) -> dict:
+@app.patch("/api/templates/{template_id}", dependencies=[Depends(template_editor_guard)])
+async def patch_template(
+    template_id: str, req: MoveTemplateRequest, ident=Depends(current_identity),
+) -> dict:
     if not req.class_name:
         raise HTTPException(status_code=400, detail="class_name required")
     lib, version = _find_template_owner(template_id)
@@ -1241,12 +1362,20 @@ async def patch_template(template_id: str, req: MoveTemplateRequest) -> dict:
     if req.class_name not in {c["name"] for c in lib.summary()}:
         lib.add_class(req.class_name)
     lib.move_template(template_id, req.class_name)
+    from app.auth import AUTH_STORE
+    AUTH_STORE.audit(
+        actor=ident.userid, action="template.modify",
+        target_type="template", target_id=template_id,
+        product_id=version.product_id if version else None,
+        version_id=version.id if version else None,
+        detail={"moved_to": req.class_name},
+    )
     return {"id": template_id, "class_name": req.class_name,
             "library_id": lib.library_id}
 
 
 # ---- Per-file: primitives / match / commit / scan-all -------------------
-@app.get("/api/files/{file_id}/primitives")
+@app.get("/api/files/{file_id}/primitives", dependencies=[Depends(viewer_guard)])
 async def primitives(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
     data = _parsed_for(version_id, file_id)
@@ -1266,14 +1395,14 @@ async def primitives(file_id: str, version_id: str) -> dict:
 # ~1–2 s `build_entity_shapes` on a 25k-entity drawing must NOT block the
 # async event loop. Viewer fires this fire-and-forget after `/primitives`
 # returns so the user's first /match scan finds the LRU cache populated.
-@app.post("/api/files/{file_id}/warm-shapes")
+@app.post("/api/files/{file_id}/warm-shapes", dependencies=[Depends(viewer_guard)])
 def warm_shapes(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
     _, shapes = _shapes_for(version_id, file_id)
     return {"entity_count": len(shapes)}
 
 
-@app.get("/api/files/{file_id}/debug-radius-buckets")
+@app.get("/api/files/{file_id}/debug-radius-buckets", dependencies=[Depends(viewer_guard)])
 async def debug_radius_buckets(file_id: str, version_id: str) -> dict:
     """Diagnostic dump for the single-CIRCLE radius-bucket fast path.
 
@@ -1353,7 +1482,7 @@ class MatchRequest(BaseModel):
     class_name: str | None = None
 
 
-@app.post("/api/files/{file_id}/match")
+@app.post("/api/files/{file_id}/match", dependencies=[Depends(editor_guard)])
 async def match(file_id: str, req: MatchRequest, version_id: str) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
@@ -1388,7 +1517,7 @@ class MatchSwapRequest(BaseModel):
     class_name: str | None = None
 
 
-@app.post("/api/files/{file_id}/match-swap")
+@app.post("/api/files/{file_id}/match-swap", dependencies=[Depends(editor_guard)])
 async def match_swap(file_id: str, req: MatchSwapRequest, version_id: str) -> dict:
     """Diagnostic: run find_matches with pattern_a as template AND with
     pattern_b as template, and dump per-pair gate + alignment breakdown so an
@@ -1423,8 +1552,11 @@ class CommitRequest(BaseModel):
     handles: list[str]
 
 
-@app.post("/api/files/{file_id}/commit")
-async def commit(file_id: str, req: CommitRequest, version_id: str) -> dict:
+@app.post("/api/files/{file_id}/commit", dependencies=[Depends(editor_guard)])
+async def commit(
+    file_id: str, req: CommitRequest, version_id: str,
+    ident=Depends(current_identity),
+) -> dict:
     if not req.handles:
         raise HTTPException(status_code=400, detail="empty template")
     v = require_unsigned(version_id)
@@ -1445,6 +1577,14 @@ async def commit(file_id: str, req: CommitRequest, version_id: str) -> dict:
     ]
     tmpl = Template.from_entities(req.class_name, entity_point_sets, entity_kinds)
     stored, already_existed = lib.add_template_for_file(tmpl)
+    if not already_existed:
+        from app.auth import AUTH_STORE
+        AUTH_STORE.audit(
+            actor=ident.userid, action="template.add",
+            target_type="template", target_id=stored.id,
+            product_id=v.product_id, version_id=version_id,
+            detail={"class_name": stored.class_name},
+        )
     return {
         "template_id": stored.id,
         "class_name": stored.class_name,
@@ -1455,7 +1595,7 @@ async def commit(file_id: str, req: CommitRequest, version_id: str) -> dict:
     }
 
 
-@app.get("/api/files/{file_id}/scan-all")
+@app.get("/api/files/{file_id}/scan-all", dependencies=[Depends(viewer_guard)])
 def scan_all(file_id: str, version_id: str) -> dict:  # sync → threadpool
     """Overlay-only preview of "what class does each handle belong to".
 
@@ -1540,7 +1680,7 @@ def scan_all(file_id: str, version_id: str) -> dict:  # sync → threadpool
 
 
 # ---- Pre-match cache (written by preprocess worker) ---------------------
-@app.get("/api/files/{file_id}/prematch")
+@app.get("/api/files/{file_id}/prematch", dependencies=[Depends(viewer_guard)])
 async def prematch(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
     pk = prematch_key(version_id, file_id)
@@ -1557,7 +1697,7 @@ async def prematch(file_id: str, version_id: str) -> dict:
 # pool and returns 202 + {job_id, file_id} immediately. The result lives
 # on `GET /api/jobs/{job_id}` once the job reaches status=done;
 # `match_saved` flips at that point too.
-@app.post("/api/files/{file_id}/match-json")
+@app.post("/api/files/{file_id}/match-json", dependencies=[Depends(editor_guard)])
 async def save_match_json(file_id: str, version_id: str) -> JSONResponse:
     require_unsigned(version_id)
     _resolve_file(version_id, file_id)
@@ -1572,7 +1712,7 @@ async def save_match_json(file_id: str, version_id: str) -> JSONResponse:
     )
 
 
-@app.get("/api/files/{file_id}/match-json")
+@app.get("/api/files/{file_id}/match-json", dependencies=[Depends(viewer_guard)])
 async def get_match_json(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
     mk = match_key(version_id, file_id)
@@ -1582,7 +1722,7 @@ async def get_match_json(file_id: str, version_id: str) -> dict:
 
 
 # ---- Rule checking (version-scoped bundle, product-keyed rules) ----------
-@app.post("/api/versions/{version_id}/rule-check")
+@app.post("/api/versions/{version_id}/rule-check", dependencies=[Depends(editor_guard)])
 async def run_rule_check(version_id: str) -> JSONResponse:
     """Submit a version's DRC job. Returns 202 + `{job_id}`; the
     front-end polls `GET /api/jobs/{job_id}` for completion. Every
@@ -1629,7 +1769,7 @@ async def run_rule_check(version_id: str) -> JSONResponse:
     )
 
 
-@app.get("/api/versions/{version_id}/rule-check")
+@app.get("/api/versions/{version_id}/rule-check", dependencies=[Depends(viewer_guard)])
 async def get_rule_check(version_id: str) -> dict:
     """The version's most recently persisted rule-check result — readable
     indefinitely, signed-off or not (C4: old versions stay reviewable)."""
@@ -1660,7 +1800,7 @@ async def get_rule_check(version_id: str) -> dict:
     }
 
 
-@app.post("/api/versions/{version_id}/rule-check/upload")
+@app.post("/api/versions/{version_id}/rule-check/upload", dependencies=[Depends(editor_guard)])
 async def upload_rule_check(version_id: str, request: Request) -> dict:
     """Dev-only: accept a hand-crafted RuleChecking JSON, validate it
     against the envelope contract, and persist it as if the worker had
@@ -1690,7 +1830,7 @@ async def upload_rule_check(version_id: str, request: Request) -> dict:
 
 
 # ---- DRC handoff bundle (external rule-check team consumes this) --------
-@app.get("/api/versions/{version_id}/drc-bundle")
+@app.get("/api/versions/{version_id}/drc-bundle", dependencies=[Depends(viewer_guard)])
 async def get_drc_bundle(version_id: str) -> Response:
     """Return a zip bundle of every role-bound DXF + per-file Match
     JSON + a manifest the external rule-checking team consumes. Each
@@ -1734,14 +1874,14 @@ def _require_dev_tools() -> None:
         raise HTTPException(status_code=404, detail="dev tools disabled")
 
 
-@app.get("/api/dev/settings")
+@app.get("/api/dev/settings", dependencies=[Depends(admin_guard)])
 async def dev_settings_get() -> dict:
     _require_dev_tools()
     from app import dev_overrides
     return {"settings": dev_overrides.read_state()}
 
 
-@app.post("/api/dev/settings")
+@app.post("/api/dev/settings", dependencies=[Depends(admin_guard)])
 async def dev_settings_post(payload: dict) -> dict:
     _require_dev_tools()
     from app import dev_overrides
@@ -1759,7 +1899,7 @@ async def dev_settings_post(payload: dict) -> dict:
     return {"settings": state}
 
 
-@app.post("/api/dev/reprocess-all")
+@app.post("/api/dev/reprocess-all", dependencies=[Depends(admin_guard)])
 async def dev_reprocess_all() -> dict:
     _require_dev_tools()
     job_id = jobs.submit_reprocess_all()

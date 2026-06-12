@@ -28,7 +28,8 @@ PRODUCTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS products (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    customer_id TEXT NOT NULL DEFAULT 'uncategorized'
 );
 """
 
@@ -38,12 +39,14 @@ class Product:
     id: str
     name: str
     created_at: float
+    customer_id: str = "uncategorized"
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "name": self.name,
             "created_at": self.created_at,
+            "customer_id": self.customer_id,
         }
 
 
@@ -66,6 +69,21 @@ class ProductStore:
         self.lock = threading.RLock()
         with self.lock, self.conn:
             self.conn.executescript(PRODUCTS_SCHEMA)
+            self._migrate_customer_id()
+
+    def _migrate_customer_id(self) -> None:
+        """Idempotent per-boot upkeep: pre-customer SQLite dev DBs gain
+        the column (MariaDB schema is Alembic-owned, rev 0004)."""
+        if not self.conn.is_sqlite:
+            return
+        cols = [r[1] for r in self.conn.execute(
+            "PRAGMA table_info(products)"
+        ).fetchall()]
+        if "customer_id" not in cols:
+            self.conn.execute(
+                "ALTER TABLE products ADD COLUMN customer_id TEXT NOT NULL"
+                " DEFAULT 'uncategorized'"
+            )
 
     def delete(self, product_id: str) -> bool:
         """Remove the product row only — the API layer cascades versions
@@ -80,6 +98,14 @@ class ProductStore:
                 "SELECT * FROM products WHERE id = ?", (product_id,)
             ).fetchone()
         return _row_to_product(row) if row else None
+
+    def set_customer(self, product_id: str, customer_id: str) -> bool:
+        with self.lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE products SET customer_id = ? WHERE id = ?",
+                (customer_id, product_id),
+            )
+        return cur.rowcount > 0
 
     def list_all(self) -> list[Product]:
         with self.lock:
@@ -98,6 +124,10 @@ def _row_to_product(row: db.Row) -> Product:
         id=row["id"],
         name=row["name"],
         created_at=row["created_at"],
+        customer_id=(
+            row["customer_id"] if "customer_id" in row.keys()
+            else "uncategorized"
+        ),
     )
 
 

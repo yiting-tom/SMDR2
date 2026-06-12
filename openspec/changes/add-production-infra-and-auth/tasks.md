@@ -38,12 +38,12 @@
 
 ## 6. Phase 3 — 權限掛載與編輯鎖(依賴 §5)
 
-- [ ] 6.1 Alembic migration:`products.customer_id`(DEFAULT 'uncategorized')
-- [ ] 6.2 dependency factories:`require_role(role, scope_from)` + `require_lock()`;順序 身分→角色→鎖→簽核 guard
-- [ ] 6.3 按 specs/authorization 存取矩陣掛上全部 endpoint(bypass 模式下 suite 行為不變);product 列表按 viewer 範圍過濾
-- [ ] 6.4 編輯鎖 API:取得/heartbeat/釋放/admin 強制(`AuthStore` 已有協定實作);前端「開始編輯」+ 鎖持有者顯示 + 30s heartbeat
-- [ ] 6.5 簽核/範本增刪改/策略變更接 audit log;既有 `SMDR2_DEV_USER` 簽核路徑改 identity
-- [ ] 6.6 測試:fixture 以 `dependency_overrides` 注入身分;矩陣的 403/409 合約測試;suite 全綠
+- [x] 6.1 Alembic migration:`products.customer_id`(DEFAULT 'uncategorized')
+- [x] 6.2 dependency factories:`require_role(role, scope_from)` + `require_lock()`;順序 身分→角色→鎖→簽核 guard
+- [x] 6.3 按 specs/authorization 存取矩陣掛上全部 endpoint(bypass 模式下 suite 行為不變);product 列表按 viewer 範圍過濾
+- [x] 6.4 編輯鎖 API:取得/heartbeat/釋放/admin 強制(`AuthStore` 已有協定實作);前端「開始編輯」+ 鎖持有者顯示 + 30s heartbeat
+- [x] 6.5 簽核/範本增刪改/策略變更接 audit log;既有 `SMDR2_DEV_USER` 簽核路徑改 identity
+- [x] 6.6 測試:fixture 以 `dependency_overrides` 注入身分;矩陣的 403/409 合約測試;suite 全綠
 
 ## 7. Phase 3 — Admin 管理介面
 

@@ -155,20 +155,29 @@ class VersionStore:
         return _row_to_version(row) if row else None
 
     # ---- create ----------------------------------------------------------
-    def create_product(self, name: str, version_label: str):
+    def create_product(
+        self, name: str, version_label: str,
+        customer_id: str = "uncategorized",
+    ):
         """Create a product row plus its mandatory first version (empty
         library) in ONE transaction — C7: no version-less products.
-        Returns (product, version)."""
+        Returns (product, version). `customer_id` defaults to the seed
+        customer so legacy/dev paths keep working (admin flow passes it)."""
         from app.products import PRODUCTS_SCHEMA, Product, new_product_id
         label = version_label.strip()
         if not label:
             raise ValueError("version label must be non-empty")
         with self.lock, self.conn:
             self.conn.executescript(PRODUCTS_SCHEMA)
-            product = Product(id=new_product_id(), name=name, created_at=time.time())
+            product = Product(
+                id=new_product_id(), name=name, created_at=time.time(),
+                customer_id=customer_id or "uncategorized",
+            )
             self.conn.execute(
-                "INSERT INTO products (id, name, created_at) VALUES (?, ?, ?)",
-                (product.id, product.name, product.created_at),
+                "INSERT INTO products (id, name, created_at, customer_id)"
+                " VALUES (?, ?, ?, ?)",
+                (product.id, product.name, product.created_at,
+                 product.customer_id),
             )
             version = self._insert_version_locked(product.id, label)
         return product, version

@@ -7,12 +7,13 @@
 </head>
 <body data-file-id="{{ file_id }}" data-file-name="{{ file_name }}"
       data-version-id="{{ version_id }}" data-version-label="{{ version_label }}"
-      data-product-name="{{ product_name }}"
+      data-product-name="{{ product_name }}" data-product-id="{{ product_id }}"
       data-signed-off="{{ '1' if signed_off else '' }}">
   <header>
     <a id="back-btn" href="/" title="Back to product dashboard">← Products</a>
     <span class="file-name" title="{{ file_name }}">{{ file_name }}</span>
     <span id="product-context" title="Product / version (read-only — switch versions on the product page)">{{ product_name }} / {{ version_label }}</span>
+    <span id="edit-lock-slot"></span>
     {% if signed_off %}<span id="signed-badge" class="signed-badge" title="此版本已凍結為唯讀">已畫押</span>{% endif %}
     <span id="role-switcher"></span>
     <span id="unit-picker-wrap" title="Unit override — pick to re-run preprocess with the chosen unit">
@@ -165,5 +166,6 @@
   </div>
 
   <script type="module" src="/static/canvas.js"></script>
+  <script src="/static/edit_lock.js"></script>
 </body>
 </html>
