@@ -1,6 +1,6 @@
 # Production 儲存與資料庫遷移規劃（MinIO / DB）
 
-> 狀態：**討論中、尚未實作**。本文是決策文件（design / ADR），不是已定案的施工單。
+> 狀態:**已被實作取代(2026-06-12)** — 實際落地為 MariaDB(IT 維運,Alembic 管 schema)+ MinIO(boto3),Litestream 作廢;現況見根目錄 [`SYSTEM_DESIGN.md`](../SYSTEM_DESIGN.md)。本文保留作決策史(Plan A 推導與容量估算仍有效)。
 > 最後更新：2026-05-31。
 > 待 infra 回覆兩個問題後（見 §9），才會收斂成 OpenSpec change（propose-first）。
 

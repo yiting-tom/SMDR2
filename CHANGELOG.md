@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-06-12 — full-branch review pass (12 fixes)
+
+Adversarial review over `production-infra-auth` before merge: one
+unguarded mutating route (+ a boot-time default-deny assertion so the
+class of bug can't recur), stale-exhausted jobs now run the normal
+failure side effects, MySQL %-escaping inside quoted literals, k8s
+readiness probe moved to the new auth-exempt `/healthz`, scoped-viewer
+access to `/api/customers`, open-redirect backslash variants, store-lock
+discipline in guards, boot-time queue drain, dashboard-side edit-lock
+control, plus efficiency/cleanup items (idle backoff + submit kick,
+blind S3 delete, single CSRF parser, jobstore unit tests). Deferred
+items recorded in SYSTEM_DESIGN §11.5. Suite 687 green.
+
+
 ## 2026-06-12 — production infra + auth (`add-production-infra-and-auth`)
 
 Branch `production-infra-auth`, one OpenSpec change spanning four phases:

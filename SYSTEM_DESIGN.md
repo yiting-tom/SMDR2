@@ -93,6 +93,9 @@ DELETE /api/products/{pid}/lock           → 釋放;admin ?force=1(寫 audit)
 # Jobs(✅ 已實作,DB-backed)
 GET    /api/jobs/{job_id}                 → 任一 replica 可答
 
+# 內部豁免(所有模式免 auth)
+GET    /healthz                           → k8s liveness/readiness 探針用
+
 # Audit(admin)
 GET    /api/audit?product_id=&actor=&action=
 ```
@@ -105,7 +108,7 @@ GET    /api/audit?product_id=&actor=&action=
 | 上傳/換檔、範本增刪改、調參、rule-check、建新版、**簽核(含自己建的版)** | ❌ | ✅(限未簽核版 + 持有鎖) | ✅ |
 | 建/刪 product、customer CRUD、grants、強制解鎖、解簽核 | ❌ | ❌ | ✅ |
 
-**寫入守門順序**(每個 mutating endpoint):session 身分 → 有效角色(global/customer/product 取最高;dept grant 用 users 列的 deptid)→ 持有編輯鎖 → 目標版本未簽核 → 執行 → audit。
+**寫入守門順序**(每個 mutating endpoint):session 身分 → 有效角色(global/customer/product 取最高;dept grant 用 users 列的 deptid)→ 持有編輯鎖 → 目標版本未簽核 → 執行 → audit。守門掛載有 **default-deny 後盾**:啟動時斷言每條 `/api` 路由都宣告 guard dependency,漏掛直接 boot failure(review 時抓到一條漏網路由後加上)。
 
 有效角色判定一條規則:對 product P = `role_grants` 中 `(grantee ∈ {userid, deptid}) ∧ (scope ∈ {global, P.customer, P})` 取最高(admin > editor > viewer)。
 
@@ -277,7 +280,9 @@ sequenceDiagram
 - **兩步樂觀認領**而非 `FOR UPDATE SKIP LOCKED`:MySQL 系禁止 UPDATE 子查詢引用同表、SQLite 沒有 SKIP LOCKED;兩步協定兩引擎語意一致,≤10 併發無吞吐顧慮。
 - payload 在 **submit 時於 web 進程解析完**(含 dev-override snapshot)— 執行 worker 可能在另一個 pod。
 - `reprocess-all`:父 job 一列(total/done/skipped/errors),子 job 是真實 preprocess 列(`parent_id`),完成原子 bump 父進度 — 任一 worker、任一 replica 都對。
-- dev/測試:**embedded worker thread**(`SMDR2_EMBEDDED_WORKER` 預設開)→ 單容器、單進程、測試套件零設定。
+- dev/測試:**embedded worker thread**(`SMDR2_EMBEDDED_WORKER` 預設開,**開機即啟動**以接手跨重啟殘留的 queued 列)→ 單容器、單進程、測試套件零設定。
+- 閒置時指數退避(0.1s→1s 封頂)+ submit 時 `kick()` 喚醒 — 閒置艦隊不再每秒打 DB 10 次,而入列延遲仍趨近零。
+- attempts 耗盡的 stale job 走與 worker 例外**相同的失敗路徑**(`apply_failure`):FILE_STORE 狀態翻 error、reprocess-all 父 job 正常結帳 — 不會留下永遠 running 的殭屍。
 - 已用 compose 實證:跨 replica 輪詢、worker 容器認領、kill-worker 中途 → 120s requeue → attempts=2 完成。
 
 ### 7.2 編輯 session(鎖 + 守門,Phase 3 掛上 API)
@@ -393,6 +398,18 @@ worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request
 3. **dept grant 開放 editor**:API 層一行;schema 不限死。
 4. **範本庫種子**:若「每 product 重框標準件」太痛,可引入 clone-on-create 種子庫,不破壞現模型。
 5. **比對效能**:ProcessPool 跨範本平行 + circle fast path(獨立 change)。
+
+### 11.5 已知技術債(2026-06-12 全分支 review 的未修項,均有意延後)
+
+| 項 | 內容 | 何時會痛 |
+|---|---|---|
+| `/api/products` N+1 | 每 version 一次 SQL + 一次 `rule_check` blob exists(S3 HEAD)、每 file 一次 layout-manifest HEAD | 產品×版本×檔案數成長後 dashboard 輪詢變慢;解法:exists 結果落欄位或批次 list_objects |
+| 比對熱路徑 fresh-load | `LIBRARIES.get()` 每呼叫全量載入範本(跨 pod 正確性換來的),live match 每次重建 | 框選互動延遲;解法:`strategy_of` 單列 SELECT、或 generation-token 快取 |
+| `_find_template_owner` | 線性掃所有 library 兩次;guards 已有單 SELECT 解法可借用 | library 數成長後範本刪除變慢 |
+| job payload 無 schema | submit/execution_plan 以裸 dict key 約定;滾動部署版本偏差時 KeyError | web/worker 不同版本同時在線時;解法:per-kind dataclass + payload_version |
+| `INSERT OR REPLACE` 方言 | MariaDB REPLACE = delete+insert(并發讀有空窗);目前僅 version_files 使用、無子表,可接受 | 若 version_files 增加子 FK;解法:改 ON DUPLICATE KEY UPDATE |
+| schema 三處定義 | `*_SCHEMA` 常數(SQLite)vs Alembic(MariaDB)需手動同步 | 漏同步時 prod-only crash;解法:SQLite 也走 Alembic |
+| csrf.js 載入序依賴 | 新頁面忘了先載 csrf.js → 僅 prod-oidc 全部寫入 403 | 新增 template 時;解法:改 ES module 共用 api.js + oidc 模式整合測試 |
 
 ## 12. 視圖集(C4 / 流程 / DFD / UML)
 
