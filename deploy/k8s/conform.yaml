@@ -1,26 +1,36 @@
 # Conform — company k8s deployment (mirrors docker-compose.yaml 1:1).
 #
+# Apply order: namespace → secrets (Vault / kubectl, NOT this repo) →
+#   kubectl apply -f conform.yaml
+# Everything env-var driven: this file + conform-secrets is the complete
+# difference between dev compose and production (SYSTEM_DESIGN §13.1).
+#
 # Policy: web MUST run 2 replicas. Webs are stateless (sessions/jobs in
 # MariaDB, blobs in MinIO) — rolling updates are zero-downtime. The worker
 # runs separately so web rollouts never kill an in-flight preprocess; a
 # killed worker's job requeues after the 120s heartbeat staleness window.
 #
-# Secrets (DATABASE_URL / S3 keys / OIDC client secret / SESSION_SECRET)
-# come from the `conform-secrets` Secret — populated by Vault injection or
-# `kubectl create secret`, never committed.
-#
 # Memory: a 150MB DXF peaks ~6.3GiB in one preprocess worker (measured
 # 2026-06-11) — the worker requests 8Gi with SMDR2_MAX_WORKERS=1. Raise
 # both together, never just the worker count.
+#
+# Placeholders to replace per environment: image registry/tag, the
+# *.example.internal hosts, BOOTSTRAP_ADMINS.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: conform
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: conform-config
+  namespace: conform
 data:
   SMDR2_DATA_DIR: /scratch
   SMDR2_MAX_UPLOAD_MB: "200"
   SMDR2_AUTH_MODE: oidc
-  SMDR2_DEV_TOOLS: "0"
+  SMDR2_DEV_TOOLS: "0"          # dev overrides are process-local — must be off with >1 pod
   S3_BUCKET: conform
   # Fill per environment:
   S3_ENDPOINT_URL: http://minio.example.internal:9000
@@ -29,44 +39,72 @@ data:
   OIDC_CLIENT_ID: conform-web
   OIDC_REDIRECT_URI: https://conform.example.internal/auth/callback
   COOKIE_SECURE: "true"
-  BOOTSTRAP_ADMINS: ""   # comma-separated userids; set before first rollout
+  BOOTSTRAP_ADMINS: ""          # comma-separated userids; set BEFORE first rollout
+---
+# The real Secret comes from Vault injection or:
+#   kubectl -n conform create secret generic conform-secrets \
+#     --from-literal=DATABASE_URL='mysql+pymysql://USER:PASS@mariadb.example.internal:3306/conform?charset=utf8mb4' \
+#     --from-literal=S3_ACCESS_KEY_ID=... \
+#     --from-literal=S3_SECRET_ACCESS_KEY=... \
+#     --from-literal=OIDC_CLIENT_SECRET=... \
+#     --from-literal=SESSION_SECRET="$(openssl rand -hex 32)"
+# Never commit real values. All five keys are required in oidc mode.
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: conform-migrate
+  namespace: conform
   annotations:
-    # Re-run on every deploy (e.g. via `kubectl delete job` in CD, or use
-    # a generated name). Alembic upgrades are idempotent at head.
+    # Re-run on every deploy (e.g. `kubectl -n conform delete job conform-migrate`
+    # in CD before apply, or switch to generateName). Alembic upgrades are
+    # idempotent at head, so re-running is always safe.
     conform/purpose: alembic-upgrade-head
 spec:
   backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
   template:
     spec:
       restartPolicy: Never
       containers:
         - name: migrate
-          image: conform-app:latest
+          image: registry.example.internal/conform-app:latest
           command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
           envFrom:
             - configMapRef: {name: conform-config}
             - secretRef: {name: conform-secrets}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: conform-web
+  namespace: conform
 spec:
   replicas: 2          # company policy — do not reduce
+  strategy:
+    rollingUpdate:     # webs are stateless: surge one, never drop below 2
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels: {app: conform-web}
   template:
     metadata:
       labels: {app: conform-web}
     spec:
+      affinity:
+        podAntiAffinity:   # spread the 2 webs across nodes when possible
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: conform-web}
       containers:
         - name: web
-          image: conform-app:latest
+          image: registry.example.internal/conform-app:latest
           ports: [{containerPort: 8000}]
           env:
             - {name: SMDR2_EMBEDDED_WORKER, value: "0"}  # webs only enqueue
@@ -78,24 +116,43 @@ spec:
             # Viewer loads of huge parsed JSON can hold several hundred MB
             # (lru=4) — cap generously, monitor after launch.
             limits: {cpu: "2", memory: 4Gi}
+          # /healthz is auth-exempt in every mode — /api/* would 401 the
+          # kubelet under SMDR2_AUTH_MODE=oidc and the rollout would hang.
           readinessProbe:
-            # /healthz is auth-exempt in every mode — /api/* would 401 the
-            # kubelet under SMDR2_AUTH_MODE=oidc and the rollout would hang.
             httpGet: {path: /healthz, port: 8000}
             initialDelaySeconds: 5
             periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - {name: scratch, mountPath: /scratch}
       volumes:
         - name: scratch
           emptyDir: {sizeLimit: 2Gi}
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: conform-web
+  namespace: conform
+spec:
+  minAvailable: 1      # node drains never take both webs at once
+  selector:
+    matchLabels: {app: conform-web}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: conform-worker
+  namespace: conform
 spec:
   replicas: 1          # scale-out is safe (claim protocol), but watch memory
+  strategy:
+    type: Recreate     # avoid 2×8Gi during rollouts; jobs requeue via heartbeat
   selector:
     matchLabels: {app: conform-worker}
   template:
@@ -105,7 +162,7 @@ spec:
       terminationGracePeriodSeconds: 30   # jobs requeue via heartbeat anyway
       containers:
         - name: worker
-          image: conform-app:latest
+          image: registry.example.internal/conform-app:latest
           command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
           env:
             # 150MB DXF ≈ 6.3GiB peak per concurrent preprocess (measured).
@@ -113,6 +170,9 @@ spec:
           envFrom:
             - configMapRef: {name: conform-config}
             - secretRef: {name: conform-secrets}
+          # No HTTP surface → no probes. A hung loop self-heals through the
+          # queue protocol: claims go stale after 120s and another attempt
+          # (or a restarted pod) picks them up.
           resources:
             requests: {cpu: "1", memory: 8Gi}
             limits: {cpu: "4", memory: 10Gi}
@@ -126,6 +186,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: conform-web
+  namespace: conform
 spec:
   selector: {app: conform-web}
   ports:
@@ -135,11 +196,14 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: conform
+  namespace: conform
   annotations:
     # Mirrors deploy/nginx/nginx.conf — SEC-001 upload cap with headroom.
     nginx.ingress.kubernetes.io/proxy-body-size: 200m
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
 spec:
+  # TLS terminates here (company wildcard cert / cert-manager — per IT).
+  # COOKIE_SECURE=true assumes https on this hostname.
   rules:
     - host: conform.example.internal
       http:

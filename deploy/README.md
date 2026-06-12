@@ -52,6 +52,21 @@ ingress 公開 URL vs cluster 內 service URL 的對應。
 | 2 | jobs 表 + worker service、web 只 enqueue(`SMDR2_EMBEDDED_WORKER=0`) | ✅ |
 | 3 | Keycloak BFF + 自建權限(`SMDR2_AUTH_MODE=oidc` 已開) | ✅ |
 
-k8s manifests:[`deploy/k8s/conform.yaml`](k8s/conform.yaml)(web×2 + worker×1 +
-migration Job + ingress;secrets 走 Vault)。`appdata` volume 現僅 per-request
-scratch。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。
+## k8s 部署([`deploy/k8s/conform.yaml`](k8s/conform.yaml))
+
+單一 manifest,8 個資源,apply 順序已排好:
+
+```
+Namespace → ConfigMap → (Secret: Vault / kubectl create, 不進 repo)
+→ Job conform-migrate(alembic upgrade head,冪等;CD 先 delete job 再 apply)
+→ Deployment conform-web ×2(maxSurge 1 / maxUnavailable 0、anti-affinity 分節點、
+   readiness+liveness 皆打 /healthz、SMDR2_EMBEDDED_WORKER=0)
+→ PodDisruptionBudget(minAvailable 1 — drain 不會同時帶走兩台 web)
+→ Deployment conform-worker ×1(strategy Recreate 避免滾動期間 2×8Gi;
+   無 HTTP 無 probe — 卡死由 120s stale-claim 協定自癒)
+→ Service + Ingress(proxy-body-size 200m、read-timeout 300s、TLS 由公司側)
+```
+
+上線前要換的佔位:image registry、`*.example.internal` 三處、`BOOTSTRAP_ADMINS`。
+Secret 五把(DATABASE_URL / S3 兩把 / OIDC_CLIENT_SECRET / SESSION_SECRET)缺一不可,
+建法寫在 manifest 註解裡。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。
