@@ -2,12 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SMDR2 — Products</title>
+  <title>尋形 Conform — 產品</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body class="dashboard">
+<body class="dashboard" data-page="dashboard">
   <header>
-    <span class="title">SMDR2</span>
+    <a class="brand" href="/">尋形 <span class="brand-sub">Conform</span></a>
+    <span class="page-context">產品</span>
     <span id="status">—</span>
     <span class="spacer"></span>
     <button id="dev-mode-toggle" type="button" aria-pressed="false"
@@ -19,6 +20,7 @@
     </label>
     <button id="dev-params-toggle" type="button" hidden
             title="Adjust matching / DXF tunables (dev mode only)">⚙</button>
+    <nav id="topnav"></nav>
   </header>
 
   <main class="dashboard-main">
@@ -159,6 +161,7 @@
   <input type="file" id="file-input" accept=".dxf" hidden />
 
   <script src="/static/csrf.js"></script>
+  <script src="/static/topnav.js"></script>
   <script type="module" src="/static/dashboard.js"></script>
 </body>
 </html>

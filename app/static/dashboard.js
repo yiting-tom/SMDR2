@@ -202,18 +202,8 @@ $newProductCreate.addEventListener("click", async () => {
   await refresh();
 });
 
-// Admin console link — shown only to admins (/api/me).
-fetch("/api/me").then((r) => (r.ok ? r.json() : null)).then((m) => {
-  if (!m || !m.is_admin) return;
-  const header = document.querySelector("header");
-  if (!header) return;
-  const a = document.createElement("a");
-  a.href = "/admin";
-  a.textContent = "管理";
-  a.title = "Customers / 權限 / Audit(admin)";
-  a.style.marginLeft = "12px";
-  header.appendChild(a);
-}).catch(() => {});
+// (The admin-console link + identity chip live in the shared top-nav —
+// static/topnav.js, loaded by both this page and /admin.)
 
 // ---- product list --------------------------------------------------------
 async function refresh() {

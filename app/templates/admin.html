@@ -2,83 +2,81 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>Conform — 管理</title>
+  <title>尋形 Conform — 管理</title>
   <link rel="stylesheet" href="/static/style.css" />
-  <style>
-    .admin-wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
-    .admin-section { margin-bottom: 32px; }
-    .admin-section h2 { border-bottom: 1px solid #444; padding-bottom: 4px; }
-    .admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .admin-table th, .admin-table td { border: 1px solid #3a3f44; padding: 4px 8px; text-align: left; }
-    .admin-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
-    .admin-form input, .admin-form select { padding: 4px 6px; }
-    .admin-error { color: #ff7a7a; margin-left: 8px; }
-    .pill { padding: 1px 6px; border-radius: 8px; background: #2d3338; }
-  </style>
 </head>
-<body>
+<body data-page="admin">
   <header>
-    <a id="back-btn" href="/" title="回產品列表">← Products</a>
-    <span class="file-name">管理(admin)</span>
+    <a class="brand" href="/">尋形 <span class="brand-sub">Conform</span></a>
+    <span class="page-context">管理</span>
+    <span class="spacer"></span>
+    <nav id="topnav"></nav>
   </header>
-  <div class="admin-wrap">
+  <main class="admin-main">
     <section class="admin-section" id="sec-customers">
-      <h2>Customers</h2>
-      <div class="admin-form">
-        <input id="customer-name" type="text" placeholder="客戶名稱" />
-        <button id="customer-create" type="button">新增</button>
-        <span id="customer-error" class="admin-error"></span>
+      <div class="admin-card">
+        <h2>Customers(客戶分群)</h2>
+        <div class="admin-form">
+          <input id="customer-name" type="text" placeholder="客戶名稱" />
+          <button id="customer-create" type="button">新增</button>
+          <span id="customer-error" class="admin-error"></span>
+        </div>
+        <table class="admin-table" id="customer-table">
+          <thead><tr><th>ID</th><th>名稱</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <table class="admin-table" id="customer-table">
-        <thead><tr><th>ID</th><th>名稱</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
     </section>
 
     <section class="admin-section" id="sec-grants">
-      <h2>Grants(權限指派)</h2>
-      <div class="admin-form">
-        <select id="grant-grantee-type">
-          <option value="user">個人</option>
-          <option value="dept">部門</option>
-        </select>
-        <input id="grant-grantee-id" type="text" placeholder="userid / deptid"
-               list="deptid-options" />
-        <datalist id="deptid-options"></datalist>
-        <select id="grant-role">
-          <option value="viewer">viewer</option>
-          <option value="editor">editor</option>
-          <option value="admin">admin</option>
-        </select>
-        <select id="grant-scope-type">
-          <option value="global">global</option>
-          <option value="customer">customer</option>
-          <option value="product">product</option>
-        </select>
-        <select id="grant-scope-id" hidden></select>
-        <button id="grant-create" type="button">指派</button>
-        <span id="grant-error" class="admin-error"></span>
+      <div class="admin-card">
+        <h2>Grants(權限指派)</h2>
+        <div class="admin-form">
+          <select id="grant-grantee-type">
+            <option value="user">個人</option>
+            <option value="dept">部門</option>
+          </select>
+          <input id="grant-grantee-id" type="text" placeholder="userid / deptid"
+                 list="deptid-options" />
+          <datalist id="deptid-options"></datalist>
+          <select id="grant-role">
+            <option value="viewer">viewer</option>
+            <option value="editor">editor</option>
+            <option value="admin">admin</option>
+          </select>
+          <select id="grant-scope-type">
+            <option value="global">global</option>
+            <option value="customer">customer</option>
+            <option value="product">product</option>
+          </select>
+          <select id="grant-scope-id" hidden></select>
+          <button id="grant-create" type="button">指派</button>
+          <span id="grant-error" class="admin-error"></span>
+        </div>
+        <table class="admin-table" id="grant-table">
+          <thead><tr><th>對象</th><th>角色</th><th>範圍</th><th>授權者</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <table class="admin-table" id="grant-table">
-        <thead><tr><th>對象</th><th>角色</th><th>範圍</th><th>授權者</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
     </section>
 
     <section class="admin-section" id="sec-audit">
-      <h2>Audit log</h2>
-      <div class="admin-form">
-        <input id="audit-actor" type="text" placeholder="actor 過濾" />
-        <input id="audit-action" type="text" placeholder="action 過濾(如 version.sign_off)" />
-        <button id="audit-refresh" type="button">重新整理</button>
+      <div class="admin-card">
+        <h2>Audit log(稽核紀錄)</h2>
+        <div class="admin-form">
+          <input id="audit-actor" type="text" placeholder="actor 過濾" />
+          <input id="audit-action" type="text" placeholder="action 過濾(如 version.sign_off)" />
+          <button id="audit-refresh" type="button">重新整理</button>
+        </div>
+        <table class="admin-table" id="audit-table">
+          <thead><tr><th>時間</th><th>actor</th><th>action</th><th>target</th><th>product</th><th>detail</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <table class="admin-table" id="audit-table">
-        <thead><tr><th>時間</th><th>actor</th><th>action</th><th>target</th><th>product</th><th>detail</th></tr></thead>
-        <tbody></tbody>
-      </table>
     </section>
-  </div>
+  </main>
   <script src="/static/csrf.js"></script>
+  <script src="/static/topnav.js"></script>
   <script src="/static/admin.js"></script>
 </body>
 </html>

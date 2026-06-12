@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-06-12 — unified dashboard + admin UI, identity chip
+
+Both `/` and `/admin` now share one header: the 尋形 Conform wordmark, a
+page-context label, and a `#topnav` (static/topnav.js, loaded by both)
+that renders the signed-in identity + role tag + logout, plus the
+cross-page link (管理 for admins on the dashboard, ← 產品列表 on admin).
+The admin console dropped its bespoke inline `<style>` and now uses the
+site's design-system tokens — dark card panels, themed tables/forms,
+empty states — matching the dashboard product cards. The dashboard's
+JS-injected admin link was removed (now in the shared top-nav).
+
+The identity chip shows the corporate JWT `description` claim
+("<uid>, <中文名>, <英文名>"), plumbed through Identity → /api/me
+(users.description column, alembic 0006 + SQLite boot migration; dev
+realm seeds realistic values). `/api/me` is now `no-store`. Suite 700.
+
+
 ## 2026-06-12 — docs consolidated to current state
 
 README and ARCHITECTURE rewritten to the production-era reality (DB job

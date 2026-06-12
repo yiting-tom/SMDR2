@@ -38,6 +38,73 @@ header .file-name {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ---- Shared brand wordmark + top-nav (dashboard + admin) -------------- */
+header .brand {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #e8eef5;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+header .brand:hover { color: #00ffff; }
+header .brand .brand-sub {
+  font-weight: 400;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  color: #6b7886;
+  text-transform: uppercase;
+}
+header .page-context {
+  color: #9aa5b1;
+  font-size: 0.82rem;
+}
+header .page-context::before { content: "·"; margin-right: 0.5rem; color: #3a4350; }
+
+#topnav {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 0.82rem;
+}
+#topnav .topnav-link {
+  color: #c0cad6;
+  text-decoration: none;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.18rem 0.55rem;
+}
+#topnav .topnav-link:hover { border-color: #4a6080; color: #00ffff; }
+#topnav .user-chip {
+  color: #9aa5b1;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+#topnav .user-chip strong { color: #e8eef5; font-weight: 600; }
+#topnav .user-chip .role-tag {
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.4rem;
+  border-radius: 9999px;
+  background: rgba(0, 255, 255, 0.1);
+  border: 1px solid rgba(0, 255, 255, 0.4);
+  color: #00ffff;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#topnav .logout-btn {
+  background: transparent;
+  color: #c0cad6;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.18rem 0.55rem;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+#topnav .logout-btn:hover { border-color: #ff7a7a; color: #ff7a7a; }
+
 /* 已畫押 (signed-off) badge — viewer header + dashboard version bar. */
 .signed-badge {
   background: rgba(255, 184, 77, 0.12);
@@ -2010,3 +2077,96 @@ body.dashboard header .spacer { flex: 1; }
   border-color: #ff5252;
   outline: 1px solid rgba(255, 82, 82, 0.5);
 }
+
+/* ---- Admin console (/admin) — same design system as the dashboard ------- */
+.admin-main { padding: 1rem; max-width: 1100px; margin: 0 auto; width: 100%; }
+.admin-section { margin-bottom: 1.5rem; }
+.admin-card {
+  background: #0f1318;
+  border: 1px solid #2a3340;
+  border-radius: 6px;
+  padding: 0.85rem 1rem 1rem;
+}
+.admin-card h2 {
+  margin: 0 0 0.7rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #e8eef5;
+  border-bottom: 1px solid #2a3340;
+  padding-bottom: 0.5rem;
+}
+.admin-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+.admin-form input,
+.admin-form select {
+  background: #1a1f26;
+  color: #e8eef5;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.28rem 0.5rem;
+  font: inherit;
+  font-size: 0.84rem;
+}
+.admin-form input:hover,
+.admin-form select:hover { border-color: #4a6080; }
+.admin-form input:focus,
+.admin-form select:focus { outline: none; border-color: #00ffff; }
+.admin-form button {
+  background: transparent;
+  color: #00ffff;
+  border: 1px solid #2a3340;
+  border-radius: 3px;
+  padding: 0.28rem 0.7rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+}
+.admin-form button:hover { border-color: #00ffff; background: rgba(0, 255, 255, 0.08); }
+.admin-error { color: #ff7a7a; font-size: 0.8rem; }
+
+.admin-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.admin-table th,
+.admin-table td {
+  border: 1px solid #2a3340;
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+.admin-table th {
+  background: #161b22;
+  color: #9aa5b1;
+  font-weight: 600;
+}
+.admin-table tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+.admin-table td code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: #c0cad6;
+  word-break: break-all;
+}
+.admin-table .row-delete {
+  background: transparent;
+  border: 1px solid #2a3340;
+  color: #9aa5b1;
+  border-radius: 3px;
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+}
+.admin-table .row-delete:hover { border-color: #ff5252; color: #ff5252; }
+.admin-table .pill {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 9999px;
+  background: #1a2530;
+  border: 1px solid #2a3340;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+.admin-empty { color: #6b7886; font-size: 0.82rem; padding: 0.4rem 0; }

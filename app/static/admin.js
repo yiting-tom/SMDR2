@@ -23,9 +23,9 @@
   async function refreshCustomers() {
     customers = (await jget("/api/customers")).customers;
     $("customer-table").querySelector("tbody").innerHTML = customers
-      .map((c) => `<tr><td>${esc(c.id)}</td><td>${esc(c.name)}</td>
+      .map((c) => `<tr><td><code>${esc(c.id)}</code></td><td>${esc(c.name)}</td>
         <td>${c.id === "uncategorized" ? "" :
-          `<button data-del-customer="${esc(c.id)}">刪除</button>`}</td></tr>`)
+          `<button class="row-delete" data-del-customer="${esc(c.id)}">刪除</button>`}</td></tr>`)
       .join("");
   }
 
@@ -86,14 +86,15 @@
     const data = await jget("/api/grants");
     $("deptid-options").innerHTML = data.known_deptids
       .map((d) => `<option value="${esc(d)}">`).join("");
-    $("grant-table").querySelector("tbody").innerHTML = data.grants
-      .map((g) => `<tr>
+    $("grant-table").querySelector("tbody").innerHTML = data.grants.length
+      ? data.grants.map((g) => `<tr>
         <td><span class="pill">${g.grantee_type === "dept" ? "部門" : "個人"}</span> ${esc(g.grantee_id)}</td>
         <td>${esc(g.role)}</td>
         <td>${esc(scopeLabel(g))}</td>
         <td>${esc(g.granted_by)}</td>
-        <td><button data-revoke="${esc(g.id)}">撤銷</button></td>
-      </tr>`).join("");
+        <td><button class="row-delete" data-revoke="${esc(g.id)}">撤銷</button></td>
+      </tr>`).join("")
+      : `<tr><td colspan="5" class="admin-empty">尚無權限指派</td></tr>`;
   }
 
   $("grant-create").onclick = async () => {
@@ -134,15 +135,16 @@
     if ($("audit-actor").value.trim()) q.set("actor", $("audit-actor").value.trim());
     if ($("audit-action").value.trim()) q.set("action", $("audit-action").value.trim());
     const data = await jget(`/api/audit?${q}`);
-    $("audit-table").querySelector("tbody").innerHTML = data.audit
-      .map((a) => `<tr>
+    $("audit-table").querySelector("tbody").innerHTML = data.audit.length
+      ? data.audit.map((a) => `<tr>
         <td>${new Date(a.at * 1000).toLocaleString()}</td>
         <td>${esc(a.actor)}</td>
         <td>${esc(a.action)}</td>
         <td>${esc(a.target_type)}:${esc(a.target_id)}</td>
         <td>${esc(a.product_id || "")}</td>
         <td><code>${esc(JSON.stringify(a.detail || ""))}</code></td>
-      </tr>`).join("");
+      </tr>`).join("")
+      : `<tr><td colspan="6" class="admin-empty">沒有符合的紀錄</td></tr>`;
   }
   $("audit-refresh").onclick = refreshAudit;
 

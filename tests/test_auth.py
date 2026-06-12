@@ -29,6 +29,7 @@ CLAIMS = {
     "deptname": "封裝工程一部",
     "company": "EXAMPLE-CO",
     "twsitecode": "TW1",
+    "description": "editor1, 林華, Hua Lin",
     "supervisorid": "E00002",  # deliberately unstored
 }
 
@@ -51,6 +52,14 @@ def test_first_login_creates_user_without_grants_and_audits(store):
     assert store.list_grants("user", "editor1") == []
     actions = [a["action"] for a in store.list_audit()]
     assert actions == ["user.first_login"]
+
+
+def test_description_claim_stored_and_refreshed(store):
+    user, _ = store.upsert_user_from_claims(CLAIMS)
+    assert user.description == "editor1, 林華, Hua Lin"
+    moved = dict(CLAIMS, description="editor1, 林華, Hua Lin (代理)")
+    user2, _ = store.upsert_user_from_claims(moved)
+    assert user2.description == "editor1, 林華, Hua Lin (代理)"
 
 
 def test_relogin_refreshes_dept_and_audits_once(store):

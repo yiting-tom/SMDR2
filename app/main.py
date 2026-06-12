@@ -410,6 +410,7 @@ async def me(request: Request):
             "deptid": ident.deptid,
             "name": ident.name,
             "email": ident.email,
+            "description": ident.description,
             "source": ident.source,
             "is_admin": effective_role(ident, None) == "admin",
             "grants": grants,

@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS users (
     deptname      TEXT,
     company       TEXT,
     twsitecode    TEXT,
+    description   TEXT,
     created_at    REAL NOT NULL,
     last_login_at REAL
 );
@@ -142,6 +143,9 @@ class Identity:
     deptid: str = ""
     name: str = ""
     email: str = ""
+    # Corporate JWT `description` claim, formatted "<uid>, <中文名>, <英文名>"
+    # — display only (shown in the top-nav identity chip).
+    description: str = ""
     # 'session' | 'bypass' | 'test' — bypass short-circuits to admin.
     source: str = "session"
 
@@ -160,6 +164,7 @@ class User:
     deptname: str | None
     company: str | None
     twsitecode: str | None
+    description: str | None
     created_at: float
     last_login_at: float | None
 
@@ -201,11 +206,23 @@ class AuthStore:
         self.lock = threading.RLock()
         with self.lock, self.conn:
             self.conn.executescript(AUTH_SCHEMA)
+            self._migrate_user_description()
             self.conn.execute(
                 "INSERT OR IGNORE INTO customers (id, name, created_at) "
                 "VALUES (?, ?, ?)",
                 (SEED_CUSTOMER_ID, "未分類", time.time()),
             )
+
+    def _migrate_user_description(self) -> None:
+        """Idempotent per-boot upkeep: pre-description SQLite dev DBs gain
+        the column (MariaDB schema is Alembic-owned, rev 0006)."""
+        if not self.conn.is_sqlite:
+            return
+        cols = [r[1] for r in self.conn.execute(
+            "PRAGMA table_info(users)"
+        ).fetchall()]
+        if "description" not in cols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN description TEXT")
 
     # ---- users -----------------------------------------------------------
     def upsert_user_from_claims(self, claims: dict) -> tuple[User, bool]:
@@ -224,8 +241,9 @@ class AuthStore:
             if first_login:
                 self.conn.execute(
                     "INSERT INTO users (userid, oidc_sub, email, name, deptid,"
-                    " deptname, company, twsitecode, created_at, last_login_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    " deptname, company, twsitecode, description, created_at,"
+                    " last_login_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         userid,
                         claims.get("sub"),
@@ -235,6 +253,7 @@ class AuthStore:
                         claims.get("deptname"),
                         claims.get("company"),
                         claims.get("twsitecode"),
+                        claims.get("description"),
                         now,
                         now,
                     ),
@@ -247,7 +266,8 @@ class AuthStore:
             else:
                 self.conn.execute(
                     "UPDATE users SET oidc_sub=?, email=?, name=?, deptid=?,"
-                    " deptname=?, company=?, twsitecode=?, last_login_at=?"
+                    " deptname=?, company=?, twsitecode=?, description=?,"
+                    " last_login_at=?"
                     " WHERE userid=?",
                     (
                         claims.get("sub"),
@@ -257,6 +277,7 @@ class AuthStore:
                         claims.get("deptname"),
                         claims.get("company"),
                         claims.get("twsitecode"),
+                        claims.get("description"),
                         now,
                         userid,
                     ),
@@ -645,6 +666,7 @@ class AuthStore:
             "deptid": (user.deptid if user else "") or "",
             "name": (user.name if user else "") or "",
             "email": (user.email if user else "") or "",
+            "description": (user.description if user else "") or "",
             "csrf_token": row["csrf_token"],
         }
 
@@ -700,5 +722,6 @@ def get_identity(request=None) -> Identity:
             raise HTTPException(status_code=403, detail="CSRF token mismatch")
     return Identity(
         userid=sess["userid"], deptid=sess["deptid"],
-        name=sess["name"], email=sess["email"], source="session",
+        name=sess["name"], email=sess["email"],
+        description=sess.get("description", ""), source="session",
     )
