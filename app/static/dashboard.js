@@ -147,9 +147,26 @@ async function handleSignedOff409(res) {
 }
 
 // ---- modal -----------------------------------------------------------------
+const $newProductCustomer = document.getElementById("new-product-customer");
+
+async function loadCustomers() {
+  try {
+    const res = await fetch("/api/customers");
+    if (!res.ok) return;
+    const { customers } = await res.json();
+    $newProductCustomer.innerHTML = customers
+      .map((c) => `<option value="${c.id}">${c.name}</option>`)
+      .join("");
+  } catch (_) { /* bypass/dev without customers — seed option below */ }
+  if (!$newProductCustomer.options.length) {
+    $newProductCustomer.innerHTML = '<option value="uncategorized">未分類</option>';
+  }
+}
+
 function openModal() {
   $newProductName.value = "";
   $newProductVersionLabel.value = "";
+  loadCustomers();
   $newProductVersionLabel.classList.remove("input-error");
   $modal.hidden = false;
   setTimeout(() => $newProductName.focus(), 0);
@@ -175,7 +192,7 @@ $newProductCreate.addEventListener("click", async () => {
   const res = await fetch("/api/products", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, version_label: versionLabel }),
+    body: JSON.stringify({ name, version_label: versionLabel, customer_id: $newProductCustomer.value || "uncategorized" }),
   });
   if (!res.ok) {
     $status.textContent = `create failed: ${res.status}`;
@@ -184,6 +201,19 @@ $newProductCreate.addEventListener("click", async () => {
   closeModal();
   await refresh();
 });
+
+// Admin console link — shown only to admins (/api/me).
+fetch("/api/me").then((r) => (r.ok ? r.json() : null)).then((m) => {
+  if (!m || !m.is_admin) return;
+  const header = document.querySelector("header");
+  if (!header) return;
+  const a = document.createElement("a");
+  a.href = "/admin";
+  a.textContent = "管理";
+  a.title = "Customers / 權限 / Audit(admin)";
+  a.style.marginLeft = "12px";
+  header.appendChild(a);
+}).catch(() => {});
 
 // ---- product list --------------------------------------------------------
 async function refresh() {

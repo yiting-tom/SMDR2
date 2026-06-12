@@ -47,10 +47,10 @@
 
 ## 7. Phase 3 — Admin 管理介面
 
-- [ ] 7.1 customer CRUD 頁(admin-only;非空不可刪)
-- [ ] 7.2 grants 管理頁:個人/部門指派(dept 下拉 = `known_deptids()` + 手動輸入)、撤銷、現有權限總覽
-- [ ] 7.3 audit log 檢視頁(篩 product/actor/action)
-- [ ] 7.4 建 product 流程加 customer 選擇(admin-only)
+- [x] 7.1 customer CRUD 頁(admin-only;非空不可刪)
+- [x] 7.2 grants 管理頁:個人/部門指派(dept 下拉 = `known_deptids()` + 手動輸入)、撤銷、現有權限總覽
+- [x] 7.3 audit log 檢視頁(篩 product/actor/action)
+- [x] 7.4 建 product 流程加 customer 選擇(admin-only)
 
 ## 8. Phase 4 — 上線掃尾
 

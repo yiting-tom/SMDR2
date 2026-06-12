@@ -36,7 +36,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from app import jobs
+from app import db, jobs
 from app.files import (
     AWAITING_LAYOUT,
     DISCOVERING_LAYERS,
@@ -401,6 +401,29 @@ async def dashboard(request: Request):
     return templates.TemplateResponse(request, "dashboard.html")
 
 
+def _resolve_page_identity(request: Request):
+    """Page-handler identity resolution that still honours
+    `dependency_overrides[current_identity]` (test seam) — pages can't
+    use Depends() because a 401 must become a login redirect, not JSON."""
+    override = app.dependency_overrides.get(current_identity)
+    if override is not None:
+        return override()
+    from app.auth import get_identity
+    return get_identity(request)
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request):
+    from app.guards import effective_role
+    try:
+        ident = _resolve_page_identity(request)
+    except HTTPException:
+        return RedirectResponse("/auth/login?next=/admin", status_code=302)
+    if effective_role(ident, None) != "admin":
+        raise HTTPException(status_code=403, detail="admin only")
+    return templates.TemplateResponse(request, "admin.html")
+
+
 @app.get("/viewer/{file_id}", response_class=HTMLResponse)
 async def viewer(request: Request, file_id: str, version_id: str):
     if (redir := _page_identity(request)) is not None:
@@ -509,6 +532,122 @@ def _version_payload(v: Version) -> dict:
             jobs.latest_rule_check_job(v.id)
         ),
     }
+
+
+# ---- Admin: customers / grants / audit (specs/authorization) ---------------
+class CreateCustomerRequest(BaseModel):
+    name: str
+
+
+class CreateGrantRequest(BaseModel):
+    grantee_type: str   # user | dept
+    grantee_id: str
+    role: str           # admin | editor | viewer
+    scope_type: str     # global | customer | product
+    scope_id: str = ""
+
+
+@app.get("/api/customers", dependencies=[Depends(viewer_guard)])
+async def list_customers() -> dict:
+    """Readable by anyone authenticated — the dashboard groups products
+    by customer; mutation stays admin-only."""
+    from app.auth import AUTH_STORE
+    return {"customers": AUTH_STORE.list_customers()}
+
+
+@app.post("/api/customers")
+async def create_customer(
+    req: CreateCustomerRequest, ident=Depends(admin_guard),
+) -> dict:
+    from app.auth import AUTH_STORE, GrantError
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    try:
+        cid = AUTH_STORE.create_customer(name, actor=ident.userid)
+    except db.IntegrityError:
+        raise HTTPException(status_code=409, detail="customer name exists")
+    except GrantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"id": cid, "name": name}
+
+
+@app.delete("/api/customers/{customer_id}")
+async def delete_customer(
+    customer_id: str, ident=Depends(admin_guard),
+) -> dict:
+    from app.auth import AUTH_STORE, GrantError
+    # RESTRICT: a customer with products is not deletable (schema doc §2).
+    if any(p.customer_id == customer_id for p in PRODUCT_STORE.list_all()):
+        raise HTTPException(
+            status_code=409, detail="customer still has products",
+        )
+    try:
+        deleted = AUTH_STORE.delete_customer(customer_id, actor=ident.userid)
+    except GrantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="customer not found")
+    return {"deleted": customer_id}
+
+
+@app.get("/api/grants", dependencies=[Depends(admin_guard)])
+async def list_grants(
+    grantee_type: str | None = None, grantee_id: str | None = None,
+) -> dict:
+    from app.auth import AUTH_STORE
+    return {
+        "grants": [g.to_dict() for g in AUTH_STORE.list_grants(grantee_type, grantee_id)],
+        "known_deptids": AUTH_STORE.known_deptids(),
+    }
+
+
+@app.post("/api/grants")
+async def create_grant(
+    req: CreateGrantRequest, ident=Depends(admin_guard),
+) -> dict:
+    from app.auth import AUTH_STORE, GrantError
+    # scope_id must point at something real (schema doc §3 — no FK can
+    # express an either-or reference).
+    if req.scope_type == "customer" and AUTH_STORE.get_customer(req.scope_id) is None:
+        raise HTTPException(status_code=400, detail="unknown customer")
+    if req.scope_type == "product" and PRODUCT_STORE.get(req.scope_id) is None:
+        raise HTTPException(status_code=400, detail="unknown product")
+    try:
+        g = AUTH_STORE.add_grant(
+            grantee_type=req.grantee_type, grantee_id=req.grantee_id.strip(),
+            role=req.role, scope_type=req.scope_type, scope_id=req.scope_id,
+            granted_by=ident.userid,
+        )
+    except GrantError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return g.to_dict()
+
+
+@app.delete("/api/grants/{grant_id}")
+async def revoke_grant(grant_id: str, ident=Depends(admin_guard)) -> dict:
+    from app.auth import AUTH_STORE
+    if not AUTH_STORE.revoke_grant(grant_id, actor=ident.userid):
+        raise HTTPException(status_code=404, detail="grant not found")
+    return {"revoked": grant_id}
+
+
+@app.get("/api/audit", dependencies=[Depends(admin_guard)])
+async def list_audit(
+    limit: int = 100,
+    product_id: str | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+) -> dict:
+    from app.auth import AUTH_STORE
+    entries = AUTH_STORE.list_audit(min(limit, 500))
+    if product_id:
+        entries = [e for e in entries if e.get("product_id") == product_id]
+    if actor:
+        entries = [e for e in entries if e.get("actor") == actor]
+    if action:
+        entries = [e for e in entries if e.get("action") == action]
+    return {"audit": entries}
 
 
 # ---- Product edit lock (specs/product-edit-lock) ---------------------------
