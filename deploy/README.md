@@ -46,12 +46,12 @@ ingress 公開 URL vs cluster 內 service URL 的對應。
 
 ## Phase 對應(詳見 memory/impl order)
 
-| Phase | 內容 | compose 對應 |
+| Phase | 內容 | 狀態 |
 |---|---|---|
-| 1 | SQLite→MariaDB、blob→MinIO(boto3) | `DATABASE_URL`、`S3_*` 已備好 |
-| 2 | jobs 表 + worker 迴圈、清 process cache | 解開 `worker` service 註解;移除共享 `appdata` volume |
-| 3 | Keycloak BFF + 自建權限 | `OIDC_*`、`SESSION_SECRET`、`BOOTSTRAP_ADMINS` 已備好 |
+| 1 | SQLite→MariaDB(`DATABASE_URL`)、blob→MinIO(boto3,`S3_*`) | ✅ |
+| 2 | jobs 表 + worker service、web 只 enqueue(`SMDR2_EMBEDDED_WORKER=0`) | ✅ |
+| 3 | Keycloak BFF + 自建權限(`SMDR2_AUTH_MODE=oidc` 已開) | ✅ |
 
-目前 app 只消費 `SMDR2_*` 變數;其餘是 Phase 1–3 的 config contract,先把值
-鋪好,各 phase 實作時直接取用。兩個 web 暫時共用 `appdata` volume(同一份
-SQLite + data/),Phase 1 完成後該 volume 退化成 per-request scratch。
+k8s manifests:[`deploy/k8s/conform.yaml`](k8s/conform.yaml)(web×2 + worker×1 +
+migration Job + ingress;secrets 走 Vault)。`appdata` volume 現僅 per-request
+scratch。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。

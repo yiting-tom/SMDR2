@@ -1,7 +1,7 @@
 # 尋形(Conform / SMDR2)系統設計書
 
 > 狀態:**目標架構 + 實作進度**,依 2026-06-10(versioning/儲存)與 2026-06-11(auth/多 replica/MariaDB)全部定案撰寫;取代舊的 `docs/system-design.md` + `docs/system-diagrams.md` 兩份文件。
-> 實作進度:**Phase 0–2 已完成**(branch `production-infra-auth`:DB 層/Blob 層/Job queue/多 replica),Phase 3(auth)/Phase 4(掃尾)施工中 — 見 §13 與 `openspec/changes/add-production-infra-and-auth/`。
+> 實作進度:branch `production-infra-auth`:**Phase 0–4 全部完成** — 見 §13 與 `openspec/changes/add-production-infra-and-auth/`。
 > 權限/jobs/鎖的逐欄 schema 與協定:[`docs/schema-auth-jobs.md`](docs/schema-auth-jobs.md)。決策史:[`docs/DISCUSSION.md`](docs/DISCUSSION.md)、[`docs/auth-permissions.md`](docs/auth-permissions.md)(含 06-11 勘誤)。
 > 文件結構仿系統設計面試:問題 → 需求 → 容量 → API → 資料 → 架構 → 細部設計 → 失效 → 取捨 → 演進;**全部視圖(C4 L1–L3、系統流程圖、DFD L0/L1、UML use case/class/sequence/state/activity)內嵌於對應章節與 §12 圖集**。
 
@@ -26,10 +26,10 @@
 | F5 | **建新版 = clone 上一版**(library + 檔案綁定),只替換有改的角色檔 | ✅ versioning-impl |
 | F6 | **簽核**:editor 完成後對版本簽核 → 唯讀凍結、顯示誰/何時;僅 admin 可解 | ✅ guard 已實作,身分待 Phase 3 |
 | F7 | **舊版永久可回看**(含當時的 match / rule 結果) | ✅ |
-| F8 | **權限**:admin / editor / viewer × **global / customer / product 三種範圍**;被授權者可為**個人或部門(deptid)** | 🔨 Phase 3(store 已落地) |
-| F9 | **編輯鎖**:同一 product 同時只有一個 editor 能編(悲觀鎖) | 🔨 Phase 3(鎖協定已落地) |
-| F10 | **audit log**:範本增刪改、簽核/解簽、授權異動、強制解鎖、首登 | 🔨 Phase 3(表+寫入已落地) |
-| F11 | **customer 分群**:product 上層容器;建/刪/改名僅 admin | 🔨 Phase 3 |
+| F8 | **權限**:admin / editor / viewer × **global / customer / product 三種範圍**;被授權者可為**個人或部門(deptid)** | ✅ |
+| F9 | **編輯鎖**:同一 product 同時只有一個 editor 能編(悲觀鎖) | ✅ |
+| F10 | **audit log**:範本增刪改、簽核/解簽、授權異動、強制解鎖、首登 | ✅ |
+| F11 | **customer 分群**:product 上層容器;建/刪/改名僅 admin | ✅ |
 
 ### 2.2 非功能需求
 
@@ -38,7 +38,7 @@
 | N1 | **低維護、小技術棧** | 不上 ORM(SQLAlchemy 僅 Core 當連線層)/Redis/MQ;環境差異全收斂 env var |
 | N2 | **舊版可重現** | v2 的任何編輯(含調參)不得影響 v1 的結果 |
 | N3 | **全封閉內網** | 無外網暴露面;TLS/網段控管在部署層 |
-| N4 | 強制登入(Keycloak SSO,BFF 模式),未登入一律 401/導去 login | Phase 3 |
+| N4 | 強制登入(Keycloak SSO,BFF 模式),未登入一律 401/導去 login | ✅(`SMDR2_AUTH_MODE=oidc`) |
 | N5 | **公司 k8s 政策:web 必須 2 replica** — 多 replica 是硬需求(✅ 已解鎖) | 2026-06-11 定案 |
 | N6 | 備份:MariaDB / MinIO 皆 IT 維運與備份,app 端零備份負擔 | Litestream 方案作廢 |
 
@@ -823,7 +823,7 @@ flowchart TD
 | 0 | compose dev 環境(LB+web×2+worker+MariaDB+MinIO+Keycloak)、schema 定稿、auth store + 23 測試 | ✅ |
 | 1 | `app/db.py`(SQLAlchemy Core facade)+ Alembic + 五 store 換接;`app/blobstore.py` 雙後端 + 全 I/O 改 key;150MB 實測 | ✅ |
 | 2 | `jobs` 表 + `worker_loop`(認領/heartbeat/回收/prune);移除 in-memory dict 與 web executor;LIBRARIES fresh-read;dev tools gate → **replicas=2 解鎖** | ✅ |
-| 3 | BFF 登入 + sessions/CSRF;權限 dependency 按矩陣掛全 endpoint(bypass 預設零行為差);編輯鎖 API + 前端;admin UI(customers/grants/audit) | 🔨 |
-| 4 | launch readiness 殘項(logging/json-guard)、k8s manifests、oidc 切換演練、docs 同步 | ⬜ |
+| 3 | BFF 登入 + sessions/CSRF;權限 dependency 按矩陣掛全 endpoint(bypass 預設零行為差);編輯鎖 API + 前端;admin UI(customers/grants/audit) | ✅ |
+| 4 | launch readiness 殘項(ERR-001/004/005/009 均有實作+測試)、k8s manifests(`deploy/k8s/`)、oidc 切換演練(compose 實境)、docs 同步 | ✅ |
 
 外部待取:Keycloak realm/client/issuer(dev 走 .env、prod 走 Vault)、DBA 連線與專用 schema。

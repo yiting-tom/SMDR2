@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-06-12 — production infra + auth (`add-production-infra-and-auth`)
+
+Branch `production-infra-auth`, one OpenSpec change spanning four phases:
+
+- **DB**: SQLAlchemy-Core connection layer (`app/db.py`) — stores run
+  unchanged on SQLite (dev/tests) and MariaDB (prod, Alembic-owned schema,
+  utf8mb4, READ COMMITTED after a measured cross-replica stale read).
+- **Blobs**: `app/blobstore.py` Local/S3 backends (boto3); all artifact I/O
+  via keys; 150MB DXF measured (preprocess peak ~6.3GiB, derived JSON 401MB).
+- **Jobs**: in-memory `_jobs` dict → MariaDB queue (`app/jobstore.py`) +
+  worker loop (claim/heartbeat/120s requeue/7d prune); web×2 + worker split;
+  kill-worker recovery verified on compose. k8s replicas=2 unblocked.
+- **Auth**: Keycloak BFF (code+PKCE, signed state cookie, JWKS-verified),
+  MariaDB sessions (idle 8h / abs 24h, SHA-256 at rest, CSRF), self-built
+  authorization — admin/editor/viewer × global/customer/product, person or
+  dept grantees, customer grouping, product edit lock (30s heartbeat /
+  5min TTL), audit log, admin console (`/admin`), BOOTSTRAP_ADMINS seeding.
+  Bypass mode keeps dev/tests byte-identical; compose runs full oidc.
+- Suite: 609 → 681 tests; compose e2e covers login → grant → lock →
+  version clone → sign-off → audit.
+
+
 All notable changes to SMDR2. Entries are grouped by area; within each group,
 newer work is listed first. Source of truth is the git history on `main` plus
 the OpenSpec changes under `openspec/changes/` (archived = formally closed;

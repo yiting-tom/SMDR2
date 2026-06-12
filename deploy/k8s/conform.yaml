@@ -1,0 +1,150 @@
+# Conform — company k8s deployment (mirrors docker-compose.yaml 1:1).
+#
+# Policy: web MUST run 2 replicas. Webs are stateless (sessions/jobs in
+# MariaDB, blobs in MinIO) — rolling updates are zero-downtime. The worker
+# runs separately so web rollouts never kill an in-flight preprocess; a
+# killed worker's job requeues after the 120s heartbeat staleness window.
+#
+# Secrets (DATABASE_URL / S3 keys / OIDC client secret / SESSION_SECRET)
+# come from the `conform-secrets` Secret — populated by Vault injection or
+# `kubectl create secret`, never committed.
+#
+# Memory: a 150MB DXF peaks ~6.3GiB in one preprocess worker (measured
+# 2026-06-11) — the worker requests 8Gi with SMDR2_MAX_WORKERS=1. Raise
+# both together, never just the worker count.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conform-config
+data:
+  SMDR2_DATA_DIR: /scratch
+  SMDR2_MAX_UPLOAD_MB: "200"
+  SMDR2_AUTH_MODE: oidc
+  SMDR2_DEV_TOOLS: "0"
+  S3_BUCKET: conform
+  # Fill per environment:
+  S3_ENDPOINT_URL: http://minio.example.internal:9000
+  OIDC_ISSUER: https://keycloak.example.internal/realms/conform
+  OIDC_INTERNAL_BASE: http://keycloak.keycloak.svc:8080/realms/conform
+  OIDC_CLIENT_ID: conform-web
+  OIDC_REDIRECT_URI: https://conform.example.internal/auth/callback
+  COOKIE_SECURE: "true"
+  BOOTSTRAP_ADMINS: ""   # comma-separated userids; set before first rollout
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: conform-migrate
+  annotations:
+    # Re-run on every deploy (e.g. via `kubectl delete job` in CD, or use
+    # a generated name). Alembic upgrades are idempotent at head.
+    conform/purpose: alembic-upgrade-head
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: conform-app:latest
+          command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: {name: conform-config}
+            - secretRef: {name: conform-secrets}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conform-web
+spec:
+  replicas: 2          # company policy — do not reduce
+  selector:
+    matchLabels: {app: conform-web}
+  template:
+    metadata:
+      labels: {app: conform-web}
+    spec:
+      containers:
+        - name: web
+          image: conform-app:latest
+          ports: [{containerPort: 8000}]
+          env:
+            - {name: SMDR2_EMBEDDED_WORKER, value: "0"}  # webs only enqueue
+          envFrom:
+            - configMapRef: {name: conform-config}
+            - secretRef: {name: conform-secrets}
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            # Viewer loads of huge parsed JSON can hold several hundred MB
+            # (lru=4) — cap generously, monitor after launch.
+            limits: {cpu: "2", memory: 4Gi}
+          readinessProbe:
+            httpGet: {path: /api/products, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - {name: scratch, mountPath: /scratch}
+      volumes:
+        - name: scratch
+          emptyDir: {sizeLimit: 2Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conform-worker
+spec:
+  replicas: 1          # scale-out is safe (claim protocol), but watch memory
+  selector:
+    matchLabels: {app: conform-worker}
+  template:
+    metadata:
+      labels: {app: conform-worker}
+    spec:
+      terminationGracePeriodSeconds: 30   # jobs requeue via heartbeat anyway
+      containers:
+        - name: worker
+          image: conform-app:latest
+          command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
+          env:
+            # 150MB DXF ≈ 6.3GiB peak per concurrent preprocess (measured).
+            - {name: SMDR2_MAX_WORKERS, value: "1"}
+          envFrom:
+            - configMapRef: {name: conform-config}
+            - secretRef: {name: conform-secrets}
+          resources:
+            requests: {cpu: "1", memory: 8Gi}
+            limits: {cpu: "4", memory: 10Gi}
+          volumeMounts:
+            - {name: scratch, mountPath: /scratch}
+      volumes:
+        - name: scratch
+          emptyDir: {sizeLimit: 4Gi}   # ≥ workers × 150MB src + 401MB derived
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: conform-web
+spec:
+  selector: {app: conform-web}
+  ports:
+    - {port: 80, targetPort: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: conform
+  annotations:
+    # Mirrors deploy/nginx/nginx.conf — SEC-001 upload cap with headroom.
+    nginx.ingress.kubernetes.io/proxy-body-size: 200m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  rules:
+    - host: conform.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: conform-web
+                port: {number: 80}

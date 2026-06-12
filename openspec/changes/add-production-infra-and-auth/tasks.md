@@ -54,7 +54,7 @@
 
 ## 8. Phase 4 — 上線掃尾
 
-- [ ] 8.1 launch readiness 殘項:logging ERR-005/009、json-guard ERR-001/004
-- [ ] 8.2 k8s manifests(web ×2 + worker ×1、env/Vault 對應、ingress client_max_body_size)
-- [ ] 8.3 `SMDR2_AUTH_MODE=oidc` 切換演練(compose):無 grant 登入體驗、admin 預先 grant 流程
-- [ ] 8.4 docs 同步:ARCHITECTURE/README/CHANGELOG;archive 本 change
+- [x] 8.1 launch readiness 殘項:logging ERR-005/009、json-guard ERR-001/004
+- [x] 8.2 k8s manifests(web ×2 + worker ×1、env/Vault 對應、ingress client_max_body_size)
+- [x] 8.3 `SMDR2_AUTH_MODE=oidc` 切換演練(compose):無 grant 登入體驗、admin 預先 grant 流程
+- [x] 8.4 docs 同步:ARCHITECTURE/README/CHANGELOG;archive 本 change
