@@ -1,7 +1,7 @@
 # 尋形(Conform / SMDR2)系統設計書
 
-> 狀態:**目標架構 + 實作進度**,依 2026-06-10(versioning/儲存)與 2026-06-11(auth/多 replica/MariaDB)全部定案撰寫;取代舊的 `docs/system-design.md` + `docs/system-diagrams.md` 兩份文件。
-> 實作進度:branch `production-infra-auth`:**Phase 0–4 全部完成** — 見 §13 與 `openspec/changes/add-production-infra-and-auth/`。
+> 狀態:**目標架構 + 實作進度**,依 2026-06-10(versioning/儲存)、2026-06-11(auth/多 replica/MariaDB)與 2026-06-12(全分支 review 12 修正、MinIO 禁用 list API)定案撰寫;取代舊的 `docs/system-design.md` + `docs/system-diagrams.md` 兩份文件。
+> 實作進度:branch `production-infra-auth`:**Phase 0–4 全部完成**(套件 690 tests 綠 + MariaDB/MinIO/OIDC 三組 compose smoke)— 見 §13 與 `openspec/changes/add-production-infra-and-auth/`。
 > 權限/jobs/鎖的逐欄 schema 與協定:[`docs/schema-auth-jobs.md`](docs/schema-auth-jobs.md)。決策史:[`docs/DISCUSSION.md`](docs/DISCUSSION.md)、[`docs/auth-permissions.md`](docs/auth-permissions.md)(含 06-11 勘誤)。
 > 文件結構仿系統設計面試:問題 → 需求 → 容量 → API → 資料 → 架構 → 細部設計 → 失效 → 取捨 → 演進;**全部視圖(C4 L1–L3、系統流程圖、DFD L0/L1、UML use case/class/sequence/state/activity)內嵌於對應章節與 §12 圖集**。
 
@@ -62,43 +62,47 @@
 
 讀寫比:極度讀多寫少。寫入尖峰 = 編輯 session 的 commit/調參(被編輯鎖序列化);讀取 = viewer 看圖/結果(無鎖)。
 
+### 3.1 對外部依賴的 SLA 要求(向 IT 提出,2026-06-12)
+
+| 依賴 | 可用性 | 耐久性 / 一致性 | 效能門檻 | 容量 |
+|------|--------|----------------|----------|------|
+| **MinIO** | 99.9%(月);維護窗口避開上班時間 | bucket versioning 或每日異地備份;**RPO ≤24h / RTO ≤4h**(已簽核版本與範本庫 = 不可重建的黃金資料);**read-after-write 強一致必須**(worker pod 寫完 parsed JSON,web pod 立即跨 pod 讀;若 IT 前置 gateway/cache 須確認讀寫同 endpoint) | 單流 ≥100MB/s;單物件上限 ≥500MB(實測單檔 derived 401MB);HEAD 低延遲(product 清單每項打 HEAD,§11.5) | 初期 1–2TB(50 product 全滿最壞 ~550GB:每版 ≤150MB 原始 + ~400MB 衍生 × ≤20 版) |
+| **MariaDB** | IT 既有 3-replica SLA | IT 備份;app 端零備份負擔(N6) | ≤10 併發,單列讀寫為主,無特殊要求;`wait_timeout` 斷線由 app 自行重連(§8) | DB 最壞 ~300MB/年(§3) |
+| **Keycloak** | 登入時才依賴;session 存續中 Keycloak 掛掉不影響已登入者(server-side session,無 back-channel) | — | — | — |
+
+**App 對 MinIO 的呼叫型態僅 GET / PUT / HEAD / DELETE(批次 DeleteObjects)— 不使用 list API**(公司規定,§5.2),metadata 負載只有 HEAD。
+
 ## 4. API 設計
 
-既有 file-centric API(`/api/files/{fid}/…`)介面不變;版本化已完成(`version_id` 必帶)。Phase 3 新增/異動:
+完整 API 面(66 條路由,guard 為實際掛載;★ = Phase 3 新增):
 
-```
-# 身分(BFF;Keycloak 只管「你是誰」,授權全在本地)
-GET    /auth/login           → 302 Keycloak(code+PKCE)
-GET    /auth/callback        → 換 token、upsert user、發 HttpOnly session cookie
-POST   /auth/logout
-GET    /api/me               → {userid, deptid, name, effective grants…}
+**身分與系統**(★ 除 healthz)
 
-# Customer(admin only)
-POST/GET/DELETE /api/customers…          → 分群 CRUD;有 product 不可刪;seed 'uncategorized' 不可刪
+| 路由 | guard | 備註 |
+|---|---|---|
+| `GET /auth/login?next=` | 無 | 302 Keycloak(code+PKCE);`next` 經反斜線安全的 open-redirect 檢查 |
+| `GET /auth/callback` | 無 | state cookie 驗 HMAC → 換 token(走 `OIDC_INTERNAL_BASE`)→ JWKS 驗簽 → upsert user → 發 session cookie |
+| `POST /auth/logout` | session | 刪 DB session + 清 cookie |
+| `GET /api/me` | identity(豁免 default-deny 斷言) | `{userid, deptid, name, effective_role, is_admin, source}` — 前端據此切 UI |
+| `GET /healthz` | **無(所有模式豁免)** | k8s probe 用;`/api/*` 在 oidc 模式會 401 kubelet |
+| `GET /`、`/admin`、`/viewer/{fid}` | page-level(`_resolve_page_identity`) | HTML 頁;`/admin` 非 admin → 403 頁 |
 
-# Product(admin only 建/刪;必掛 customer)
-POST   /api/products          {name, version_label, customer_id}
-GET    /api/products                      → 依 viewer 範圍過濾(無 grant = 空清單)
+**管理面(全 admin)★**:`POST/DELETE /api/customers[/{id}]`(有 product → 409、seed `uncategorized` → 400)、`POST/DELETE /api/grants[/{gid}]`(scope_id 必須指向真實 customer/product)、`GET /api/grants?grantee=`、`GET /api/audit?product_id=&actor=&action=`、`POST /api/products`、`DELETE /api/products/{pid}`(cascade §5.2)、`DELETE /api/versions/{vid}/sign-off`(解簽核)、`GET /api/files`(全量列表)、`GET/POST /api/dev/settings`、`POST /api/dev/reprocess-all`。
 
-# 授權(admin only)
-POST   /api/grants            {grantee_type: user|dept, grantee_id, role, scope_type, scope_id}
-DELETE /api/grants/{gid}
-GET    /api/grants?grantee=…              ;部門下拉 = 登入過的 deptid + 手動輸入
+**編輯鎖(product 級)★**
 
-# 編輯鎖(product 級)
-POST   /api/products/{pid}/lock           → 搶鎖(被佔 → 423 + 持有者);自己重取 = 續約
-POST   /api/products/{pid}/lock/heartbeat → 30s 一次;TTL 300s
-DELETE /api/products/{pid}/lock           → 釋放;admin ?force=1(寫 audit)
+| 路由 | guard | 行為 |
+|---|---|---|
+| `GET /api/products/{pid}/lock` | viewer | 查持有者(前端輪詢顯示「誰在編」) |
+| `POST …/lock` | editor(**nolock** 變體 — 搶鎖本身不能要求持鎖) | 原子搶;被佔 → 423 + holder;自己重取 = 續約 |
+| `POST …/lock/heartbeat` | editor_nolock | 30s 一次;非持有者 → 409 |
+| `DELETE …/lock` | identity(內判) | 持有者釋放;admin `?force=1` 強制(audit `lock.force_release`) |
 
-# Jobs(✅ 已實作,DB-backed)
-GET    /api/jobs/{job_id}                 → 任一 replica 可答
+**讀路徑(viewer guard — 依範圍過濾)**:`GET /api/products`(`visible_products` 過濾,無 grant = 空)、`GET /api/products/{pid}[/versions|/version-diff]`、`GET /api/versions/{vid}/{classes|templates|rule-check|drc-bundle}`、`GET /api/files/{fid}[/layers|/layouts|/layer-preview/*.svg|/layout-preview/*.svg|/primitives|/scan-all|/prematch|/match-json|/debug-radius-buckets]`、`POST /api/files/{fid}/warm-shapes`(冪等預熱,viewer 級)、`GET /api/classes`、`GET /api/templates`、`GET /api/jobs/{id}`(job_viewer_guard:從 job 的 version 反查 product 範圍)。
 
-# 內部豁免(所有模式免 auth)
-GET    /healthz                           → k8s liveness/readiness 探針用
+**寫路徑(editor guard = 角色+鎖+未簽核 全鏈)**:`POST /api/products/{pid}/versions`(建新版 = clone)、`POST /api/versions/{vid}/sign-off`(editor 可簽自己建的版)、`POST/DELETE /api/versions/{vid}/files[/{fid}]`(上傳/換檔/解綁)、`POST /api/files/{fid}/{layers|layouts|discover-layers|unit-override|match|match-swap|commit|match-json}`、`PATCH /api/files/{fid}/side-regions`、`PUT /api/versions/{vid}/classes/{name}/strategy`、`POST /api/versions/{vid}/rule-check[/upload]`、`PATCH/DELETE /api/templates/{tid}`(template_editor_guard:由範本反查所屬 version→product 再走全鏈)。
 
-# Audit(admin)
-GET    /api/audit?product_id=&actor=&action=
-```
+**狀態碼約定**:401 未登入(API)/302(頁面)、403 角色不足或 CSRF 失敗、**423 鎖被佔**(body 帶 holder/since)、409 簽核凍結/重複版號/語意衝突、413 超過上傳上限、422 缺欄位。403/423 的 body 形狀由 guards 的 `_enforce` 單一定義 — 前端只解析一種錯誤格式。
 
 **權限矩陣(dependency factory 統一裁決):**
 
@@ -200,7 +204,26 @@ rule_check/{version_id}.json
 layer_preview/{version_id}/{file_id}/…      ← SVG 縮圖 + manifest + transient primitives
 ```
 
-`BlobStore` 雙後端(`app/blobstore.py`):**Local**(預設,key→`data/` 路徑 1:1,dev/測試零行為差)與 **S3**(`S3_ENDPOINT_URL` 觸發,boto3 — 公司規定)。miss 一律 `FileNotFoundError`;150MB 大檔走 streaming + per-request scratch,絕不整包進記憶體。關鍵不變量:**任何衍生 artifact 都以 `(version_id, file_id)` 為 key**;**禁用 list API**(公司 MinIO 規定 2026-06-12)— 介面上沒有 list 操作,刪除一律由 DB bindings + layer/layout manifest 列舉精確 key 後走 `delete_many`(批次 DeleteObjects),layer discovery 重跑時先依舊 manifest 清掉改名/消失圖層的縮圖,避免產生永遠掃不到的孤兒物件。
+`BlobStore` 雙後端(`app/blobstore.py`):**Local**(預設,key→`data/` 路徑 1:1,dev/測試零行為差)與 **S3**(`S3_ENDPOINT_URL` 觸發,boto3 — 公司規定;s3v4 簽章)。介面操作與兩端語意:
+
+| 操作 | Local | S3 | 共同契約 |
+|---|---|---|---|
+| `put_bytes/text/json` | 寫檔(mkdir -p) | PutObject | — |
+| `get_bytes/text/json` | 讀檔 | GetObject | miss 一律 `FileNotFoundError`(404/NoSuchKey 統一翻譯) |
+| `put_stream` / `open_stream` | copyfileobj 1MB chunk | upload_fileobj(multipart)/ StreamingBody | 150MB 大檔恆定記憶體 |
+| `local_input(key)` | 直接 yield 原路徑 | 串流下載到 per-request scratch,用完即刪 | contextmanager → `Path`(ezdxf 要真檔案) |
+| `exists` | Path.exists | HeadObject | — |
+| `stat` | `mtime_ns` | ETag | 不透明版本 token — `_cached_parsed` lru 的 cache key(本地 mtime 在物件儲存上無效,§9) |
+| `delete` | unlink | DeleteObject(**盲刪**,不先 HEAD) | 冪等 |
+| `delete_many(keys)` | 逐 key | **批次 DeleteObjects ≤1000/req、Quiet 模式** | 盲刪;missing key 無害 |
+
+關鍵不變量:
+
+- **任何衍生 artifact 都以 `(version_id, file_id)` 為 key** — v2 重算永不覆蓋 v1(N2)。
+- **禁用 list API**(公司 MinIO 規定 2026-06-12):介面上**沒有 list 操作**(防回歸測試斷言任何後端長出含 "list" 的方法即 fail)。刪除的 key 列舉策略:
+  1. **product 刪除 cascade**(`_version_artifact_keys`,app/main.py):在 `delete_for_product` 清掉 bindings **之前**先收每版的 file_id 清單 → 確定性 key(parsed/prematch/match/rule_check/primitives)直接推導;SVG 縮圖名從 layers.json / layouts.json **manifest 讀出**(manifest 本來就記錄每個 `svg_filename`)→ 全部 `delete_many`。共用的 `uploads/`(content-hash,跨版跨 product 引用)**刻意不刪**。
+  2. **layer discovery 重跑**:改寫 manifest 前先依**舊 manifest** 刪掉已消失/改名圖層的縮圖(`_drop_stale_manifest_svgs`,app/jobs.py)— 在不能 list 的 bucket 上,漏在這裡的物件 = 永遠掃不到的孤兒。
+  3. transient `primitives.json`:Phase 2 成功即刪(確定性 key)。
 
 ## 6. 高層架構
 
@@ -285,6 +308,33 @@ sequenceDiagram
 - attempts 耗盡的 stale job 走與 worker 例外**相同的失敗路徑**(`apply_failure`):FILE_STORE 狀態翻 error、reprocess-all 父 job 正常結帳 — 不會留下永遠 running 的殭屍。
 - 已用 compose 實證:跨 replica 輪詢、worker 容器認領、kill-worker 中途 → 120s requeue → attempts=2 完成。
 
+**協定常數**(`app/jobstore.py`,兩端共用):
+
+| 常數 | 值 | 語意 |
+|---|---|---|
+| `HEARTBEAT_SECONDS` | 30(loop 每 25s 批次 UPDATE 自己認領的全部 running 列) | 活性訊號 |
+| `STALE_AFTER_SECONDS` | 120 | heartbeat 靜默超過此值 = 認領者死亡 |
+| `MAX_ATTEMPTS` | 3 | 第 3 次認領仍 stale → `error`(走 `apply_failure`) |
+| `RETENTION_SECONDS` | 7d | 終態列(done/error)過期 prune;queued/running 永不 prune |
+| idle backoff | 0.1s → ×2 → 封頂 1s | 閒置輪詢頻率;`kick()`(submit 時)立即喚醒 |
+
+**每 tick 的工作**(`WorkerLoop.run_once`,單執行緒狀態機;ProcessPool 只跑純函數):
+1. **reap**:收割完成的 future → 成功走 `apply_success`(寫 FILE_STORE 狀態、父 job bump;callback 失敗 → job 標 error,`<kind>_callback_failed`)/ 例外走 `apply_failure` + `fail`。
+2. **claim**:executor 有空槽就連續認領;`execution_plan(job)` 把 payload 還原成 picklable `(fn, args)`。
+3. **heartbeat**(≥25s 一次)+ **maintenance**(≥60s 一次):`requeue_stale`(attempts<3)→ `stale_exhausted` 逐件走 `apply_failure`(殭屍不留 running)→ jobs prune → sessions prune。
+
+**payload 內容(submit 時在 web 進程解析完 — 執行端可能是另一個 pod,不能依賴本地狀態)**:
+
+| kind | payload 主要欄位 | 副作用(apply_success) |
+|---|---|---|
+| `discover` | upload key、version/file id、layout_name? | binding → `awaiting_layers` 或 `awaiting_layout`;寫 manifest+SVG |
+| `preprocess` | upload key、選層、scale/unit override、dev_overrides snapshot | binding → `ready_to_match`;寫 parsed+prematch;**ERR-005 `preprocess_done` log 契約** |
+| `save_match` | match JSON 內容(已驗證) | 寫 `match/{vid}/{fid}.json`、`match_saved=1` |
+| `rule_check` | version 全部角色檔的 key 集 | 寫 `rule_check/{vid}.json` |
+| `reprocess-all` | 父列:total/done/skipped/errors;子列 = 真實 preprocess | 子完成原子 bump 父;父 done 條件 = done==total |
+
+**embedded vs standalone**:同一個 `WorkerLoop` 類。dev/測試 = daemon thread(`SMDR2_EMBEDDED_WORKER` 預設 1,**開機即啟動**接手跨重啟殘留的 queued 列);k8s = web 設 0(只 enqueue),worker Deployment 跑 `python -m app.worker_loop`。store 在**建構時綁定**(測試 monkeypatch 換 store 不會讓舊 loop 偷認領新 store 的 job)。
+
 ### 7.2 編輯 session(鎖 + 守門,Phase 3 掛上 API)
 
 ```mermaid
@@ -317,7 +367,23 @@ sequenceDiagram
 - **身分**:`preferred_username` = userid(公司硬性要求;`sub` 僅留存)。首登自動建帳(**無任何 grant**)+ `user.first_login` audit;每次登入刷新 `deptid/deptname/email/name` → **換部門者,部門授權自動跟動**。
 - **授權全自建**(A4 介接一題已蒸發):`role_grants` 一張表,個人/部門 × 三角色 × 三範圍;判定一條 SQL(§4)。第一個 admin 走 `BOOTSTRAP_ADMINS` env,冪等 seeding。
 - **Session**:server-side,DB 存 SHA-256(token);idle 8h / 絕對 24h(離職者最壞 24h 失效);變更類請求驗 `X-CSRF-Token`;health/metrics 豁免。
-- **模式開關**:`SMDR2_AUTH_MODE=bypass`(預設,`SMDR2_DEV_USER` 合成 admin = 現行行為,640+ 測試零變化)/ `oidc`(prod 切換)。
+- **模式開關**:`SMDR2_AUTH_MODE=bypass`(預設,`SMDR2_DEV_USER` 合成 admin = 現行行為,測試套件零變化)/ `oidc`(prod 切換)。
+
+**Cookie 一覽**(全部 SameSite=Lax;`COOKIE_SECURE=true` 時加 Secure):
+
+| cookie | 屬性 | 內容 / 用途 |
+|---|---|---|
+| `conform_session` | **HttpOnly** | 隨機 token;DB 只存 SHA-256(token) — DB 外洩不等於 session 外洩 |
+| `conform_csrf` | 可讀(非 HttpOnly) | CSRF token;`csrf.js` 全域包裝 `window.fetch`,每個 mutating 請求自動帶 `X-CSRF-Token` header;server 比對 session 列 |
+| `conform_oidc_state` | HttpOnly,短壽命 | login→callback 間的 state+PKCE verifier+next,**HMAC(SESSION_SECRET) 簽章** — server 不留狀態,callback 驗簽即可 |
+
+**登入時序**(`/auth/login` → `/auth/callback`,`app/oidc.py`):
+1. 產 state + PKCE verifier(S256)→ 簽進 state cookie → 302 至 `OIDC_ISSUER`(瀏覽器面向 URL)。
+2. callback:驗 state cookie HMAC → 拿 code 向 `OIDC_INTERNAL_BASE`(網內 URL)POST token(httpx)→ **authlib 以 JWKS 驗簽 + 驗 iss/aud/exp**(iss 必須等於瀏覽器面向 issuer — compose 用 `KC_HOSTNAME` + `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` 保證內外一致)。
+3. `upsert_user_from_claims`:首登建帳(零 grant)+ audit `user.first_login`;每登入刷新 deptid/deptname/email/name。
+4. 建 DB session(id=SHA-256(token)、csrf_token)→ 設兩個 cookie → 302 至 `next`(僅允許站內相對路徑,反斜線變體一併擋)。
+
+**Session 生命週期**:每請求驗 idle(last_seen 8h)與絕對(建立 24h)兩條線,過線即刪列;worker 的 maintenance tick 順手 prune 過期列。登出 = 刪列 + 清 cookie。離職/停權最壞 24h 自然失效(無 back-channel logout,2.3)。
 
 ### 7.4 版本生命週期(✅ 已實作;Phase 3 接上真實身分)
 
@@ -346,6 +412,31 @@ stateDiagram-v2
 ```
 
 worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request scratch → worker 純本地讀寫 → 輸出 `put_json` 回 blob;scratch 用完即刪。
+
+### 7.6 守門實作(`app/guards.py`)
+
+- **dependency factory**:`require_role(min_role, *, check_lock, check_signoff)` 產出 guard;實際掛載四種 — `viewer_guard` / `editor_guard`(全鏈)/ `editor_guard_nolock`(搶鎖、heartbeat 用 — 搶鎖不能要求已持鎖)/ `admin_guard`。特化兩種:`job_viewer_guard`(由 job 列的 version 反查 product 再驗 viewer 範圍)、`template_editor_guard`(由 template 反查 library→version→product 再走全鏈;store 存取持 RLock)。
+- **有效角色**:`effective_role(ident, product)` 一條 SQL — `role_grants` 中 `grantee ∈ {userid, deptid}` ∧ `scope ∈ {global, P.customer, P}` 取最高;admin 短路全部後續檢查。
+- **403/423 單一形狀**:`_enforce` 是 403(角色/簽核)與 423(鎖,body 帶 `held_by`/`since`)唯一的產生點 — 行為契約只定義一次,前端只解析一種格式。
+- **default-deny 後盾**:`_assert_api_routes_guarded` 在 lifespan 啟動時遍歷所有 `/api` 路由,斷言每條都掛了 guard dependency(豁免名單僅 `/api/me`)— **漏掛 guard = boot failure**,這類漏洞從結構上絕種(review 曾抓到一條漏網路由後加上)。
+- **bypass seam**:`get_identity` 在 bypass 模式回合成 admin;頁面路由走 `_resolve_page_identity`,會優先尊重 `app.dependency_overrides`(測試覆寫身分的唯一正道)。
+- **可見性過濾**:`visible_products(ident)` 用同一條範圍規則過濾 product 清單(無 grant = 空清單,設計如此)。
+
+### 7.7 前端模組(無框架,vanilla JS)
+
+| 檔案 | 職責 |
+|---|---|
+| `csrf.js` | **最先載入**;monkeypatch `window.fetch`,mutating 請求自動帶 `X-CSRF-Token`(讀 `conform_csrf` cookie)— 其他 JS 零 CSRF 邏輯(載入序依賴見 §11.5) |
+| `edit_lock.js` | 鎖 widget:`開始編輯`/`結束編輯`/「🔒 ×× 編輯中(唯讀)」;30s heartbeat;`beforeunload` keepalive 釋放(best-effort,真正兜底是 5min TTL);掛在 dashboard(per-product)與 viewer 頁(`#edit-lock-slot`) |
+| `dashboard.js` | product 清單(依範圍過濾)、customer 下拉、版本切換、admin 連結(`/api/me` 的 `is_admin`) |
+| `admin.js` + `admin.html` | customers / grants(個人或 deptid)/ audit 查詢 三分頁 |
+| `canvas.js` | viewer 互動(AutoCAD 式:中鍵拖移、L→R window / R→L crossing 框選、live match) |
+
+### 7.8 觀測性
+
+- **log 契約**(壓測/排錯依據,測試鎖死):`preprocess_done`(ERR-005,含耗時與 primitive 數)、`<kind>_callback_failed`(ERR-009,side-effect 失敗可定位)、`job_failed`/`job_done`、`stale jobs: requeued=N failed=M`、`worker loop up identity=…`。
+- **audit_log**(業務層,admin 可查):範本增刪改/搬移、調參、簽核/解簽、product/customer 建刪、grants 異動、強制解鎖、首登 — actor + product/version 冗餘欄位,免 join 可篩。
+- **`/healthz`**:所有模式免 auth;k8s readiness/liveness 唯一允許的探針端點(`/api/*` 在 oidc 模式會 401 kubelet → rollout 卡死,review 修正項)。
 
 ## 8. 失效模式與韌性
 
@@ -844,3 +935,37 @@ flowchart TD
 | 4 | launch readiness 殘項(ERR-001/004/005/009 均有實作+測試)、k8s manifests(`deploy/k8s/`)、oidc 切換演練(compose 實境)、docs 同步 | ✅ |
 
 外部待取:Keycloak realm/client/issuer(dev 走 .env、prod 走 Vault)、DBA 連線與專用 schema。
+
+### 13.1 設定參考(env var 是唯一的環境差異面)
+
+| 變數 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|
+| `DATABASE_URL` | compose MariaDB | **Secret(Vault)** | 未設 → SQLite `DB_PATH`(測試隔離:非預設路徑永遠走 SQLite,不會誤連共用 DB) |
+| `S3_ENDPOINT_URL` / `S3_BUCKET` | compose MinIO / `conform` | ConfigMap / 公司 MinIO | 未設 endpoint → Local blobstore |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | .env | **Secret** | boto3 憑證 |
+| `SMDR2_AUTH_MODE` | `oidc`(compose 演練)/ 預設 `bypass` | `oidc` | bypass = 合成 admin(dev/測試) |
+| `OIDC_ISSUER` / `OIDC_INTERNAL_BASE` | localhost / 容器內 URL | ingress URL / cluster svc URL | 雙 URL 設計(§7.3) |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `SESSION_SECRET` | .env | **Secret(Vault)** | client 憑證;session/state HMAC 金鑰 |
+| `OIDC_REDIRECT_URI` / `COOKIE_SECURE` | http localhost / false | https ingress / `true` | — |
+| `BOOTSTRAP_ADMINS` | `admin1` | 上線前設(逗號分隔 userid) | 冪等 seed 第一批 admin grant |
+| `SMDR2_EMBEDDED_WORKER` | web=0, worker 不設 | **web=0**(只 enqueue) | 預設 1(單容器/測試) |
+| `SMDR2_MAX_WORKERS` | 1 | worker=1(150MB 檔 ≈6.3GiB/併發) | ProcessPool 上限;與記憶體 request 必須一起調 |
+| `SMDR2_MAX_UPLOAD_MB` | 200 | 200(ingress `proxy-body-size` 同步) | SEC-001 |
+| `SMDR2_DATA_DIR` | volume | `/scratch`(emptyDir) | S3 模式下僅 scratch 用 |
+| `SMDR2_DEV_TOOLS` / `SMDR2_DEV_USER` / `SMDR2_DEV_MOCK_DRC` | 開 | **`SMDR2_DEV_TOOLS=0`** | dev_overrides 是 process-local,多 pod 必關(§9) |
+
+### 13.2 k8s 部署形態(`deploy/k8s/conform.yaml`)
+
+- **migration Job**(`alembic upgrade head`,冪等)→ **web Deployment ×2**(requests 250m/1Gi、limits 2/4Gi — viewer lru=4 份大 parsed JSON)→ **worker Deployment ×1**(requests 1/8Gi、limits 4/10Gi;`terminationGracePeriodSeconds=30`,被殺的 job 由 heartbeat 協定回收)→ Service/Ingress(`proxy-body-size: 200m`、read-timeout 300s)。
+- readiness/liveness 一律打 `/healthz`;secrets 由 Vault 注入 `conform-secrets`,**絕不進 repo**;`example.internal` 佔位符上線前換真值。
+- worker scratch emptyDir ≥ workers ×(150MB 原始 + 401MB 衍生)。
+
+### 13.3 測試策略
+
+| 層 | 內容 | gate |
+|---|---|---|
+| 單元/整合(690 條,SQLite+Local blob,bypass) | stores、db facade 方言、jobstore 協定、guards 矩陣、auth session、admin API、管線端到端(TestClient) | 每次 CI/commit |
+| MariaDB smoke | 同 store 合約跑真 MariaDB(方言翻譯實證) | `SMDR2_MARIADB_SMOKE_URL=…`(compose) |
+| MinIO smoke | BlobStore 合約跑真 S3(boto3;**fixture 以記錄 key 清場,不 list**) | `SMDR2_MINIO_SMOKE=1` |
+| OIDC compose smoke | 真 Keycloak 全登入流程(login→callback→me→logout→401) | `SMDR2_OIDC_SMOKE=1` |
+| compose e2e(手動演練,已做) | 跨 replica 管線、kill-worker 回收、authz 矩陣(grant→鎖→clone→簽核→audit) | 上 k8s 前 |
