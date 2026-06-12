@@ -70,3 +70,11 @@ Namespace → ConfigMap → (Secret: Vault / kubectl create, 不進 repo)
 上線前要換的佔位:image registry、`*.example.internal` 三處、`BOOTSTRAP_ADMINS`。
 Secret 五把(DATABASE_URL / S3 兩把 / OIDC_CLIENT_SECRET / SESSION_SECRET)缺一不可,
 建法寫在 manifest 註解裡。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。
+
+## CI/CD([`azure-pipelines.yml`](../azure-pipelines.yml))
+
+`CI`(ruff+pytest 零依賴 ∥ MariaDB/MinIO smoke 用 docker 起真引擎)→ `Build`
+(main 限定,push image,tag = commit SHA)→ `Deploy`(`conform-prod`
+environment 掛 approval;sed 換 tag → 重跑 migration Job → apply → 等
+migration complete → 等 web rollout)。要填的只有三個:`REGISTRY_SC`、
+`IMAGE_REPO`、`K8S_SC`(說明在檔頭)。secrets 不經 pipeline。

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-06-12 — CI/CD: azure-pipelines.yml + image fix
+
+Three-stage pipeline (CI: zero-dependency suite ∥ real-engine smokes via
+docker; Build: push image tagged with the commit SHA, main only; Deploy:
+approval-gated — pin tag, re-run migration Job, apply, wait for
+migration + rollout). Dockerfile fix found on the way: the image never
+copied `alembic.ini`/`alembic/`, so the k8s migration Job would have
+died on first rollout — verified fixed by running `alembic upgrade
+head` inside the built image (compose never hit this because dev
+migrations ran from the host).
+
+
 ## 2026-06-12 — blob storage: no list API (company MinIO rule)
 
 `ListObjectsV2` removed entirely (it had one user: the product-delete
