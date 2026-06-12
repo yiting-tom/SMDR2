@@ -39,7 +39,7 @@
 | N2 | **舊版可重現** | v2 的任何編輯(含調參)不得影響 v1 的結果 |
 | N3 | **全封閉內網** | 無外網暴露面;TLS/網段控管在部署層 |
 | N4 | 強制登入(Keycloak SSO,BFF 模式),未登入一律 401/導去 login | ✅(`SMDR2_AUTH_MODE=oidc`) |
-| N5 | **公司 k8s 政策:web 必須 2 replica** — 多 replica 是硬需求(✅ 已解鎖) | 2026-06-11 定案 |
+| N5 | **公司 k8s 政策:所有 Deployment `spec.replicas ≥ 2`** — 多 replica 是硬需求(✅ 已解鎖;web ×2 + worker ×2) | 2026-06-11 定案,2026-06-12 精確化 |
 | N6 | 備份:MariaDB / MinIO 皆 IT 維運與備份,app 端零備份負擔 | Litestream 方案作廢 |
 
 ### 2.3 明確不做(out of scope)
@@ -239,7 +239,7 @@ flowchart LR
                 W1["FastAPI web-1<br/>· 權限/鎖/簽核守門<br/>· job 只 enqueue<br/>SMDR2_EMBEDDED_WORKER=0"]
                 W2["FastAPI web-2<br/>(同上,無狀態)"]
             end
-            subgraph wk["worker Deployment ×1"]
+            subgraph wk["worker Deployment ×2(政策 ≥2;認領協定 multi-safe)"]
                 WL["worker loop<br/>兩步樂觀認領 / heartbeat 30s<br/>stale 120s 回收 / 7d prune"]
                 PP["ProcessPool ×SMDR2_MAX_WORKERS<br/>(DXF parse / match / rule-check)"]
             end
@@ -264,7 +264,7 @@ flowchart LR
 | 組件 | 責任 | 為什麼這樣切 |
 |------|------|-------------|
 | web ×2(FastAPI) | API、BFF 登入、權限/鎖/簽核守門、job **enqueue only** | 無狀態 → 滾動更新零中斷;k8s 政策要求 2 pod |
-| worker ×1 | 認領 + 執行全部 CPU-bound job;ProcessPool 隔離 | 滾動更新不殺到跑一半的 preprocess;kill 後 job 120s 自動復活 |
+| worker ×2(政策 ≥2) | 認領 + 執行全部 CPU-bound job;ProcessPool 隔離 | 滾動更新不殺到跑一半的 preprocess;認領協定 multi-worker safe;kill 後 job 120s 自動復活 |
 | MariaDB | 關聯資料 + **jobs queue** + sessions + grants + locks + audit | IT 維運/備份;jobs 表同時解掉跨 replica 輪詢與去重 |
 | MinIO | 全部 blob(§5.2) | IT 維運;物件儲存天生併發安全 |
 | Keycloak | authentication only(`preferred_username` = userid) | 授權全在 app 本地判 — 換 IdP 不動權限邏輯 |
@@ -484,7 +484,7 @@ worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request
 
 ## 11. 演進路徑
 
-1. **worker 水平擴展**:認領協定天然支援多 worker,replicas 純調 yaml;先單 worker 觀察。
+1. **worker 水平擴展**:認領協定天然支援多 worker(政策已要求 ×2 起跳);再擴純調 yaml,注意每台 8Gi 的記憶體帳。
 2. **版本 diff 視圖**:✅ 已做(C6)。
 3. **dept grant 開放 editor**:API 層一行;schema 不限死。
 4. **範本庫種子**:若「每 product 重框標準件」太痛,可引入 clone-on-create 種子庫,不破壞現模型。
@@ -540,7 +540,7 @@ C4Container
     Container_Boundary(k8s, "k8s") {
         Container(ing, "ingress / Service", "round-robin", "client_max_body_size 200m")
         Container(web1, "FastAPI web ×2", "Python / uvicorn, 無狀態", "API、BFF、守門鏈;job 只 enqueue(SMDR2_EMBEDDED_WORKER=0)")
-        Container(worker, "worker ×1", "python -m app.worker_loop", "兩步認領、heartbeat、stale 回收;ProcessPool 執行 parse/match/rule-check")
+        Container(worker, "worker ×2", "python -m app.worker_loop", "兩步認領、heartbeat、stale 回收;ProcessPool 執行 parse/match/rule-check")
         Container(front, "Viewer 前端", "HTML + canvas.js", "AutoCAD 式互動:框選、live match、版本切換、鎖狀態顯示")
     }
     ContainerDb(maria, "MariaDB", "IT 維運, utf8mb4/InnoDB", "12+ 表:products/versions/libraries/templates/version_files/files + users/customers/role_grants/sessions/audit_log/product_edit_locks + jobs")
@@ -956,7 +956,7 @@ flowchart TD
 
 ### 13.2 k8s 部署形態(`deploy/k8s/conform.yaml`)
 
-- **migration Job**(`alembic upgrade head`,冪等)→ **web Deployment ×2**(requests 250m/1Gi、limits 2/4Gi — viewer lru=4 份大 parsed JSON)→ **worker Deployment ×1**(requests 1/8Gi、limits 4/10Gi;`terminationGracePeriodSeconds=30`,被殺的 job 由 heartbeat 協定回收)→ Service/Ingress(`proxy-body-size: 200m`、read-timeout 300s)。
+- **migration Job**(`alembic upgrade head`,冪等)→ **web Deployment ×2**(requests 250m/1Gi、limits 2/4Gi — viewer lru=4 份大 parsed JSON;maxSurge 1 / maxUnavailable 0 + anti-affinity + PDB)→ **worker Deployment ×2**(政策 ≥2;各 requests 1/8Gi、limits 4/10Gi;**maxSurge 0 / maxUnavailable 1** — 滾動時不出現第三個 8Gi pod,下線那台的 job 走 120s stale-claim 移交;anti-affinity 分節點;`terminationGracePeriodSeconds=30`)→ Service/Ingress(`proxy-body-size: 200m`、read-timeout 300s)。
 - readiness/liveness 一律打 `/healthz`;secrets 由 Vault 注入 `conform-secrets`,**絕不進 repo**;`example.internal` 佔位符上線前換真值。
 - worker scratch emptyDir ≥ workers ×(150MB 原始 + 401MB 衍生)。
 

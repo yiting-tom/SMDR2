@@ -62,7 +62,8 @@ Namespace → ConfigMap → (Secret: Vault / kubectl create, 不進 repo)
 → Deployment conform-web ×2(maxSurge 1 / maxUnavailable 0、anti-affinity 分節點、
    readiness+liveness 皆打 /healthz、SMDR2_EMBEDDED_WORKER=0)
 → PodDisruptionBudget(minAvailable 1 — drain 不會同時帶走兩台 web)
-→ Deployment conform-worker ×1(strategy Recreate 避免滾動期間 2×8Gi;
+→ Deployment conform-worker ×2(政策:所有 Deployment ≥2;maxSurge 0 /
+   maxUnavailable 1 — 滾動不出現第三個 8Gi pod;anti-affinity 分節點;
    無 HTTP 無 probe — 卡死由 120s stale-claim 協定自癒)
 → Service + Ingress(proxy-body-size 200m、read-timeout 300s、TLS 由公司側)
 ```

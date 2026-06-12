@@ -5,14 +5,19 @@
 # Everything env-var driven: this file + conform-secrets is the complete
 # difference between dev compose and production (SYSTEM_DESIGN §13.1).
 #
-# Policy: web MUST run 2 replicas. Webs are stateless (sessions/jobs in
-# MariaDB, blobs in MinIO) — rolling updates are zero-downtime. The worker
-# runs separately so web rollouts never kill an in-flight preprocess; a
-# killed worker's job requeues after the 120s heartbeat staleness window.
+# Policy: every Deployment MUST set spec.replicas >= 2 (company rule,
+# clarified 2026-06-12). Webs are stateless (sessions/jobs in MariaDB,
+# blobs in MinIO) — rolling updates are zero-downtime. The worker runs
+# separately so web rollouts never kill an in-flight preprocess; the
+# claim protocol is multi-worker safe (two-step UPDATE, rowcount-judged),
+# and a killed worker's job requeues after the 120s heartbeat staleness
+# window.
 #
 # Memory: a 150MB DXF peaks ~6.3GiB in one preprocess worker (measured
-# 2026-06-11) — the worker requests 8Gi with SMDR2_MAX_WORKERS=1. Raise
-# both together, never just the worker count.
+# 2026-06-11) — each worker requests 8Gi with SMDR2_MAX_WORKERS=1, and
+# two workers means two concurrent big-file preprocesses are possible.
+# Raise SMDR2_MAX_WORKERS and the memory numbers together, never just
+# the worker count.
 #
 # Placeholders to replace per environment: image registry/tag, the
 # *.example.internal hosts, BOOTSTRAP_ADMINS.
@@ -150,9 +155,11 @@ metadata:
   name: conform-worker
   namespace: conform
 spec:
-  replicas: 1          # scale-out is safe (claim protocol), but watch memory
+  replicas: 2          # company policy: every Deployment >= 2
   strategy:
-    type: Recreate     # avoid 2×8Gi during rollouts; jobs requeue via heartbeat
+    rollingUpdate:     # never a 3rd 8Gi pod during rollouts; the one going
+      maxSurge: 0      # down hands its job over via the 120s stale-claim
+      maxUnavailable: 1
   selector:
     matchLabels: {app: conform-worker}
   template:
@@ -160,6 +167,14 @@ spec:
       labels: {app: conform-worker}
     spec:
       terminationGracePeriodSeconds: 30   # jobs requeue via heartbeat anyway
+      affinity:
+        podAntiAffinity:   # two 8Gi workers should not share a node
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: conform-worker}
       containers:
         - name: worker
           image: registry.example.internal/conform-app:latest
