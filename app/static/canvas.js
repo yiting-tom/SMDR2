@@ -556,6 +556,7 @@ const CLASS_COLORS = {
   "RingOuter":    "#ba68c8",  // purple
   "RingInner":    "#f06292",  // pink
   "Lid":          "#9575cd",  // muted purple
+  "LidOuter":     "#7e57c2",  // deep lavender — sibling of Lid / RingOuter
   "C4Ball":       "#ffab40",  // orange — shares BGABall color (both are ball-type interconnect)
   "BGABall":      "#ffab40",  // orange
   "Protrusion":   "#80d8ff",  // light blue — distinct from SMD reds / BGA orange
@@ -635,6 +636,7 @@ const CLASS_CATEGORY = {
   "DAM1":           "structure",
   "DAM2":           "structure",
   "Lid":            "structure",
+  "LidOuter":       "structure",
   "RingOuter":      "structure",
   "RingInner":      "structure",
   "Protrusion":     "structure",

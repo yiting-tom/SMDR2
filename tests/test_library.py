@@ -349,6 +349,55 @@ def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
     )
 
 
+# ---- LidOuter re-introduction (openspec add-lidouter-class) ----------------
+def test_legacy_library_gets_lidouter_seeded_and_ranked(tmp_db):
+    """A library that pre-dates the LidOuter re-introduction gains it on
+    next boot, ranked directly after Lid, with the signature default."""
+    _seed_library_missing_class(tmp_db, "LidOuter")
+    lib = _lib(tmp_db)
+    assert "LidOuter" in lib.classes
+    assert lib.classes.index("LidOuter") == lib.classes.index("Lid") + 1
+    assert lib.strategy_of("LidOuter") == ("signature", 0.0001)
+
+
+def test_lidouter_survives_rename_pass(tmp_db):
+    """LidOuter must NOT appear in LEGACY_CLASS_RENAME any more: the 06-09
+    mapping (LidOuter→RingOuter) would wipe every new LidOuter class and
+    its templates on the next boot."""
+    from app.library import LEGACY_CLASS_RENAME, Template
+    assert "LidOuter" not in LEGACY_CLASS_RENAME
+    lib = _lib(tmp_db)
+    _, dup = lib.add_template_for_file(Template.from_entities(
+        "LidOuter", [[(0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (0.0, 8.0)]]
+    ))
+    assert not dup
+    lib2 = _lib(tmp_db)  # reboot runs the rename pass
+    assert "LidOuter" in lib2.classes
+    assert len(lib2.templates_of("LidOuter")) == 1
+
+
+def test_legacy_snake_lid_outer_renames_to_lidouter(tmp_db):
+    """The snake_case legacy id goes back to its literal meaning now that
+    LidOuter exists again (lid_inner keeps converging to RingInner)."""
+    import sqlite3
+    import time
+    Store(tmp_db)
+    with sqlite3.connect(str(tmp_db)) as conn:
+        conn.execute(
+            "INSERT INTO libraries (id, name, created_at) VALUES (?, ?, 0)",
+            (LIB_ID, "Legacy Lib"),
+        )
+        conn.execute(
+            "INSERT INTO classes (library_id, name, rank, created_at, match_strategy, bbox_ratio) "
+            "VALUES (?, 'lid_outer', 0, ?, 'chamfer', NULL)",
+            (LIB_ID, time.time()),
+        )
+        conn.commit()
+    lib = _lib(tmp_db)
+    assert "LidOuter" in lib.classes
+    assert "lid_outer" not in lib.classes
+
+
 # ---- Per-class view constraints -------------------------------------------
 def test_class_view_constraints_seed_entries():
     assert CLASS_VIEW_CONSTRAINTS["C4Ball"] == frozenset({"top_view"})

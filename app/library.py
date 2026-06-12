@@ -38,6 +38,7 @@ DEFAULT_CLASSES: list[str] = [
     "Substrate",
     "Pin-1",
     "Lid",
+    "LidOuter",
     "RingOuter",
     "RingInner",
     "DieArea",
@@ -83,6 +84,7 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side", "DAM"})
 # DAM1 / DAM2 are the encapsulation dam rings — same large-outline rationale.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
     "Substrate": ("signature", 0.0001),
+    "LidOuter":  ("signature", 0.0001),
     "RingOuter": ("signature", 0.0001),
     "RingInner": ("signature", 0.0001),
     "Pin-1":     ("signature", 0.0005),
@@ -99,6 +101,10 @@ CLASS_JSON_KEY: dict[str, str] = {
     "Substrate":      "substrate",
     "Pin-1":          "pin_1",
     "Lid":            "lid",
+    # ⚠️ pre-2026-06-09 exports used lid_outer for what is now ring_outer;
+    # since 2026-06-12 it means the (re-introduced) lid outer edge. Rules
+    # team notified — prod starts empty, so no data carries the old sense.
+    "LidOuter":       "lid_outer",
     "RingOuter":      "ring_outer",
     "RingInner":      "ring_inner",
     "DieArea":        "die_area",
@@ -125,15 +131,18 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
     "smd":           "SMD-2T",
     "substrate":     "Substrate",
     "die_area":      "DieArea",
-    "lid_outer":     "RingOuter",
+    "lid_outer":     "LidOuter",
     "lid_inner":     "RingInner",
     "bga_ball":      "BGABall",
     "pin_mark":      "Pin-1",
     "2d_barcode":    "2DBarcode",
-    # LidOuter / LidInner were renamed to RingOuter / RingInner on 2026-06-09.
-    # Rewrite existing class rows AND their templates in place (the rename
-    # pass touches both tables), so saved Ring templates survive the rename.
-    "LidOuter":      "RingOuter",
+    # 2026-06-09 renamed LidOuter/LidInner into RingOuter/RingInner;
+    # 2026-06-12 re-introduced LidOuter as its own class (lid outer edge ≠
+    # stiffener ring edge), so it MUST NOT appear as a key here any more —
+    # the rename pass rewrites classes AND templates, and would wipe every
+    # new LidOuter on the next boot. LidInner stays deleted (→ RingInner).
+    # Rows already converted to RingOuter by the 06-09 pass stay put: there
+    # is no way to tell which of them were genuine ring features.
     "LidInner":      "RingInner",
 }
 
@@ -205,6 +214,7 @@ CLASS_CATEGORY: dict[str, str] = {
     "DAM1":           "structure",
     "DAM2":           "structure",
     "Lid":            "structure",
+    "LidOuter":       "structure",
     "RingOuter":      "structure",
     "RingInner":      "structure",
     "Protrusion":     "structure",

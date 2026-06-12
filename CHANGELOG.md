@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-06-12 — LidOuter re-introduced (`add-lidouter-class`)
+
+Final structure-class set: Lid, LidOuter, RingOuter, RingInner (lid
+outer edge is a distinct feature from the stiffener-ring edges; LidInner
+stays deleted). Seeded into existing libraries by the boot pass, ranked
+after Lid, signature/0.0001 default, match-JSON key `lid_outer` (⚠️
+semantic change vs pre-06-09 exports — rules team to be notified). The
+06-09 LidOuter→RingOuter legacy rename is removed (it would have wiped
+new LidOuter classes on every boot — regression-tested); snake_case
+`lid_outer` now renames to LidOuter. canvas.js colour/category mirrors
+updated. Suite 699 green.
+
+
 ## 2026-06-12 — sign-off evidence image (`add-signoff-evidence`)
 
 Sign-off optionally carries one proof image (paper-signature scan,
