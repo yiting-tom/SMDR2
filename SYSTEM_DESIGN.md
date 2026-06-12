@@ -289,7 +289,7 @@ sequenceDiagram
     participant DB as MariaDB
 
     E->>A: POST /products/{pid}/lock
-    A->>DB: 原子 UPDATE(held_by=me WHERE 自己 OR heartbeat<now-300)<br/>失敗則 INSERT;衝突 → 查持有者
+    A->>DB: 原子 UPDATE(held_by=me WHERE 自己 OR heartbeat<now-300)<br/>失敗則 INSERT，衝突 → 查持有者
     alt 鎖被佔且 heartbeat 未逾 5min
         A-->>E: 423 + {holder, since}(UI 顯示誰在編)
     else 取得
@@ -568,7 +568,7 @@ flowchart TD
     AD -->|解簽核/強制解鎖/grants| P6
     P6 -->|signed_off_by/at| D1
     P6 -->|sign/unsign/grant/force 事件| D4
-    D1 & D3 & D4 -->|查詢(依 D5 範圍過濾)| VW
+    D1 & D3 & D4 -->|"查詢(依 D5 範圍過濾)"| VW
 ```
 
 ### 12.7 UML Use Case 圖
@@ -673,16 +673,16 @@ classDiagram
         +str action
     }
 
-    Customer "1" o-- "*" Product : admin 管理
-    Product "1" *-- "1..*" Version : 容器(不可刪版)
-    Version "1" *-- "1" Library : 1:1 快照
+    Customer "1" o-- "*" Product : admin管理
+    Product "1" *-- "1..*" Version : 容器_不可刪版
+    Version "1" *-- "1" Library : 一對一快照
     Library "1" *-- "*" Template
-    Version "1" *-- "0..5" VersionFile : role 綁定
+    Version "1" *-- "0..5" VersionFile : 角色綁定
     VersionFile "*" --> "1" File : 跨版共用
     Product "1" o-- "0..1" ProductEditLock
-    User "1" o-- "*" RoleGrant : 個人;部門 grant 以 deptid 匹配
+    User "1" o-- "*" RoleGrant : 授權匹配
     User "1" o-- "*" Session
-    Job "0..1" o-- "*" Job : parent(reprocess-all)
+    Job "0..1" o-- "*" Job : 父子關係
     Product "1" o-- "*" AuditEntry
 ```
 
@@ -711,7 +711,7 @@ sequenceDiagram
     API->>Q: INSERT discover job(202 + job_id)
     WK->>Q: claim(兩步)
     WK->>M: local_input → scratch → parse
-    WK->>M: put layer_preview/…;Q: done
+    WK->>M: put layer_preview/… and Q: done
     E->>API: 選層 → INSERT preprocess job
     WK->>M: put parsed/v2/{hash}.json + prematch
 
