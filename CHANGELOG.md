@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-06-12 — blob storage: no list API (company MinIO rule)
+
+`ListObjectsV2` removed entirely (it had one user: the product-delete
+cascade's `delete_prefix`). The `BlobStore` interface now has no list
+operation — deletes enumerate exact keys from DB file bindings plus the
+layer/layout manifests and go through `delete_many` (batched
+DeleteObjects, blind). Layer-discovery reruns now delete thumbnails the
+old manifest referenced before rewriting it, so renamed/removed layers
+can't leave unreachable objects in a bucket nobody can list. Suite 690
+green; MinIO smoke green.
+
+
 ## 2026-06-12 — full-branch review pass (12 fixes)
 
 Adversarial review over `production-infra-auth` before merge: one

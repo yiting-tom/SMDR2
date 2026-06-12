@@ -200,7 +200,7 @@ rule_check/{version_id}.json
 layer_preview/{version_id}/{file_id}/…      ← SVG 縮圖 + manifest + transient primitives
 ```
 
-`BlobStore` 雙後端(`app/blobstore.py`):**Local**(預設,key→`data/` 路徑 1:1,dev/測試零行為差)與 **S3**(`S3_ENDPOINT_URL` 觸發,boto3 — 公司規定)。miss 一律 `FileNotFoundError`;150MB 大檔走 streaming + per-request scratch,絕不整包進記憶體。關鍵不變量:**任何衍生 artifact 都以 `(version_id, file_id)` 為 key**。
+`BlobStore` 雙後端(`app/blobstore.py`):**Local**(預設,key→`data/` 路徑 1:1,dev/測試零行為差)與 **S3**(`S3_ENDPOINT_URL` 觸發,boto3 — 公司規定)。miss 一律 `FileNotFoundError`;150MB 大檔走 streaming + per-request scratch,絕不整包進記憶體。關鍵不變量:**任何衍生 artifact 都以 `(version_id, file_id)` 為 key**;**禁用 list API**(公司 MinIO 規定 2026-06-12)— 介面上沒有 list 操作,刪除一律由 DB bindings + layer/layout manifest 列舉精確 key 後走 `delete_many`(批次 DeleteObjects),layer discovery 重跑時先依舊 manifest 清掉改名/消失圖層的縮圖,避免產生永遠掃不到的孤兒物件。
 
 ## 6. 高層架構
 
@@ -403,7 +403,7 @@ worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request
 
 | 項 | 內容 | 何時會痛 |
 |---|---|---|
-| `/api/products` N+1 | 每 version 一次 SQL + 一次 `rule_check` blob exists(S3 HEAD)、每 file 一次 layout-manifest HEAD | 產品×版本×檔案數成長後 dashboard 輪詢變慢;解法:exists 結果落欄位或批次 list_objects |
+| `/api/products` N+1 | 每 version 一次 SQL + 一次 `rule_check` blob exists(S3 HEAD)、每 file 一次 layout-manifest HEAD | 產品×版本×檔案數成長後 dashboard 輪詢變慢;解法:exists 結果落 DB 欄位(注意:bucket 禁用 list API,不能用 list 批次化) |
 | 比對熱路徑 fresh-load | `LIBRARIES.get()` 每呼叫全量載入範本(跨 pod 正確性換來的),live match 每次重建 | 框選互動延遲;解法:`strategy_of` 單列 SELECT、或 generation-token 快取 |
 | `_find_template_owner` | 線性掃所有 library 兩次;guards 已有單 SELECT 解法可借用 | library 數成長後範本刪除變慢 |
 | job payload 無 schema | submit/execution_plan 以裸 dict key 約定;滾動部署版本偏差時 KeyError | web/worker 不同版本同時在線時;解法:per-kind dataclass + payload_version |

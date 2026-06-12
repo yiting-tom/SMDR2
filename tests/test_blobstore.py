@@ -49,14 +49,46 @@ def test_put_stream_and_open_stream(store):
         assert f.read() == b"dxfbytes"
 
 
-def test_delete_prefix(store):
+def test_delete_many(store):
     store.put_text("pv/v1/f1/a.svg", "<svg/>")
     store.put_text("pv/v1/f1/layouts/b.svg", "<svg/>")
     store.put_text("pv/v1/f2/c.svg", "<svg/>")
-    assert store.delete_prefix("pv/v1/f1") == 2
+    # missing keys are fine (blind delete) — count reflects real removals
+    assert store.delete_many(
+        ["pv/v1/f1/a.svg", "pv/v1/f1/layouts/b.svg", "pv/zzz/nope.svg"]
+    ) == 2
     assert not store.exists("pv/v1/f1/a.svg")
     assert store.exists("pv/v1/f2/c.svg")
-    assert store.delete_prefix("pv/zzz") == 0
+    assert store.delete_many([]) == 0
+
+
+def test_no_list_operation():
+    """Company MinIO forbids the list API — the interface must not grow
+    one. Deletion enumerates keys from DB/manifests instead."""
+    from app.blobstore import BlobStore, S3BlobStore
+    for cls in (BlobStore, LocalBlobStore, S3BlobStore):
+        assert not any("list" in name.lower() for name in vars(cls)), cls
+
+
+def test_drop_stale_manifest_svgs(store):
+    """Manifest rewrite deletes thumbnails the old manifest referenced
+    but the new layer set no longer does (no-list bucket: anything missed
+    here is unreachable garbage forever)."""
+    from app.jobs import _drop_stale_manifest_svgs
+    store.put_json("pv/layers.json",
+                   {"layers": [{"safe_name": "keep"}, {"safe_name": "old"}]})
+    store.put_text("pv/keep.svg", "<svg/>")
+    store.put_text("pv/old.svg", "<svg/>")
+    _drop_stale_manifest_svgs(
+        store, "pv/layers.json", "layers", {"keep", "new"},
+        lambda safe: f"pv/{safe}.svg",
+    )
+    assert store.exists("pv/keep.svg")
+    assert not store.exists("pv/old.svg")
+    # first run (no manifest yet) is a no-op
+    _drop_stale_manifest_svgs(
+        store, "pv/none.json", "layers", set(), lambda s: s,
+    )
 
 
 def test_local_input_yields_real_path(store):

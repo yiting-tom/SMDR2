@@ -598,8 +598,31 @@ def _build_layout_picker(
             svg,
         )
     manifest = {"file_id": file_id, "layouts": [e for _, e in rendered_entries]}
+    _drop_stale_manifest_svgs(
+        blobs, layout_manifest_key(version_id, file_id), "layouts",
+        {e["safe_name"] for _, e in rendered_entries},
+        lambda safe: layout_preview_svg_key(version_id, file_id, safe),
+    )
     blobs.put_json(layout_manifest_key(version_id, file_id), manifest)
     return len(rendered_entries)
+
+
+def _drop_stale_manifest_svgs(blobs, manifest_key, entries_field, new_names, svg_key):
+    """Before a manifest rewrite, delete thumbnails the previous run wrote
+    for names that no longer exist (renamed/removed layers or layouts).
+    Product deletion enumerates blobs from the final manifest — the bucket
+    has no list API — so anything not cleaned here would orphan forever."""
+    try:
+        old = blobs.get_json(manifest_key)
+    except FileNotFoundError:
+        return
+    stale = [
+        svg_key(e["safe_name"])
+        for e in old.get(entries_field, [])
+        if e["safe_name"] not in new_names
+    ]
+    if stale:
+        blobs.delete_many(stale)
 
 
 def _discover_layers_worker(
@@ -685,6 +708,11 @@ def _discover_layers_worker(
         "background": out.background,
         "source_layout": out.source_layout,
     }
+    _drop_stale_manifest_svgs(
+        blobs, layer_manifest_key(version_id, file_id), "layers",
+        {e["safe_name"] for e in layers},
+        lambda safe: layer_preview_svg_key(version_id, file_id, safe),
+    )
     blobs.put_json(layer_manifest_key(version_id, file_id), manifest)
 
     # Transient primitives cache — Phase 2 picks it up to skip re-parsing.

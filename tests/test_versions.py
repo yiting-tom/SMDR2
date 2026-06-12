@@ -78,6 +78,49 @@ def test_product_delete_cascades_versions_and_libraries():
         ).fetchone()[0] == 0
 
 
+def test_product_delete_removes_blobs_without_listing():
+    """The cascade enumerates keys from DB bindings + manifests (the
+    bucket has no list API): every version-scoped artifact goes, while
+    the shared upload and the other product's artifacts survive."""
+    from app import storage
+    from app.blobstore import get_blobstore
+    from app.files import FILE_STORE
+    with _client() as c:
+        pid, vid = _new_product(c)
+        pid2, vid2 = _new_product(c)
+        blobs = get_blobstore()
+        fid = uuid.uuid4().hex
+        FILE_STORE.register_content(fid, "a.dxf", 1)
+        FILE_STORE.bind(vid, "top", fid)
+        FILE_STORE.bind(vid2, "top", fid)  # same content row, other product
+        doomed = [
+            storage.parsed_key(vid, fid),
+            storage.prematch_key(vid, fid),
+            storage.match_key(vid, fid),
+            storage.rule_check_key(vid),
+            storage.layer_preview_primitives_key(vid, fid),
+            storage.layer_preview_svg_key(vid, fid, "L1"),
+            storage.layer_manifest_key(vid, fid),
+            storage.layout_preview_svg_key(vid, fid, "Tab1"),
+            storage.layout_manifest_key(vid, fid),
+        ]
+        for key in doomed:
+            blobs.put_text(key, "x")
+        blobs.put_json(storage.layer_manifest_key(vid, fid),
+                       {"layers": [{"safe_name": "L1"}]})
+        blobs.put_json(storage.layout_manifest_key(vid, fid),
+                       {"layouts": [{"safe_name": "Tab1"}]})
+        survivors = [storage.parsed_key(vid2, fid), storage.upload_key(fid)]
+        for key in survivors:
+            blobs.put_text(key, "x")
+        assert c.delete(f"/api/products/{pid}").status_code == 200
+        for key in doomed:
+            assert not blobs.exists(key), key
+        for key in survivors:
+            assert blobs.exists(key), key
+        c.delete(f"/api/products/{pid2}")
+
+
 # ---- 6.2 clone -------------------------------------------------------------
 
 def _commit_template(version_id, class_name="SMD-2T", geom=None):

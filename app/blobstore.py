@@ -12,6 +12,10 @@ Two backends:
 Contract notes:
 - Keys are POSIX-relative strings ("parsed/{vid}/{fid}.json"). The
   `*_key()` helpers in app.storage are the only place keys are minted.
+- NO ListObjects, ever (company MinIO rule). There is deliberately no
+  list/iterate operation on this interface — every deletion enumerates
+  its exact keys from the DB (file bindings) or from the layer/layout
+  manifests, then goes through `delete`/`delete_many`.
 - A missing key raises FileNotFoundError from every read op, on both
   backends — existing `except FileNotFoundError` call sites keep working.
 - `local_input()` hands parsers (ezdxf needs a real file) a Path: the
@@ -30,7 +34,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Protocol
+from typing import Any, BinaryIO, Iterable, Iterator, Protocol
 
 from app.storage import DATA_DIR
 
@@ -46,7 +50,7 @@ class BlobStore(Protocol):
     def open_stream(self, key: str) -> BinaryIO: ...
     def exists(self, key: str) -> bool: ...
     def delete(self, key: str) -> bool: ...
-    def delete_prefix(self, prefix: str) -> int: ...
+    def delete_many(self, keys: Iterable[str]) -> int: ...
     def stat(self, key: str) -> str: ...  # opaque version token
     def local_input(self, key: str): ...  # contextmanager → Path
 
@@ -102,12 +106,11 @@ class LocalBlobStore:
         except FileNotFoundError:
             return False
 
-    def delete_prefix(self, prefix: str) -> int:
-        base = self._p(prefix)
-        if not base.exists():
-            return 0
-        n = sum(1 for f in base.rglob("*") if f.is_file())
-        shutil.rmtree(base, ignore_errors=True)
+    def delete_many(self, keys: Iterable[str]) -> int:
+        n = 0
+        for key in keys:
+            if self.delete(key):
+                n += 1
         return n
 
     def stat(self, key: str) -> str:
@@ -208,18 +211,18 @@ class S3BlobStore:
         self._client.delete_object(Bucket=self.bucket, Key=key)
         return True
 
-    def delete_prefix(self, prefix: str) -> int:
-        if not prefix.endswith("/"):
-            prefix += "/"
-        paginator = self._client.get_paginator("list_objects_v2")
+    def delete_many(self, keys: Iterable[str]) -> int:
+        """Batched blind delete (DeleteObjects, ≤1000/request — the S3
+        cap). No listing, no per-key HEAD: missing keys delete "fine", and
+        callers don't act on the count, so it reports keys submitted."""
+        batch = [{"Key": k} for k in keys]
         n = 0
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
-            keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
-            if keys:
-                self._client.delete_objects(
-                    Bucket=self.bucket, Delete={"Objects": keys}
-                )
-                n += len(keys)
+        for i in range(0, len(batch), 1000):
+            chunk = batch[i:i + 1000]
+            self._client.delete_objects(
+                Bucket=self.bucket, Delete={"Objects": chunk, "Quiet": True}
+            )
+            n += len(chunk)
         return n
 
     def stat(self, key: str) -> str:

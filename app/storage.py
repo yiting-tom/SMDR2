@@ -148,19 +148,6 @@ def layout_manifest_key(version_id: str, file_id: str) -> str:
 def layout_preview_svg_key(version_id: str, file_id: str, safe_name: str) -> str:
     return f"{layer_preview_prefix(version_id, file_id)}/layouts/{safe_name}.svg"
 
-
-# Version-level prefixes — delete-version cleanup sweeps these.
-def parsed_prefix(version_id: str) -> str:
-    return f"parsed/{version_id}"
-
-
-def prematch_prefix(version_id: str) -> str:
-    return f"prematch/{version_id}"
-
-
-def match_prefix(version_id: str) -> str:
-    return f"match/{version_id}"
-
-
-def layer_preview_version_prefix(version_id: str) -> str:
-    return f"layer_preview/{version_id}"
+# No version-level prefix helpers on purpose: the bucket has no list API
+# (company MinIO rule), so deletes enumerate exact keys from the DB and
+# the layer/layout manifests (`_version_artifact_keys` in app.main).

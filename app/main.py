@@ -81,16 +81,13 @@ from app.guards import (
 from app.storage import (
     DATA_DIR,
     layer_manifest_key,
+    layer_preview_primitives_key,
     layer_preview_svg_key,
-    layer_preview_version_prefix,
     layout_manifest_key,
     layout_preview_svg_key,
     match_key,
-    match_prefix,
     parsed_key,
-    parsed_prefix,
     prematch_key,
-    prematch_prefix,
     rule_check_key,
     upload_key,
 )
@@ -795,28 +792,57 @@ async def create_product(
     return {**p.to_dict(), "versions": [_version_payload(v)]}
 
 
+def _version_artifact_keys(blobs, version_id: str, file_ids: list[str]) -> list[str]:
+    """Every blob key a version owns, enumerated from the DB bindings and
+    the layer/layout manifests — never by listing the bucket (the company
+    MinIO forbids the list API). Uploads are excluded on purpose: file_ids
+    are shared across cloned versions."""
+    keys = [rule_check_key(version_id)]
+    for fid in file_ids:
+        keys += [
+            parsed_key(version_id, fid),
+            prematch_key(version_id, fid),
+            match_key(version_id, fid),
+            layer_preview_primitives_key(version_id, fid),
+        ]
+        for manifest_key, entries_field, svg_key in (
+            (layer_manifest_key(version_id, fid), "layers", layer_preview_svg_key),
+            (layout_manifest_key(version_id, fid), "layouts", layout_preview_svg_key),
+        ):
+            try:
+                manifest = blobs.get_json(manifest_key)
+            except FileNotFoundError:
+                continue
+            keys.append(manifest_key)
+            keys += [
+                svg_key(version_id, fid, e["safe_name"])
+                for e in manifest.get(entries_field, [])
+            ]
+    return keys
+
+
 @app.delete("/api/products/{product_id}")
 async def delete_product(product_id: str, ident=Depends(admin_guard)) -> dict:
     """Admin-only. Cascades versions, their libraries, bindings, and
-    every version-scoped artifact prefix."""
+    every version-scoped artifact (keys enumerated, not listed)."""
     if PRODUCT_STORE.get(product_id) is None:
         raise HTTPException(status_code=404, detail="product not found")
     AUTH_STORE.audit(
         actor=ident.userid, action="product.delete",
         target_type="product", target_id=product_id, product_id=product_id,
     )
-    removed = VERSION_STORE.delete_for_product(product_id)
     blobs = get_blobstore()
+    # Bindings vanish with delete_for_product — collect file ids first.
+    file_ids = {
+        v.id: [f.id for f in FILE_STORE.list_by_version(v.id)]
+        for v in VERSION_STORE.list_by_product(product_id)
+    }
+    removed = VERSION_STORE.delete_for_product(product_id)
     for v in removed:
         LIBRARIES.evict(v.library_id)
-        for prefix in (
-            parsed_prefix(v.id),
-            prematch_prefix(v.id),
-            match_prefix(v.id),
-            layer_preview_version_prefix(v.id),
-        ):
-            blobs.delete_prefix(prefix)
-        blobs.delete(rule_check_key(v.id))
+        blobs.delete_many(
+            _version_artifact_keys(blobs, v.id, file_ids.get(v.id, []))
+        )
     PRODUCT_STORE.delete(product_id)
     return {"deleted": product_id, "versions_removed": len(removed)}
 
