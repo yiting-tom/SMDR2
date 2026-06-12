@@ -425,7 +425,7 @@ C4Context
 
 ```mermaid
 C4Container
-    title 尋形 — 容器圖(公司 k8s;web×2 政策強制)
+    title 尋形 — 容器圖(公司 k8s, web×2 政策強制)
     Person(user, "Editor / Viewer / Admin")
     System_Ext(kc, "Keycloak SSO")
 
