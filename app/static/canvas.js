@@ -121,6 +121,13 @@ const PRODUCT_NAME = document.body.dataset.productName || "";
 // 409 guards are authoritative; these client-side gates are UX.
 const SIGNED_OFF = document.body.dataset.signedOff === "1";
 
+// Caller's effective role on this product (viewer|editor|admin), read from
+// the product object in GET /api/products at boot. Drives client-side
+// affordance gating; the server still enforces every write
+// (add-role-based-ui-gating).
+let EFFECTIVE_ROLE = null;
+function viewerReadOnly() { return EFFECTIVE_ROLE === "viewer"; }
+
 // Append the version scope to a URL, regardless of whether it already
 // has a query string.
 function withVersion(url) {
@@ -183,12 +190,35 @@ async function fetchVersionContext() {
     const data = await res.json();
     for (const p of data.products ?? []) {
       const v = (p.versions ?? []).find(x => x.id === VERSION_ID);
-      if (v) return v;
+      if (v) {
+        EFFECTIVE_ROLE = p.effective_role ?? EFFECTIVE_ROLE;
+        return v;
+      }
     }
   } catch (e) {
     console.warn("fetchVersionContext failed:", e);
   }
   return null;
+}
+
+// Viewer-role gating: hide the toolbar write entry points and signpost the
+// read-only state. Reads (Scan All / Measure / Layers / Rules / class
+// inspection / pan-zoom) stay; the server still 403s any write that slips
+// through (e.g. a frame-select commit), so this is UX alignment only.
+function applyRoleGating() {
+  if (!viewerReadOnly()) return;
+  if ($saveMatchBtn) $saveMatchBtn.hidden = true;
+  if ($libraryBtn) $libraryBtn.hidden = true;
+  if (!document.getElementById("viewer-readonly-chip")) {
+    const chip = document.createElement("span");
+    chip.id = "viewer-readonly-chip";
+    chip.className = "signed-badge";
+    chip.textContent = "唯讀";
+    chip.title = "你對此產品為唯讀(viewer)— 編輯功能已隱藏";
+    const ctx = document.getElementById("product-context");
+    if (ctx && ctx.parentNode) ctx.parentNode.insertBefore(chip, ctx.nextSibling);
+    else document.querySelector("header")?.appendChild(chip);
+  }
 }
 
 async function loadFileInfo() {
@@ -211,6 +241,7 @@ async function loadFileInfo() {
     closeRoleMenu();
     $roleSwitcher.innerHTML = "";
   }
+  applyRoleGating();  // hide write tools for viewer-role callers
   // Stash the product name on the file object so the unit-picker's
   // confirm modal can show "Clear saved Match JSON for <name>"
   // without re-fetching products.
@@ -2789,6 +2820,8 @@ async function scanCurrentSelection() {
 
 async function commitCurrentTemplate() {
   if (SIGNED_OFF) { setBaseStatus(SIGNED_MSG); return; }
+  // Saving a template is a write — viewers can't (server would 403 anyway).
+  if (viewerReadOnly()) { setBaseStatus("唯讀(viewer)— 無法新增範本"); return; }
   if (!addModeClass || !selection.size) return;
   try {
     const res = await fetch(API.commit(), {

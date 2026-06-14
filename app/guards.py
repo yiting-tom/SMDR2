@@ -19,7 +19,7 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, Request
 
 from app import auth as _auth
-from app.auth import Identity, get_identity
+from app.auth import Identity, dev_resolve_grants, get_identity
 
 _RANK = {"viewer": 1, "editor": 2, "admin": 3}
 
@@ -57,7 +57,7 @@ def _product_for(request: Request) -> str | None:
 def effective_role(ident: Identity, product_id: str | None) -> str | None:
     """Role folding in the product's customer scope. `product_id=None`
     checks global grants only (admin endpoints, product creation)."""
-    if ident.is_bypass:
+    if ident.is_bypass and not dev_resolve_grants():
         return "admin"
     customer_id = None
     if product_id is not None:
@@ -164,7 +164,7 @@ async def template_editor_guard(
 def visible_products(ident: Identity, products: list) -> list:
     """Filter a product list down to the caller's viewer scope —
     grant-less users see an empty system (specs/product-files)."""
-    if ident.is_bypass:
+    if ident.is_bypass and not dev_resolve_grants():
         return products
     out = []
     for p in products:

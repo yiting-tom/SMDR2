@@ -15,6 +15,10 @@ const SINGLE_ROLES = ["SBT", "BD", "POD"];
 
 const $list = document.getElementById("product-list");
 const $empty = document.getElementById("empty-msg");
+const $emptyTitle = $empty.querySelector("[data-empty-title]");
+const $emptyHint = $empty.querySelector("[data-empty-hint]");
+const $count = document.getElementById("product-count");
+const $search = document.getElementById("product-search");
 const $status = document.getElementById("status");
 const $newProductBtn = document.getElementById("new-product-btn");
 const $modal = document.getElementById("product-modal");
@@ -112,6 +116,19 @@ function downloadAsFile(blob, filename) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+// ---- role gating (add-role-based-ui-gating) ------------------------------
+// Each product carries `effective_role` (viewer|editor|admin) from
+// /api/products. The UI omits write affordances the server's editor_guard
+// would reject — advisory only, the server still enforces. Only an explicit
+// 'viewer' is read-only; editor/admin (and a missing field on a stale
+// payload) keep their controls.
+const ROLE_RANK = { viewer: 1, editor: 2, admin: 3 };
+function roleAtLeast(role, min) {
+  return (ROLE_RANK[role] || 0) >= ROLE_RANK[min];
+}
+function isReadOnly(role) { return role === "viewer"; }
+function isAdminRole(role) { return role === "admin"; }
 
 // ---- helpers -------------------------------------------------------------
 function escapeHtml(s) {
@@ -283,16 +300,50 @@ async function _syncRuleCheckJobsFromProducts() {
   }
 }
 
+// Search filter (page-head input): matches the product name or any file
+// name in the currently selected version. In-memory only — polling
+// re-renders keep the filter applied.
+let filterText = "";
+if ($search) {
+  $search.addEventListener("input", () => {
+    filterText = $search.value;
+    renderProducts();
+  });
+}
+
+function productMatchesFilter(p, q) {
+  if ((p.name || "").toLowerCase().includes(q)) return true;
+  const v = selectedVersionOf(p);
+  const byRole = (v && v.files_by_role_all) || {};
+  return Object.values(byRole).some((files) =>
+    (files || []).some((f) => (f.name || "").toLowerCase().includes(q)));
+}
+
 function renderProducts() {
   $list.innerHTML = "";
-  if (!products.length) {
+  const q = filterText.trim().toLowerCase();
+  const shown = q ? products.filter((p) => productMatchesFilter(p, q)) : products;
+  if ($count) {
+    $count.textContent = products.length
+      ? (q ? `${shown.length} / ${products.length}` : String(products.length))
+      : "";
+  }
+  if (!shown.length) {
     $empty.hidden = false;
+    if (products.length) {
+      $emptyTitle.textContent = "沒有符合的產品";
+      $emptyHint.textContent = `沒有產品符合「${filterText.trim()}」— 試試其他關鍵字。`;
+    } else {
+      $emptyTitle.textContent = "尚無產品";
+      $emptyHint.textContent =
+        "點「＋ 新增產品」建立產品,再把 DXF 拖進對應的角色欄位開始比對。";
+    }
     return;
   }
   $empty.hidden = true;
   // Flat list — no customer/library grouping (libraries are version
   // internals now).
-  for (const p of products) $list.appendChild(productCard(p));
+  for (const p of shown) $list.appendChild(productCard(p));
 }
 
 // ---- version bar ----------------------------------------------------------
@@ -333,7 +384,7 @@ function versionBar(p, version) {
     if (version.evidence_name) {
       const proof = document.createElement("a");
       proof.className = "signoff-evidence-link";
-      proof.textContent = "📎 證明";
+      proof.textContent = "查看證明";
       proof.title = `查看畫押證明:${version.evidence_name}`;
       proof.href = `/api/versions/${version.id}/sign-off/evidence`;
       proof.target = "_blank";
@@ -345,18 +396,23 @@ function versionBar(p, version) {
   spacer.className = "spacer";
   bar.appendChild(spacer);
 
+  // Role gating: 畫押 is editor+, 解除畫押 is admin-only (mirrors the
+  // server). A viewer sees neither — the version bar stays read-only.
+  const role = p.effective_role;
+  const readOnly = isReadOnly(role);
   if (version) {
     if (version.signed_off_by) {
-      // Admin affordance: unlock the version. Server-side admin check
-      // lands with the auth change; the button is exposed per spec.
-      const unsignBtn = document.createElement("button");
-      unsignBtn.type = "button";
-      unsignBtn.className = "version-action-btn";
-      unsignBtn.textContent = "解除畫押";
-      unsignBtn.title = "管理者操作:解除畫押,版本恢復可編輯";
-      unsignBtn.addEventListener("click", () => unsignVersion(p, version));
-      bar.appendChild(unsignBtn);
-    } else {
+      // Unlock the version — admin only, same as the server's unsign guard.
+      if (isAdminRole(role)) {
+        const unsignBtn = document.createElement("button");
+        unsignBtn.type = "button";
+        unsignBtn.className = "version-action-btn";
+        unsignBtn.textContent = "解除畫押";
+        unsignBtn.title = "管理者操作:解除畫押,版本恢復可編輯";
+        unsignBtn.addEventListener("click", () => unsignVersion(p, version));
+        bar.appendChild(unsignBtn);
+      }
+    } else if (!readOnly) {
       const signBtn = document.createElement("button");
       signBtn.type = "button";
       signBtn.className = "version-action-btn";
@@ -374,7 +430,7 @@ function versionBar(p, version) {
   const diffBtn = document.createElement("button");
   diffBtn.type = "button";
   diffBtn.className = "version-action-btn";
-  diffBtn.textContent = "🔍 比較";
+  diffBtn.textContent = "比較";
   if ((p.versions || []).length >= 2) {
     diffBtn.title = "比較此產品任兩個版本的差異(範本、比對參數、檔案綁定)";
     diffBtn.addEventListener("click", () => openVersionDiffModal(p, version));
@@ -384,13 +440,16 @@ function versionBar(p, version) {
   }
   bar.appendChild(diffBtn);
 
-  const newBtn = document.createElement("button");
-  newBtn.type = "button";
-  newBtn.className = "version-action-btn";
-  newBtn.textContent = "新增版本";
-  newBtn.title = "以目前選取的版本為基礎建立新版本(複製範本、比對設定與檔案綁定)";
-  newBtn.addEventListener("click", () => createNewVersion(p, version));
-  bar.appendChild(newBtn);
+  // 新增版本 (clone) is a write — editors+ only.
+  if (!readOnly) {
+    const newBtn = document.createElement("button");
+    newBtn.type = "button";
+    newBtn.className = "version-action-btn";
+    newBtn.textContent = "新增版本";
+    newBtn.title = "以目前選取的版本為基礎建立新版本(複製範本、比對設定與檔案綁定)";
+    newBtn.addEventListener("click", () => createNewVersion(p, version));
+    bar.appendChild(newBtn);
+  }
 
   return bar;
 }
@@ -542,16 +601,27 @@ function productCard(p) {
 
   const version = selectedVersionOf(p);
   const signed = !!version?.signed_off_by;
+  const role = p.effective_role;
+  const readOnly = isReadOnly(role);
 
   const header = document.createElement("header");
   header.innerHTML =
     `<span class="product-name">${escapeHtml(p.name)}</span>` +
+    (readOnly
+      ? `<span class="readonly-chip" title="你對此產品為唯讀(viewer)">唯讀</span>`
+      : "") +
     `<span class="product-lock" data-product-id="${p.id}"></span>` +
     `<span class="spacer"></span>` +
-    `<button class="product-delete" type="button" title="Delete this product">Delete</button>`;
-  header.querySelector(".product-delete").addEventListener("click", () => deleteProduct(p));
+    (readOnly
+      ? ""
+      : `<button class="product-delete" type="button" title="刪除此產品">刪除</button>`);
+  if (!readOnly) {
+    header.querySelector(".product-delete")
+      .addEventListener("click", () => deleteProduct(p));
+  }
   card.appendChild(header);
-  mountLockControl(header.querySelector(".product-lock"), p.id);
+  // The lock (開始編輯) is a write affordance — only mount it for editors+.
+  if (!readOnly) mountLockControl(header.querySelector(".product-lock"), p.id);
 
   card.appendChild(versionBar(p, version));
 
@@ -572,34 +642,41 @@ function productCard(p) {
   const footer = document.createElement("div");
   footer.className = "product-footer";
   const prog = version.match_progress;
+  const pct = prog.total ? Math.round((prog.saved / prog.total) * 100) : 0;
   footer.innerHTML =
-    `<span class="match-progress">Match: <strong>${prog.saved}</strong>/${prog.total} saved</span>` +
+    `<span class="match-progress" title="已儲存 Match JSON 的檔案數">` +
+    `<span class="progress-track"><span class="progress-fill" style="width:${pct}%"></span></span>` +
+    `<strong>${prog.saved}</strong>/${prog.total} 已比對</span>` +
     `<span class="spacer"></span>`;
 
-  const rcBtn = document.createElement("button");
-  rcBtn.type = "button";
-  rcBtn.className = "rule-check-btn";
   const jobInFlight = ruleCheckJobs.has(version.id);
-  rcBtn.disabled = !version.ready_for_rule_check || jobInFlight || signed;
-  if (jobInFlight) {
-    rcBtn.textContent = "Running…";
-  } else {
-    rcBtn.textContent = version.rule_check_available && version.ready_for_rule_check
-      ? "Re-run Rule Check"
-      : "Rule Check";
+  // Rule Check kicks off a job (a write) — editors+ only. Viewers keep
+  // "查看結果" below to read an existing result.
+  if (!readOnly) {
+    const rcBtn = document.createElement("button");
+    rcBtn.type = "button";
+    rcBtn.className = "rule-check-btn";
+    rcBtn.disabled = !version.ready_for_rule_check || jobInFlight || signed;
+    if (jobInFlight) {
+      rcBtn.textContent = "檢查中…";
+    } else {
+      rcBtn.textContent = version.rule_check_available && version.ready_for_rule_check
+        ? "重新 Rule Check"
+        : "Rule Check";
+    }
+    if (signed) {
+      rcBtn.title = "版本已畫押(唯讀)— 結果仍可由 Check Result 查看";
+    } else if (!version.ready_for_rule_check) {
+      const remaining = prog.total === 0
+        ? "upload at least one DXF first"
+        : `${prog.total - prog.saved} file(s) still need Save Match`;
+      rcBtn.title = remaining;
+    } else if (jobInFlight) {
+      rcBtn.title = "Rule check is running — see status bar.";
+    }
+    rcBtn.addEventListener("click", () => runRuleCheck(p, version));
+    footer.appendChild(rcBtn);
   }
-  if (signed) {
-    rcBtn.title = "版本已畫押(唯讀)— 結果仍可由 Check Result 查看";
-  } else if (!version.ready_for_rule_check) {
-    const remaining = prog.total === 0
-      ? "upload at least one DXF first"
-      : `${prog.total - prog.saved} file(s) still need Save Match`;
-    rcBtn.title = remaining;
-  } else if (jobInFlight) {
-    rcBtn.title = "Rule check is running — see status bar.";
-  }
-  rcBtn.addEventListener("click", () => runRuleCheck(p, version));
-  footer.appendChild(rcBtn);
 
   // "Check Result" re-opens the persisted rule-check result modal on
   // demand. The modal otherwise only auto-pops once (on job completion and
@@ -611,8 +688,8 @@ function productCard(p) {
     const resBtn = document.createElement("button");
     resBtn.type = "button";
     resBtn.className = "rule-check-btn";
-    resBtn.textContent = "Check Result";
-    resBtn.title = "Show the latest rule-check result";
+    resBtn.textContent = "查看結果";
+    resBtn.title = "顯示最近一次 Rule Check 的結果";
     resBtn.addEventListener("click", () => showRuleCheckResult(p, version));
     footer.appendChild(resBtn);
   }
@@ -642,12 +719,12 @@ function productCard(p) {
     // an external rule-check result. Persists straight to
     // data/rule_check/{vid}.json after envelope validation; lets the
     // external team iterate on output shape without running their
-    // pipeline. Mutates the version → blocked when signed.
-    if (!signed) {
+    // pipeline. Mutates the version → blocked when signed or read-only.
+    if (!signed && !readOnly) {
       const upBtn = document.createElement("button");
       upBtn.type = "button";
       upBtn.className = "rule-check-btn";
-      upBtn.textContent = "📤 Upload Rule JSON";
+      upBtn.textContent = "Upload Rule JSON";
       upBtn.title = "Upload a RuleChecking JSON to test the envelope and preview rendering";
       upBtn.addEventListener("click", () => uploadRuleJson(p, version));
       footer.appendChild(upBtn);
@@ -747,6 +824,10 @@ async function downloadAllMatch(product, version) {
 function slotCell(product, version, role, opts = {}) {
   const { disabledReason = null } = opts;
   const signed = !!version.signed_off_by;
+  // Read-only when the caller is a viewer on this product. `frozen` folds
+  // it with sign-off: both suppress every upload/replace/add affordance.
+  const readOnly = isReadOnly(product.effective_role);
+  const frozen = signed || readOnly;
   const cell = document.createElement("div");
   cell.className = "slot";
   cell.dataset.role = role;
@@ -757,15 +838,19 @@ function slotCell(product, version, role, opts = {}) {
 
   if (!allFiles.length) {
     cell.classList.add("empty");
-    if (disabledReason || signed) {
-      // Disabled either because the opposite RING/LID half holds a file,
-      // or because the version is signed off (uploads frozen).
+    if (disabledReason || frozen) {
+      // Disabled because: the opposite RING/LID half holds a file, the
+      // version is signed off, or the caller is read-only (viewer).
       cell.classList.add("disabled");
-      cell.title = disabledReason || "版本已畫押(唯讀)— 無法上傳";
-      cell.innerHTML += `<span class="file-name">${signed && !disabledReason ? "已畫押(唯讀)" : "unavailable"}</span>`;
+      const reason = disabledReason
+        || (readOnly ? "唯讀(viewer)— 無法上傳" : "版本已畫押(唯讀)— 無法上傳");
+      cell.title = reason;
+      const text = disabledReason ? "unavailable"
+        : readOnly ? "（唯讀)" : "已畫押(唯讀)";
+      cell.innerHTML += `<span class="file-name">${text}</span>`;
       return cell;
     }
-    cell.innerHTML += `<span class="file-name">+ Drop or click</span>`;
+    cell.innerHTML += `<span class="file-name">＋ 拖放或點擊上傳 DXF</span>`;
     cell.addEventListener("click", () => pickFile(version.id, role));
     wireDragAndDrop(cell, version.id, role);
     return cell;
@@ -776,8 +861,8 @@ function slotCell(product, version, role, opts = {}) {
     // (file name + status + Open/Layers/Replace) and adds a small
     // "+ Add file" affordance so the user can grow into multi-file mode
     // without having to delete-and-re-upload.
-    renderSingleFileSlot(cell, version, role, allFiles[0]);
-    if (!signed) cell.appendChild(buildAddButton(version, role));
+    renderSingleFileSlot(cell, version, role, allFiles[0], readOnly);
+    if (!frozen) cell.appendChild(buildAddButton(version, role));
     return cell;
   }
 
@@ -785,10 +870,10 @@ function slotCell(product, version, role, opts = {}) {
   const filesContainer = document.createElement("div");
   filesContainer.className = "slot-files";
   for (const f of allFiles) {
-    filesContainer.appendChild(slotFileRow(version, role, f, /*compact=*/true));
+    filesContainer.appendChild(slotFileRow(version, role, f, /*compact=*/true, readOnly));
   }
   cell.appendChild(filesContainer);
-  if (!signed) cell.appendChild(buildAddButton(version, role));
+  if (!frozen) cell.appendChild(buildAddButton(version, role));
   return cell;
 }
 
@@ -807,13 +892,13 @@ function buildAddButton(version, role) {
   const btn = document.createElement("button");
   btn.className = "replace-btn slot-add";
   btn.type = "button";
-  btn.textContent = "+ Add file";
-  btn.title = "Upload another DXF into this role";
+  btn.textContent = "＋ 加入檔案";
+  btn.title = "再上傳一個 DXF 到此角色";
   btn.addEventListener("click", () => pickFile(version.id, role));
   return btn;
 }
 
-function renderSingleFileSlot(cell, version, role, f) {
+function renderSingleFileSlot(cell, version, role, f, readOnly = false) {
   // Inlined "old" rendering: file-name + status + actions directly on
   // the cell, no per-row wrapping.
   const { statusColor, statusLabel, matchBadge } = fileStatusBits(f);
@@ -821,10 +906,10 @@ function renderSingleFileSlot(cell, version, role, f) {
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
   appendUnitScaleAnnotation(cell.querySelector(".slot-status"), f);
-  cell.appendChild(buildFileActions(version, role, f, /*compact=*/false));
+  cell.appendChild(buildFileActions(version, role, f, /*compact=*/false, readOnly));
 }
 
-function slotFileRow(version, role, f, compact) {
+function slotFileRow(version, role, f, compact, readOnly = false) {
   const row = document.createElement("div");
   row.className = "slot-file";
   row.dataset.fileId = f.id;
@@ -833,7 +918,7 @@ function slotFileRow(version, role, f, compact) {
     `<span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>` +
     `<span class="slot-status">${matchBadge} · <span style="color:${statusColor}">${escapeHtml(statusLabel)}</span></span>`;
   appendUnitScaleAnnotation(row.querySelector(".slot-status"), f);
-  row.appendChild(buildFileActions(version, role, f, compact));
+  row.appendChild(buildFileActions(version, role, f, compact, readOnly));
   return row;
 }
 
@@ -939,37 +1024,40 @@ function fileStatusBits(f) {
     f.status === "awaiting_layers"    ? "pick layers" :
     f.status;
   const matchBadge = f.match_saved
-    ? `<span style="color:#69f0ae;font-size:0.78rem;">✓ matched</span>`
-    : `<span style="color:#9aa5b1;font-size:0.78rem;">not matched</span>`;
+    ? `<span class="match-pill matched">✓ 已比對</span>`
+    : `<span class="match-pill">未比對</span>`;
   return { statusColor, statusLabel, matchBadge };
 }
 
-function buildFileActions(version, role, f, compact) {
+function buildFileActions(version, role, f, compact, readOnly = false) {
   const signed = !!version.signed_off_by;
+  // A viewer (readOnly) gets the same treatment as a signed version: the
+  // 開啟 view link only, no pick/replace/delete write affordances.
+  const frozen = signed || readOnly;
   const actions = document.createElement("div");
   actions.className = "slot-actions";
-  if (f.status === "awaiting_layout" && !signed) {
+  if (f.status === "awaiting_layout" && !frozen) {
     const pickBtn = document.createElement("button");
     pickBtn.className = "primary action-btn";
     pickBtn.type = "button";
-    pickBtn.textContent = "Pick view";
-    pickBtn.title = "This DXF's geometry is in AutoCAD layout tabs — pick which one to load";
+    pickBtn.textContent = "選擇視圖";
+    pickBtn.title = "此 DXF 的幾何在 AutoCAD layout tabs 裡 — 選一個載入";
     pickBtn.addEventListener("click", () => promptLayoutSelection(f));
     actions.appendChild(pickBtn);
-  } else if (f.status === "awaiting_layers" && !signed) {
+  } else if (f.status === "awaiting_layers" && !frozen) {
     const pickBtn = document.createElement("button");
     pickBtn.className = "primary action-btn";
     pickBtn.type = "button";
-    pickBtn.textContent = "Pick layers";
+    pickBtn.textContent = "選擇圖層";
     pickBtn.addEventListener("click", () => promptLayerSelection(f));
     actions.appendChild(pickBtn);
   } else if (f.status === "ready_to_match") {
     actions.innerHTML =
-      `<a class="open-link" href="/viewer/${f.id}?version_id=${encodeURIComponent(version.id)}">Open →</a>`;
+      `<a class="open-link" href="/viewer/${f.id}?version_id=${encodeURIComponent(version.id)}">開啟 →</a>`;
   }
   // Editing affordances (re-pick view/layers, replace, delete) mutate the
-  // version — render none of them when signed off. Viewing stays.
-  if (signed) return actions;
+  // version — render none of them when signed off or read-only. Viewing stays.
+  if (frozen) return actions;
 
   // Re-pick the AutoCAD tab when this file went through the layout picker
   // (a manifest exists) and isn't mid-discovery / errored / already at the
@@ -983,8 +1071,8 @@ function buildFileActions(version, role, f, compact) {
     const viewBtn = document.createElement("button");
     viewBtn.className = "replace-btn";
     viewBtn.type = "button";
-    viewBtn.textContent = "View";
-    viewBtn.title = "Change which AutoCAD layout tab feeds the matcher";
+    viewBtn.textContent = "視圖";
+    viewBtn.title = "更換餵給比對器的 AutoCAD layout tab";
     viewBtn.addEventListener("click", () => promptLayoutSelection(f));
     actions.appendChild(viewBtn);
   }
@@ -996,16 +1084,16 @@ function buildFileActions(version, role, f, compact) {
     const layersBtn = document.createElement("button");
     layersBtn.className = "replace-btn";
     layersBtn.type = "button";
-    layersBtn.textContent = "Layers";
-    layersBtn.title = "Edit which layers feed the matcher";
+    layersBtn.textContent = "圖層";
+    layersBtn.title = "編輯哪些圖層餵給比對器";
     layersBtn.addEventListener("click", () => editLayers(f));
     actions.appendChild(layersBtn);
   }
   const replace = document.createElement("button");
   replace.className = "replace-btn";
   replace.type = "button";
-  replace.textContent = "Replace";
-  replace.title = "Replace this DXF";
+  replace.textContent = "替換";
+  replace.title = "替換此 DXF";
   replace.addEventListener("click", () => pickFile(version.id, role, f.id));
   actions.appendChild(replace);
   // Dev mode: Download Match JSON. Hidden entirely unless dev mode is on
@@ -1730,9 +1818,18 @@ async function pollReprocessJob(jobId) {
   tick();
 }
 
+// Product creation is global admin-only — hide "＋ 新增產品" for non-admins
+// so the UI never offers a write the server would 403 (role-based-ui-gating).
+// Bypass-admin dev mode keeps it (is_admin true).
+async function gateGlobalActions() {
+  const me = await whoAmI();
+  if ($newProductBtn && !me.is_admin) $newProductBtn.hidden = true;
+}
+
 // ---- bootstrap -----------------------------------------------------------
 (async () => {
   syncDevModeButton();
+  gateGlobalActions();
   await refresh();
   startPollingIfBusy();
 })();

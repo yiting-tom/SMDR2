@@ -25,7 +25,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 STATE_COOKIE = "conform_oidc"
 STATE_TTL_SECONDS = 600.0
@@ -105,6 +105,34 @@ def build_login(cfg: OidcConfig, next_path: str = "/") -> tuple[str, str]:
         "code_challenge_method": "S256",
     })
     return url, cookie
+
+
+def end_session_url(cfg: OidcConfig) -> str:
+    """Keycloak RP-initiated logout URL (OIDC end_session_endpoint).
+
+    Clearing our own session cookie is not enough: the Keycloak SSO
+    session survives, so the very next /auth/login silently re-authes and
+    the user appears never to have logged out. Sending the browser here
+    terminates the IdP session too, then bounces back to the app root —
+    which (now session-less AND SSO-less) lands on the Keycloak login.
+
+    `post_logout_redirect_uri` is derived from the registered callback URL
+    (the browser-facing origin), not request.base_url, which behind the
+    BFF/proxy may be the cluster-internal host. Override with
+    OIDC_POST_LOGOUT_REDIRECT_URI when the app origin differs.
+
+    NOTE (ops): Keycloak validates `post_logout_redirect_uri` against the
+    client's "Valid post logout redirect URIs". Register the app origin
+    (e.g. https://app.example.com/* or `+`) or logout 400s at Keycloak.
+    """
+    post_logout = os.environ.get("OIDC_POST_LOGOUT_REDIRECT_URI", "")
+    if not post_logout:
+        u = urlsplit(cfg.redirect_uri)
+        post_logout = f"{u.scheme}://{u.netloc}/"
+    return f"{cfg.issuer}/protocol/openid-connect/logout?" + urlencode({
+        "client_id": cfg.client_id,
+        "post_logout_redirect_uri": post_logout,
+    })
 
 
 def exchange_code(

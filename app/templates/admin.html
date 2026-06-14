@@ -13,67 +13,154 @@
     <nav id="topnav"></nav>
   </header>
   <main class="admin-main">
-    <section class="admin-section" id="sec-customers">
+    <div class="admin-head">
+      <h1>管理</h1>
+      <p>客戶分群、權限指派與稽核紀錄</p>
+    </div>
+
+    <div class="admin-console">
+      <nav class="admin-sidebar" aria-label="管理區段">
+        <button type="button" class="admin-nav-item active" data-section="customers"
+                aria-current="page">
+          客戶 <span class="nav-count" id="nav-count-customers"></span>
+        </button>
+        <button type="button" class="admin-nav-item" data-section="grants">
+          權限 <span class="nav-count" id="nav-count-grants"></span>
+        </button>
+        <button type="button" class="admin-nav-item" data-section="audit">
+          稽核 <span class="nav-count" id="nav-count-audit"></span>
+        </button>
+      </nav>
+
+      <div class="admin-panel">
+    <section class="admin-section is-active" id="sec-customers" data-section="customers">
       <div class="admin-card">
-        <h2>Customers(客戶分群)</h2>
+        <h2>Customers <small>客戶分群 — 產品的上層群組</small></h2>
         <div class="admin-form">
-          <input id="customer-name" type="text" placeholder="客戶名稱" />
+          <label class="field">
+            <span>客戶名稱</span>
+            <input id="customer-name" type="text" placeholder="例:Customer-A" />
+          </label>
           <button id="customer-create" type="button">新增</button>
-          <span id="customer-error" class="admin-error"></span>
+          <span id="customer-error" class="admin-error" role="alert"></span>
         </div>
-        <table class="admin-table" id="customer-table">
-          <thead><tr><th>ID</th><th>名稱</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="admin-table-wrap">
+          <table class="admin-table" id="customer-table">
+            <thead><tr>
+              <th scope="col">ID</th>
+              <th scope="col">名稱</th>
+              <th scope="col">產品數</th>
+              <th scope="col" aria-label="操作"></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="admin-foot">
+          <span class="admin-note" id="customer-note"></span>
+          <span class="spacer"></span>
+          <div class="admin-pager" id="customer-pager"></div>
+        </div>
       </div>
     </section>
 
-    <section class="admin-section" id="sec-grants">
+    <section class="admin-section" id="sec-grants" data-section="grants">
       <div class="admin-card">
-        <h2>Grants(權限指派)</h2>
-        <div class="admin-form">
-          <select id="grant-grantee-type">
+        <h2>Grants <small>權限指派 — 個人或部門 × 角色 × 範圍</small></h2>
+        <!-- Sentence-style composer: reads "授予 [對象] [角色] 權限於 [範圍]".
+             Fields carry aria-labels since the connective words replace the
+             stacked labels. Invalid combos are locked out by reconcileGrantForm. -->
+        <div class="admin-form grant-form">
+          <span class="form-lead">授予</span>
+          <select id="grant-grantee-type" aria-label="對象類型">
             <option value="user">個人</option>
             <option value="dept">部門</option>
           </select>
-          <input id="grant-grantee-id" type="text" placeholder="userid / deptid"
-                 list="deptid-options" />
-          <datalist id="deptid-options"></datalist>
-          <select id="grant-role">
-            <option value="viewer">viewer</option>
-            <option value="editor">editor</option>
-            <option value="admin">admin</option>
+          <!-- Grantee is a dropdown of known users / depts; the last option
+               "其他(手動輸入)" reveals the text field for pre-granting someone
+               who hasn't logged in yet. -->
+          <select id="grant-grantee-select" aria-label="對象"></select>
+          <input id="grant-grantee-id" type="text" placeholder="輸入 userid / deptid"
+                 aria-label="手動輸入對象" hidden />
+          <select id="grant-role" aria-label="角色">
+            <option value="viewer">viewer(檢視)</option>
+            <option value="editor">editor(編輯)</option>
+            <option value="admin">admin(管理)</option>
           </select>
-          <select id="grant-scope-type">
-            <option value="global">global</option>
-            <option value="customer">customer</option>
-            <option value="product">product</option>
+          <span class="form-lead">權限於</span>
+          <select id="grant-scope-type" aria-label="範圍">
+            <option value="global">global(全域)</option>
+            <option value="customer">customer(客戶)</option>
+            <option value="product">product(產品)</option>
           </select>
-          <select id="grant-scope-id" hidden></select>
+          <select id="grant-scope-id" aria-label="範圍對象" hidden></select>
           <button id="grant-create" type="button">指派</button>
-          <span id="grant-error" class="admin-error"></span>
+          <span id="grant-hint" class="grant-hint"></span>
+          <span id="grant-error" class="admin-error" role="alert"></span>
         </div>
-        <table class="admin-table" id="grant-table">
-          <thead><tr><th>對象</th><th>角色</th><th>範圍</th><th>授權者</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="admin-subbar">
+          <input id="grant-filter" type="search" placeholder="搜尋對象或範圍…"
+                 autocomplete="off" aria-label="搜尋權限(對象或範圍)" />
+        </div>
+        <div class="admin-table-wrap">
+          <table class="admin-table" id="grant-table">
+            <thead><tr>
+              <th scope="col">對象</th>
+              <th scope="col">角色</th>
+              <th scope="col">範圍</th>
+              <th scope="col">授權者</th>
+              <th scope="col" aria-label="操作"></th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="admin-foot">
+          <span class="admin-note" id="grant-note"></span>
+          <span class="spacer"></span>
+          <div class="admin-pager" id="grant-pager"></div>
+        </div>
       </div>
     </section>
 
-    <section class="admin-section" id="sec-audit">
+    <section class="admin-section" id="sec-audit" data-section="audit">
       <div class="admin-card">
-        <h2>Audit log(稽核紀錄)</h2>
+        <h2>Audit log <small>稽核紀錄 — 誰在何時做了什麼</small></h2>
         <div class="admin-form">
-          <input id="audit-actor" type="text" placeholder="actor 過濾" />
-          <input id="audit-action" type="text" placeholder="action 過濾(如 version.sign_off)" />
+          <label class="field">
+            <span>actor 過濾</span>
+            <select id="audit-actor" aria-label="actor 過濾">
+              <option value="">全部 actor</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>action 過濾</span>
+            <select id="audit-action" aria-label="action 過濾">
+              <option value="">全部 action</option>
+            </select>
+          </label>
           <button id="audit-refresh" type="button">重新整理</button>
         </div>
-        <table class="admin-table" id="audit-table">
-          <thead><tr><th>時間</th><th>actor</th><th>action</th><th>target</th><th>product</th><th>detail</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="admin-table-wrap">
+          <table class="admin-table" id="audit-table">
+            <thead><tr>
+              <th scope="col">時間</th>
+              <th scope="col">actor</th>
+              <th scope="col">action</th>
+              <th scope="col">target</th>
+              <th scope="col">product</th>
+              <th scope="col">detail</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="admin-foot">
+          <span class="admin-note" id="audit-note"></span>
+          <span class="spacer"></span>
+          <div class="admin-pager" id="audit-pager"></div>
+        </div>
       </div>
     </section>
+      </div><!-- /.admin-panel -->
+    </div><!-- /.admin-console -->
   </main>
   <script src="/static/csrf.js"></script>
   <script src="/static/topnav.js"></script>

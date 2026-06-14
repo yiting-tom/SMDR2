@@ -380,7 +380,20 @@ async def auth_logout(request: Request):
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         AUTH_STORE.delete_session(token)
-    r = JSONResponse({"logged_out": True})
+    body = {"logged_out": True}
+    # Killing our local session is only half of a logout: the Keycloak SSO
+    # session survives, so the next /auth/login silently re-authes and the
+    # user appears never to have logged out. Hand the browser the IdP
+    # end-session URL so it terminates the SSO session too. Skipped in
+    # bypass mode (OIDC unconfigured → nothing to log out of upstream).
+    try:
+        from app import oidc as oidc_mod
+        body["end_session_url"] = oidc_mod.end_session_url(
+            oidc_mod.OidcConfig.from_env(),
+        )
+    except oidc_mod.OidcError:
+        pass
+    r = JSONResponse(body)
     r.delete_cookie(SESSION_COOKIE)
     r.delete_cookie(CSRF_COOKIE)
     return r
@@ -646,6 +659,7 @@ async def list_grants(
     return {
         "grants": [g.to_dict() for g in AUTH_STORE.list_grants(grantee_type, grantee_id)],
         "known_deptids": AUTH_STORE.known_deptids(),
+        "known_users": AUTH_STORE.known_users(),
     }
 
 
@@ -756,12 +770,18 @@ async def list_products(ident=Depends(current_identity)) -> dict:
         items.append({
             **p.to_dict(),
             "versions": versions,
+            # The caller's role on THIS product (same fn the write guards
+            # use) so the client can gate affordances — advisory only, the
+            # server still enforces (add-role-based-ui-gating).
+            "effective_role": effective_role(ident, p.id),
         })
     return {"products": items}
 
 
 @app.get("/api/products/{product_id}", dependencies=[Depends(viewer_guard)])
-async def get_product(product_id: str) -> dict:
+async def get_product(
+    product_id: str, ident=Depends(current_identity),
+) -> dict:
     p = PRODUCT_STORE.get(product_id)
     if p is None:
         raise HTTPException(status_code=404, detail="product not found")
@@ -770,6 +790,7 @@ async def get_product(product_id: str) -> dict:
         "versions": [
             _version_payload(v) for v in VERSION_STORE.list_by_product(p.id)
         ],
+        "effective_role": effective_role(ident, p.id),
     }
 
 

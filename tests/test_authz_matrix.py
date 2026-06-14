@@ -170,6 +170,42 @@ def test_editor_signs_own_version_and_unsign_is_admin_only(client):
     assert client.delete(f"/api/versions/{vid}/sign-off").status_code == 200
 
 
+# ---- effective_role in product payload (add-role-based-ui-gating) -----------
+def test_product_payload_carries_effective_role(client):
+    """`/api/products` (+ `/{id}`) expose the caller's per-product role so
+    the UI can gate affordances. Value == guards.effective_role."""
+    suffix = uuid.uuid4().hex[:6]
+    p = _mk_product(client, f"er-{suffix}")
+
+    # product-scoped viewer → role 'viewer' on that product
+    viewer = f"v-{suffix}"
+    _grant(grantee_type="user", grantee_id=viewer, role="viewer",
+           scope_type="product", scope_id=p["id"])
+    _as(viewer)
+    row = next(x for x in client.get("/api/products").json()["products"]
+               if x["id"] == p["id"])
+    assert row["effective_role"] == "viewer"
+    assert client.get(f"/api/products/{p['id']}").json()["effective_role"] == "viewer"
+
+    # global editor → 'editor'
+    editor = f"e-{suffix}"
+    _grant(grantee_type="user", grantee_id=editor, role="editor",
+           scope_type="global")
+    _as(editor)
+    row = next(x for x in client.get("/api/products").json()["products"]
+               if x["id"] == p["id"])
+    assert row["effective_role"] == "editor"
+
+    # global admin → 'admin'
+    adm = f"a-{suffix}"
+    _grant(grantee_type="user", grantee_id=adm, role="admin",
+           scope_type="global")
+    _as(adm)
+    row = next(x for x in client.get("/api/products").json()["products"]
+               if x["id"] == p["id"])
+    assert row["effective_role"] == "admin"
+
+
 # ---- lock contention -----------------------------------------------------------
 def test_lock_contention_and_admin_force_release(client):
     suffix = uuid.uuid4().hex[:6]

@@ -53,10 +53,21 @@
         out.title = "結束此 session";
         out.addEventListener("click", async () => {
           out.disabled = true;
+          // POST clears our local session (CSRF-protected); the server
+          // replies with the Keycloak end-session URL, which we navigate
+          // to so the IdP SSO session is terminated too — otherwise the
+          // redirect back through /auth/login silently re-authes and the
+          // logout looks like it did nothing. Falls back to "/" in bypass
+          // mode (no end_session_url) or on any error.
+          let next = "/";
           try {
-            await fetch("/auth/logout", { method: "POST" });
+            const r = await fetch("/auth/logout", { method: "POST" });
+            if (r.ok) {
+              const data = await r.json().catch(() => ({}));
+              if (data && data.end_session_url) next = data.end_session_url;
+            }
           } finally {
-            location.href = "/";
+            location.href = next;
           }
         });
         frag.appendChild(out);

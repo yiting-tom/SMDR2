@@ -1,16 +1,68 @@
+/* ==== Design tokens ======================================================
+   Used by the dashboard (/) + admin (/admin) redesign and the shared
+   header. Viewer-specific rules keep their literal hex values — same
+   palette, so the pages stay visually consistent. System font stack on
+   purpose: the tool runs on an intranet (no Google Fonts CDN). */
+:root {
+  --bg-page: #0e1217;          /* dashboard/admin page background */
+  --surface: #161c24;          /* elevated cards */
+  --surface-2: #0f1318;        /* header / chrome */
+  --surface-inset: #0c1015;    /* inputs, slots (sunken) */
+  --border: #2a3340;
+  --border-strong: #3d4b5e;
+  --border-soft: rgba(42, 51, 64, 0.6);
+  --text: #e8eef5;
+  --text-2: #9aa5b1;
+  --text-3: #6b7886;
+  --accent: #00e5ff;
+  --accent-soft: rgba(0, 229, 255, 0.09);
+  --ok: #69f0ae;
+  --ok-soft: rgba(105, 240, 174, 0.1);
+  --warn: #ffb84d;
+  --warn-soft: rgba(255, 184, 77, 0.12);
+  --danger: #ff5252;
+  --danger-soft: rgba(255, 82, 82, 0.1);
+  --radius: 4px;
+  --radius-lg: 8px;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
 * { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; font-family: -apple-system, system-ui, sans-serif; }
+html, body { height: 100%; margin: 0; font-family: -apple-system, system-ui, "Segoe UI", sans-serif; }
 body { display: flex; flex-direction: column; background: #1a1f26; color: #e8eef5; }
+body[data-page="dashboard"],
+body[data-page="admin"] { background: var(--bg-page); }
+
+/* Keyboard navigation: one consistent, visible focus ring everywhere.
+   :focus-visible only — mouse clicks don't paint rings. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
 
 header {
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.5rem 1rem;
-  background: #0f1318;
+  padding: 0.55rem 1.1rem;
+  background: var(--surface-2, #0f1318);
   border-bottom: 1px solid #2a3340;
   font-size: 0.85rem;
+  flex-shrink: 0;
 }
+/* Push #topnav to the right edge on dashboard + admin (the viewer header
+   manages its own layout). */
+body[data-page="dashboard"] header > .spacer,
+body[data-page="admin"] header > .spacer { flex: 1; }
 header .title {
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -74,6 +126,7 @@ header .page-context::before { content: "·"; margin-right: 0.5rem; color: #3a43
   border: 1px solid #2a3340;
   border-radius: 3px;
   padding: 0.18rem 0.55rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 #topnav .topnav-link:hover { border-color: #4a6080; color: #00ffff; }
 #topnav .user-chip {
@@ -102,6 +155,7 @@ header .page-context::before { content: "·"; margin-right: 0.5rem; color: #3a43
   font: inherit;
   font-size: 0.8rem;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 #topnav .logout-btn:hover { border-color: #ff7a7a; color: #ff7a7a; }
 
@@ -503,22 +557,39 @@ nav#class-toolbar {
    Neutral grey so they read as a different group from the colored
    object-class buttons that follow. */
 nav#class-toolbar .tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   background: transparent;
   color: #e8eef5;
   border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.18rem 0.55rem;
+  border-radius: 4px;
+  padding: 0.28rem 0.6rem;
   font: inherit;
   font-size: 0.82rem;
   cursor: pointer;
   white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
-nav#class-toolbar .tool-btn:hover { border-color: #4a6080; }
+nav#class-toolbar .tool-btn:hover {
+  border-color: #4a6080;
+  background: rgba(255, 255, 255, 0.03);
+}
 nav#class-toolbar .tool-btn.active {
-  background: #003e4d;
-  border-color: #00ffff;
-  color: #00ffff;
+  background: rgba(0, 229, 255, 0.1);
+  border-color: #00e5ff;
+  color: #00e5ff;
 }
+/* Stroke icons inside toolbar buttons — inherit the button's text colour
+   (so active = cyan, hover = brighter) and sit flush with the label. */
+.tool-ico {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+/* `.tool-btn`'s display:inline-flex outranks the UA [hidden] rule — make
+   hidden explicit so role-gated buttons actually disappear. */
+nav#class-toolbar .tool-btn[hidden] { display: none; }
 nav#class-toolbar .toolbar-sep {
   display: inline-block;
   width: 1px;
@@ -860,56 +931,99 @@ canvas#dxf-canvas.panning { cursor: grabbing; }
 
 /* ---- Dashboard --------------------------------------------------------- */
 body.dashboard main.dashboard-main {
-  padding: 1rem 1.5rem;
+  padding: 1.25rem clamp(1rem, 4vw, 2.5rem) 3rem;
   overflow: auto;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
 }
 
+/* Page head: title + count + search filter + primary action. */
 #dashboard-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.6rem 0.8rem;
-  background: #0f1318;
-  border: 1px solid #2a3340;
-  border-radius: 4px;
-  margin-bottom: 1rem;
+  gap: 0.8rem;
+  margin-bottom: 1.1rem;
+  flex-wrap: wrap;
   font-size: 0.88rem;
 }
+#dashboard-toolbar .spacer { flex: 1; }
+#dashboard-toolbar h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+#product-count {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0.08rem 0.6rem;
+}
+#product-count:empty { display: none; }
+#product-search {
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.34rem 0.65rem;
+  font: inherit;
+  font-size: 0.84rem;
+  width: min(30ch, 42vw);
+  transition: border-color 0.15s ease;
+}
+#product-search:hover { border-color: var(--border-strong); }
+#product-search:focus { outline: none; border-color: var(--accent); }
+#product-search::placeholder { color: var(--text-3); }
 
 /* ---- Version bar (per product card) ------------------------------------ */
 .version-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.6rem;
-  margin-bottom: 0.6rem;
+  padding: 0.5rem 1rem;
   font-size: 0.84rem;
+  background: rgba(15, 19, 24, 0.5);
+  border-bottom: 1px solid var(--border-soft);
 }
-.version-bar__label { color: #9aa5b1; }
+.version-bar__label { color: var(--text-2); }
 .version-bar .spacer { flex: 1; }
 .version-bar .version-select {
-  background: #1a1f26;
-  color: #e8eef5;
-  border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.2rem 0.4rem;
+  background: var(--surface-inset);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.22rem 0.45rem;
   font: inherit;
   font-size: 0.84rem;
   min-width: 10ch;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
 }
-.version-bar .version-select:hover { border-color: #4a6080; }
+.version-bar .version-select:hover { border-color: var(--border-strong); }
 .version-bar .version-action-btn {
   background: transparent;
-  color: #00ffff;
-  border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.18rem 0.6rem;
+  color: #00e5ff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.2rem 0.65rem;
   cursor: pointer;
   font: inherit;
   font-size: 0.8rem;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.version-bar .version-action-btn:hover {
-  border-color: #00ffff;
-  background: rgba(0, 255, 255, 0.08);
+.version-bar .version-action-btn:hover:not(:disabled) {
+  border-color: #00e5ff;
+  background: var(--accent-soft);
+}
+.version-bar .version-action-btn:disabled {
+  color: #4a5868;
+  cursor: not-allowed;
 }
 
 /* ---- Product cards ----------------------------------------------------- */
@@ -919,61 +1033,119 @@ body.dashboard main.dashboard-main {
   gap: 1rem;
 }
 .product-card {
-  background: #0f1318;
-  border: 1px solid #2a3340;
-  border-radius: 6px;
-  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  transition: border-color 0.15s ease;
 }
+.product-card:hover { border-color: var(--border-strong); }
 .product-card header {
   display: flex;
-  align-items: baseline;
-  gap: 0.6rem;
-  padding: 0;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem 1rem 0.55rem;
   background: none;
   border: none;
-  margin-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border-soft);
+  margin: 0;
 }
-.product-card .product-name { font-weight: 600; font-size: 1rem; }
+.product-card .product-name { font-weight: 650; font-size: 1.02rem; }
+/* Read-only (viewer-role) signpost in the card header. */
+.product-card .readonly-chip {
+  font-size: 0.7rem;
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0.05rem 0.55rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
 .product-card .spacer { flex: 1; }
 .product-card .product-delete {
   background: transparent;
-  color: #5d8aa8;
-  border: none;
+  color: var(--text-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
   font: inherit;
   font-size: 0.78rem;
+  padding: 0.15rem 0.55rem;
   cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
 }
-.product-card .product-delete:hover { color: #ff5252; }
+.product-card .product-delete:hover {
+  color: var(--danger);
+  border-color: rgba(255, 82, 82, 0.45);
+  background: var(--danger-soft);
+}
+
+/* Edit-lock control (產品編輯鎖) in the card header. */
+.product-card .lock-btn {
+  background: transparent;
+  color: #00e5ff;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0.12rem 0.7rem;
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.product-card .lock-btn:hover {
+  border-color: #00e5ff;
+  background: var(--accent-soft);
+}
+.product-card .lock-other {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid rgba(255, 184, 77, 0.4);
+  border-radius: 9999px;
+  padding: 0.12rem 0.7rem;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
 
 .product-card .slot-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
-  margin-bottom: 0.6rem;
+  gap: 0.7rem;
+  padding: 0.8rem 1rem;
+}
+@media (max-width: 720px) {
+  .product-card .slot-grid { grid-template-columns: 1fr; }
 }
 .product-card .slot {
-  border: 1px solid #2a3340;
-  border-radius: 4px;
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
   padding: 0.6rem 0.7rem;
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  min-height: 90px;
+  min-height: 92px;
   position: relative;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 .product-card .slot .role-label {
-  font-family: ui-monospace, monospace;
-  font-size: 0.74rem;
-  letter-spacing: 0.08em;
-  color: #5d8aa8;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-3);
 }
 .product-card .slot.empty {
+  background: transparent;
   border-style: dashed;
-  color: #5d8aa8;
+  color: var(--text-3);
 }
+.product-card .slot.empty .file-name { color: inherit; }
 .product-card .slot.empty:hover {
-  border-color: #00ffff;
-  color: #00ffff;
+  border-color: #00e5ff;
+  background: var(--accent-soft);
+  color: #00e5ff;
   cursor: pointer;
 }
 /* Empty slot locked — either via `disabledReason` on `slotCell` or
@@ -986,19 +1158,35 @@ body.dashboard main.dashboard-main {
   cursor: not-allowed;
 }
 .product-card .slot.dragover {
-  background: rgba(0, 255, 255, 0.06);
-  border-color: #00ffff;
+  background: var(--accent-soft);
+  border-color: #00e5ff;
+  border-style: solid;
 }
 .product-card .slot .file-name {
   font-size: 0.85rem;
-  color: #e8eef5;
-  font-family: ui-monospace, monospace;
+  color: var(--text);
+  font-family: var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .product-card .slot .slot-status {
   font-size: 0.74rem;
+  color: var(--text-2);
+}
+/* Match state pill (set by fileStatusBits in dashboard.js). */
+.match-pill {
+  display: inline-block;
+  padding: 0.02rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.72rem;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.match-pill.matched {
+  color: var(--ok);
+  border-color: rgba(105, 240, 174, 0.45);
+  background: var(--ok-soft);
 }
 .warn-badge {
   color: #ffb84d;
@@ -1029,13 +1217,18 @@ body.dashboard main.dashboard-main {
   background: transparent;
   border: 1px solid #2a3340;
   border-radius: 3px;
-  padding: 0.12rem 0.55rem;
+  padding: 0.14rem 0.6rem;
   color: #c0cad6;
   text-decoration: none;
   font-family: inherit;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
-.product-card .slot a.open-link:hover { border-color: #00ffff; color: #00ffff; }
+.product-card .slot a.open-link:hover {
+  border-color: #00e5ff;
+  color: #00e5ff;
+  background: var(--accent-soft);
+}
 .product-card .slot button.replace-btn:hover { border-color: #ffb84d; color: #ffb84d; }
 
 /* Multi-DXF-per-role: when a role has 2+ files, the slot stacks them and
@@ -1074,27 +1267,52 @@ body.dashboard main.dashboard-main {
 .product-card .product-footer {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.6rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid #1a2028;
-  margin-top: 0.5rem;
+  padding: 0.55rem 1rem 0.75rem;
+  border-top: 1px solid var(--border-soft);
 }
 .product-card .match-progress {
-  font-family: ui-monospace, monospace;
-  font-size: 0.82rem;
-  color: #9aa5b1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
 }
-.product-card .match-progress strong { color: #69f0ae; }
+.product-card .match-progress strong { color: var(--ok); }
+/* Visual progress track next to the N/M readout. */
+.match-progress .progress-track {
+  display: inline-block;
+  width: 120px;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.match-progress .progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--ok);
+  transition: width 0.25s ease;
+}
 .product-card .rule-check-btn {
   background: transparent;
-  color: #69f0ae;
-  border: 1px solid #69f0ae;
-  border-radius: 3px;
+  color: var(--ok);
+  border: 1px solid rgba(105, 240, 174, 0.55);
+  border-radius: var(--radius);
   padding: 0.25rem 0.8rem;
   font: inherit;
+  font-size: 0.82rem;
   cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
-.product-card .rule-check-btn:hover { background: rgba(105, 240, 174, 0.1); }
+.product-card .rule-check-btn:hover:not(:disabled) {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+}
 .product-card .rule-check-btn:disabled {
   color: #4a5868;
   border-color: #2a3340;
@@ -1103,7 +1321,6 @@ body.dashboard main.dashboard-main {
 }
 
 /* Developer mode toggle (dashboard header, top-right) */
-body.dashboard header .spacer { flex: 1; }
 #dev-mode-toggle {
   background: transparent;
   color: #9aa5b1;
@@ -1121,16 +1338,41 @@ body.dashboard header .spacer { flex: 1; }
   background: rgba(255, 184, 77, 0.08);
 }
 
+/* Primary CTA — the one solid button on the page. */
 #new-product-btn {
-  background: transparent;
-  color: #69f0ae;
-  border: 1px solid #69f0ae;
-  border-radius: 3px;
-  padding: 0.2rem 0.7rem;
+  background: var(--accent);
+  color: #06262b;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0.34rem 0.9rem;
   font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
   cursor: pointer;
+  transition: filter 0.15s ease;
 }
-#new-product-btn:hover { background: rgba(105, 240, 174, 0.1); }
+#new-product-btn:hover { filter: brightness(1.12); }
+#new-product-btn:active { filter: brightness(0.95); }
+
+/* Empty state (no products yet / no search hits). */
+.empty-state {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--text-2);
+}
+.empty-state .empty-state-title {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-state .empty-state-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-3);
+}
 
 /* Modal body / form rows */
 .modal .modal-body { padding: 0.8rem 1rem 1rem 1rem; }
@@ -1146,32 +1388,42 @@ body.dashboard header .spacer { flex: 1; }
 }
 .modal .form-row input,
 .modal .form-row select {
-  background: #0f1318;
+  background: #0c1015;
   color: #e8eef5;
   border: 1px solid #2a3340;
   border-radius: 3px;
-  padding: 0.3rem 0.5rem;
+  padding: 0.34rem 0.55rem;
   font: inherit;
+  transition: border-color 0.15s ease;
 }
+.modal .form-row input:hover,
+.modal .form-row select:hover { border-color: #3d4b5e; }
+.modal .form-row input:focus,
+.modal .form-row select:focus { outline: none; border-color: #00e5ff; }
 .modal .form-actions {
   display: flex;
   justify-content: flex-end;
   gap: 0.6rem;
+  margin-top: 0.4rem;
 }
 .modal .form-actions button {
   background: transparent;
   color: #c0cad6;
   border: 1px solid #2a3340;
   border-radius: 3px;
-  padding: 0.25rem 0.8rem;
+  padding: 0.3rem 0.85rem;
   font: inherit;
   cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 .modal .form-actions button:hover { border-color: #4a6080; }
 .modal .form-actions button#new-product-create {
-  color: #00ffff;
-  border-color: #00ffff;
+  background: var(--accent);
+  color: #06262b;
+  border-color: var(--accent);
+  font-weight: 600;
 }
+.modal .form-actions button#new-product-create:hover { filter: brightness(1.12); }
 .modal .modal-wide { width: min(960px, 96vw); }
 
 /* Rule-check results --------------------------------------------------- */
@@ -1490,7 +1742,8 @@ body.dashboard header .spacer { flex: 1; }
 #file-list .status-parsing  { color: #ffb84d; }
 #file-list .status-done     { color: #69f0ae; }
 
-#empty-msg { color: #5d8aa8; padding: 1rem; text-align: center; }
+/* In-card "no version" notice (data anomaly). */
+.product-card .empty { color: #5d8aa8; padding: 0.6rem 1rem; }
 
 /* ---- Modal (Library Manager) ------------------------------------------ */
 .modal {
@@ -2079,94 +2332,390 @@ body.dashboard header .spacer { flex: 1; }
 }
 
 /* ---- Admin console (/admin) — same design system as the dashboard ------- */
-.admin-main { padding: 1rem; max-width: 1100px; margin: 0 auto; width: 100%; }
-.admin-section { margin-bottom: 1.5rem; }
+.admin-main {
+  padding: 1.25rem clamp(1rem, 4vw, 2.5rem) 3rem;
+  max-width: 1200px;
+  margin: 0 auto;
+  width: 100%;
+  overflow: auto;
+}
+.admin-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  margin-bottom: 1.1rem;
+}
+.admin-head h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.admin-head p { margin: 0; color: var(--text-3); font-size: 0.82rem; }
+
+/* Two-column console: fixed nav rail + main panel. The rail switches the
+   visible section client-side (no reload); deep-linked via URL hash. */
+.admin-console {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+.admin-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  position: sticky;
+  top: 1rem;
+}
+.admin-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.admin-nav-item:hover { background: rgba(255, 255, 255, 0.03); color: var(--text); }
+.admin-nav-item.active {
+  background: var(--accent-soft);
+  border-color: rgba(0, 229, 255, 0.35);
+  color: #00e5ff;
+  font-weight: 600;
+}
+.admin-nav-item .nav-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  padding: 0.02rem 0.5rem;
+  min-width: 2ch;
+  text-align: center;
+}
+.admin-nav-item.active .nav-count {
+  color: #00e5ff;
+  border-color: rgba(0, 229, 255, 0.35);
+  background: transparent;
+}
+
+/* Only the active section renders; class beats UA [hidden]. */
+.admin-section { display: none; }
+.admin-section.is-active { display: block; }
+
+@media (max-width: 860px) {
+  .admin-console { grid-template-columns: 1fr; gap: 0.9rem; }
+  .admin-sidebar {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.4rem;
+    padding-bottom: 0.2rem;
+  }
+  .admin-nav-item { width: auto; white-space: nowrap; }
+}
+
 .admin-card {
-  background: #0f1318;
-  border: 1px solid #2a3340;
-  border-radius: 6px;
-  padding: 0.85rem 1rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
 }
 .admin-card h2 {
-  margin: 0 0 0.7rem;
+  margin: 0;
   font-size: 0.95rem;
-  font-weight: 600;
-  color: #e8eef5;
-  border-bottom: 1px solid #2a3340;
-  padding-bottom: 0.5rem;
+  font-weight: 650;
+  color: var(--text);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.65rem 1rem 0.55rem;
+}
+.admin-card h2 small {
+  font-weight: 400;
+  font-size: 0.76rem;
+  color: var(--text-3);
+  margin-left: 0.5rem;
 }
 .admin-form {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.7rem;
   flex-wrap: wrap;
-  align-items: center;
-  margin-bottom: 0.8rem;
+  align-items: flex-end;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(15, 19, 24, 0.5);
+}
+/* Visible field labels — placeholder-only inputs are an a11y trap. */
+.admin-form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* Class display beats the UA [hidden] rule — make hidden explicit. */
+.admin-form .field[hidden] { display: none; }
+.admin-form .field > span {
+  font-size: 0.72rem;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
 }
 .admin-form input,
 .admin-form select {
-  background: #1a1f26;
-  color: #e8eef5;
-  border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.28rem 0.5rem;
+  background: var(--surface-inset);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.55rem;
   font: inherit;
   font-size: 0.84rem;
+  transition: border-color 0.15s ease;
 }
+.admin-form select { cursor: pointer; }
 .admin-form input:hover,
-.admin-form select:hover { border-color: #4a6080; }
+.admin-form select:hover { border-color: var(--border-strong); }
 .admin-form input:focus,
-.admin-form select:focus { outline: none; border-color: #00ffff; }
+.admin-form select:focus { outline: none; border-color: var(--accent); }
+.admin-form input::placeholder { color: #4a5868; }
 .admin-form button {
-  background: transparent;
-  color: #00ffff;
-  border: 1px solid #2a3340;
-  border-radius: 3px;
-  padding: 0.28rem 0.7rem;
+  background: var(--accent);
+  color: #06262b;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.85rem;
   cursor: pointer;
   font: inherit;
   font-size: 0.82rem;
+  font-weight: 600;
+  transition: filter 0.15s ease;
 }
-.admin-form button:hover { border-color: #00ffff; background: rgba(0, 255, 255, 0.08); }
-.admin-error { color: #ff7a7a; font-size: 0.8rem; }
+.admin-form button:hover { filter: brightness(1.12); }
+.admin-error { color: #ff7a7a; font-size: 0.8rem; align-self: center; }
+.admin-error:empty { display: none; }
 
+/* Table footer: count note on the left, pager on the right. */
+.admin-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 1rem;
+  border-top: 1px solid var(--border-soft);
+}
+.admin-foot .spacer { flex: 1; }
+.admin-note {
+  color: var(--text-3);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+.admin-note:empty { display: none; }
+/* Pager (client-side paging of the already-fetched audit rows). */
+.admin-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.admin-pager:empty { display: none; }
+.admin-pager .pager-status {
+  color: var(--text-2);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 7ch;
+  text-align: center;
+}
+.admin-pager .pager-btn {
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.2rem 0.6rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.admin-pager .pager-btn:hover:not(:disabled) {
+  border-color: #00e5ff;
+  color: #00e5ff;
+  background: var(--accent-soft);
+}
+.admin-pager .pager-btn:disabled {
+  color: #4a5868;
+  cursor: not-allowed;
+}
+/* Product-count cell on the Customers table. */
+.admin-table td .count-badge {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
+.admin-table td .count-badge.zero { color: var(--text-3); }
+
+/* ---- Grants: sentence-style composer ----------------------------------- */
+.grant-form { align-items: center; }
+.grant-form .form-lead {
+  color: var(--text-3);
+  font-size: 0.84rem;
+  white-space: nowrap;
+}
+.grant-form select:disabled,
+.grant-form option:disabled { color: #4a5868; }
+.grant-hint {
+  color: var(--warn);
+  font-size: 0.76rem;
+  align-self: center;
+}
+.grant-hint:empty { display: none; }
+/* Brief tint when a row's "再指派" prefills the composer. */
+.grant-form.flash { animation: grant-flash 0.7s ease; }
+@keyframes grant-flash {
+  0% { background: var(--accent-soft); }
+  100% { background: rgba(15, 19, 24, 0.5); }
+}
+
+/* Filter sub-bar (above a table). */
+.admin-subbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+.admin-subbar input[type="search"] {
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.6rem;
+  font: inherit;
+  font-size: 0.84rem;
+  width: min(28ch, 60%);
+  transition: border-color 0.15s ease;
+}
+.admin-subbar input[type="search"]:hover { border-color: var(--border-strong); }
+.admin-subbar input[type="search"]:focus { outline: none; border-color: var(--accent); }
+.admin-subbar input[type="search"]::placeholder { color: #4a5868; }
+
+/* Scope badge — type carried by the text prefix, colour reinforces it. */
+.scope-badge {
+  display: inline-block;
+  padding: 0.05rem 0.55rem;
+  border-radius: 9999px;
+  font-size: 0.74rem;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.scope-badge.scope-global {
+  color: #7db8ff;
+  border-color: rgba(125, 184, 255, 0.4);
+  background: rgba(125, 184, 255, 0.1);
+}
+.scope-badge.scope-customer {
+  color: #00e5ff;
+  border-color: rgba(0, 229, 255, 0.4);
+  background: var(--accent-soft);
+}
+.scope-badge.scope-product { color: var(--text-2); }
+
+/* Per-row action buttons (grants: 再指派 + 撤銷). */
+.admin-table td.row-actions { white-space: nowrap; }
+.admin-table td.row-actions .row-assign { margin-right: 0.4rem; }
+.row-assign {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.55rem;
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.row-assign:hover {
+  border-color: #00e5ff;
+  color: #00e5ff;
+  background: var(--accent-soft);
+}
+
+/* overflow-x:auto alone promotes overflow-y from visible→auto (CSS spec),
+   which flashes a spurious vertical scrollbar; pin the y axis. */
+.admin-table-wrap { overflow-x: auto; overflow-y: hidden; }
 .admin-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .admin-table th,
 .admin-table td {
-  border: 1px solid #2a3340;
-  padding: 0.35rem 0.6rem;
+  padding: 0.42rem 1rem;
   text-align: left;
   vertical-align: top;
 }
 .admin-table th {
-  background: #161b22;
-  color: #9aa5b1;
+  color: var(--text-3);
   font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
-.admin-table tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+.admin-table td { border-bottom: 1px solid rgba(42, 51, 64, 0.45); }
+.admin-table tbody tr:last-child td { border-bottom: none; }
+.admin-table tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
 .admin-table td code {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   color: #c0cad6;
   word-break: break-all;
 }
+.admin-table td.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--text-2);
+}
 .admin-table .row-delete {
   background: transparent;
-  border: 1px solid #2a3340;
-  color: #9aa5b1;
-  border-radius: 3px;
-  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--radius);
+  padding: 0.1rem 0.55rem;
   cursor: pointer;
   font: inherit;
   font-size: 0.78rem;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
 }
-.admin-table .row-delete:hover { border-color: #ff5252; color: #ff5252; }
+.admin-table .row-delete:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+}
 .admin-table .pill {
   display: inline-block;
-  padding: 0.05rem 0.5rem;
+  padding: 0.05rem 0.55rem;
   border-radius: 9999px;
   background: #1a2530;
-  border: 1px solid #2a3340;
-  font-size: 0.76rem;
+  border: 1px solid var(--border);
+  font-size: 0.74rem;
   white-space: nowrap;
 }
-.admin-empty { color: #6b7886; font-size: 0.82rem; padding: 0.4rem 0; }
+/* Role pills — colour-coded but never colour-only (text carries meaning). */
+.pill.role-admin {
+  color: var(--warn);
+  border-color: rgba(255, 184, 77, 0.45);
+  background: var(--warn-soft);
+}
+.pill.role-editor {
+  color: #00e5ff;
+  border-color: rgba(0, 229, 255, 0.4);
+  background: var(--accent-soft);
+}
+.pill.role-viewer { color: var(--text-2); }
+.admin-empty { color: var(--text-3); font-size: 0.82rem; padding: 0.6rem 0; text-align: center; }

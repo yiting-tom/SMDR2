@@ -19,7 +19,8 @@
 
   const el = document.createElement("span");
   el.id = "edit-lock";
-  slot.appendChild(el);
+  // Mounted below only for editor/admin — viewers get no lock widget
+  // (acquiring is an editor action; add-role-based-ui-gating).
 
   // CSRF: csrf.js (loaded before this script) wraps window.fetch and
   // injects X-CSRF-Token on every mutating request — no local handling.
@@ -91,8 +92,23 @@
     }
   });
 
-  fetch("/api/me").then((r) => r.json()).then((m) => {
-    me = m;
-    refresh();
-  }).catch(refresh);
+  function mountAndBoot() {
+    slot.appendChild(el);
+    fetch("/api/me").then((r) => r.json()).then((m) => {
+      me = m;
+      refresh();
+    }).catch(refresh);
+  }
+
+  // Gate on the caller's role for this product: viewers don't get the
+  // edit-lock widget at all (the server would 403 an acquire anyway).
+  // Any error fails open — mount as before — since the server stays the
+  // real boundary.
+  fetch(`/api/products/${productId}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((p) => {
+      if (p && p.effective_role === "viewer") return;  // read-only: no widget
+      mountAndBoot();
+    })
+    .catch(mountAndBoot);
 })();

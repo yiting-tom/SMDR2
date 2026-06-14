@@ -303,6 +303,17 @@ class AuthStore:
             ).fetchall()
         return [r[0] for r in rows]
 
+    def known_users(self) -> list[dict]:
+        """Logged-in users (userid + display name) — the admin grant
+        dropdown source for `grantee_type='user'`. Someone who has never
+        logged in won't appear here; the grant form keeps a manual-entry
+        escape so they can still be pre-granted."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT userid, name FROM users ORDER BY userid"
+            ).fetchall()
+        return [{"userid": r[0], "name": r[1] or ""} for r in rows]
+
     # ---- customers -------------------------------------------------------
     def create_customer(self, name: str, actor: str) -> str:
         cid = str(uuid.uuid4())[:12]
@@ -458,7 +469,7 @@ class AuthStore:
         (admin > editor > viewer), or None. Global grants always apply;
         customer/product grants apply when the matching id is passed.
         Dept matching uses identity.deptid (the users-row value)."""
-        if identity.is_bypass:
+        if identity.is_bypass and not dev_resolve_grants():
             return "admin"
         clauses = ["scope_type = 'global'"]
         args: list[str] = [identity.userid]
@@ -695,12 +706,26 @@ AUTH_STORE = AuthStore()
 
 
 # ---- FastAPI dependency ----------------------------------------------------
+def dev_resolve_grants() -> bool:
+    """Dev role impersonation switch. When SMDR2_DEV_RESOLVE_GRANTS=1, a
+    bypass identity stops force-resolving to admin and instead gets its
+    REAL effective role from the grants of SMDR2_DEV_USER — so you can see
+    the app exactly as a viewer / editor / scoped user would, without
+    standing up OIDC. Off (the default) keeps the single-user admin
+    behaviour. Workflow: run with the flag OFF (you're admin) to assign
+    grants in /admin, then restart with the flag ON + SMDR2_DEV_USER=<them>
+    to impersonate; flip it back OFF to be admin again."""
+    return os.environ.get("SMDR2_DEV_RESOLVE_GRANTS") == "1"
+
+
 def get_identity(request=None) -> Identity:
     """Resolve the caller. Modes (SMDR2_AUTH_MODE):
 
     - 'bypass' (default until cutover): synthetic admin identity from
       SMDR2_DEV_USER — current single-user behaviour, keeps the suite
-      green with the dependency wired into endpoints.
+      green with the dependency wired into endpoints. With
+      SMDR2_DEV_RESOLVE_GRANTS=1 it instead impersonates that user's real
+      grants (see `dev_resolve_grants`).
     - 'oidc': session-cookie lookup against AUTH_STORE; mutating methods
       additionally require the X-CSRF-Token header to match the session.
 
@@ -710,6 +735,16 @@ def get_identity(request=None) -> Identity:
     mode = os.environ.get("SMDR2_AUTH_MODE", "bypass")
     if mode == "bypass":
         dev_user = os.environ.get("SMDR2_DEV_USER", "dev")
+        if dev_resolve_grants():
+            # Pull the impersonated user's real deptid/name so dept-scoped
+            # grants and the identity chip resolve like production.
+            u = AUTH_STORE.get_user(dev_user)
+            return Identity(
+                userid=dev_user,
+                deptid=(u.deptid or "") if u else "",
+                name=(u.name or "") if u else "",
+                source="bypass",
+            )
         return Identity(userid=dev_user, source="bypass")
     token = request.cookies.get(SESSION_COOKIE) if request is not None else None
     if not token:
