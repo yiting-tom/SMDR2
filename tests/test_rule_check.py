@@ -14,7 +14,11 @@ import json
 
 import pytest
 
-from app.rule_check import RuleCheckOutputError, check_rules
+from app.rule_check import (
+    RuleCheckOutputError,
+    _validate_envelope,
+    check_rules,
+)
 
 
 # ---- envelope helper -----------------------------------------------------
@@ -632,9 +636,6 @@ def test_validate_rejects_list_to_without_from(monkeypatch):
 
 
 # ---- coordinate-mode sub-rules (add-rule-check-coordinate-display) --------
-
-from app.rule_check import _validate_envelope
-
 
 def _env(sub):
     return {"R": {"pass": True, "text": "t", "rules": [sub]}}
