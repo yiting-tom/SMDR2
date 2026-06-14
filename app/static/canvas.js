@@ -820,6 +820,65 @@ function fitToBbox(bbox) {
   view.zoom = Math.min(($canvas.width / w) * 0.92, ($canvas.height / h) * 0.92);
 }
 
+// ---- recentre on a focused sub-rule (center-entity-on-rule-navigation) ---
+// Never frame a target tighter than this many world mm — keeps a tiny /
+// single-point sub-rule target from over-zooming on go-to-role navigation.
+const MIN_FRAME_SPAN = 40;
+
+// Union world bbox of the focused sub-rule's geometry — handle primitives
+// (`from` / `to` / `tol`) plus coordinate points (`from_coordinates` /
+// `to_coordinates` / `to_entity`). Returns null when nothing resolves.
+function focusedSubRuleBounds() {
+  if (!focusedSubRule) return null;
+  let xmin = Infinity, ymin = Infinity, xmax = -Infinity, ymax = -Infinity;
+  const addPt = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (x < xmin) xmin = x;
+    if (y < ymin) ymin = y;
+    if (x > xmax) xmax = x;
+    if (y > ymax) ymax = y;
+  };
+  const addHandle = (h) => {
+    if (!h) return;
+    for (const p of primitives) {
+      if (p.handle !== h) continue;
+      const [a, b, c, d] = bboxOf(p);
+      if (Number.isFinite(a)) { addPt(a, b); addPt(c, d); }
+    }
+  };
+  addHandle(focusedSubRule.from);
+  const toList = Array.isArray(focusedSubRule.to)
+    ? focusedSubRule.to
+    : (focusedSubRule.to ? [focusedSubRule.to] : []);
+  for (const t of toList) addHandle(t);
+  addHandle(focusedSubRule.tol);
+  const fco = focusedSubRule.from_coordinates;
+  const tco = focusedSubRule.to_coordinates;
+  if (fco) addPt(fco[0], fco[1]);
+  if (tco) addPt(tco[0], tco[1]);
+  if (Array.isArray(focusedSubRule.to_entity)) {
+    for (const pt of focusedSubRule.to_entity) addPt(pt[0], pt[1]);
+  }
+  return xmin === Infinity ? null : [xmin, ymin, xmax, ymax];
+}
+
+// Pan + zoom so the focused sub-rule is centred and framed. The frame never
+// shrinks below MIN_FRAME_SPAN, so a tiny / single-point target lands at a
+// standing zoom instead of filling the canvas. No-op when no geometry.
+function recenterOnFocusedSubRule() {
+  const b = focusedSubRuleBounds();
+  if (!b) return;
+  const [xmin, ymin, xmax, ymax] = b;
+  view.cx = (xmin + xmax) / 2;
+  view.cy = (ymin + ymax) / 2;
+  // 1.6× the bbox for margin, floored at MIN_FRAME_SPAN.
+  const span = Math.max(
+    (xmax - xmin) * 1.6, (ymax - ymin) * 1.6, MIN_FRAME_SPAN,
+  );
+  view.zoom = (Math.min($canvas.width, $canvas.height) / span) * 0.92;
+  render();
+}
+
 // ---- bbox precomputation -------------------------------------------------
 function computeBBoxes() {
   primBBoxes = new Array(primitives.length);
@@ -1978,6 +2037,11 @@ function focusSubRuleByKey(ruleName, idx, role) {
     return;
   }
   focusSubRule(ruleName, idx, rule.pass, sub);
+  // Go-to-role landing: centre + frame the target so the operator arrives on
+  // the entity, not the default whole-file view. Local sidebar clicks call
+  // focusSubRule directly and deliberately keep the current pan/zoom
+  // (center-entity-on-rule-navigation).
+  recenterOnFocusedSubRule();
 }
 
 function highlightFocusedInSidebar() {
