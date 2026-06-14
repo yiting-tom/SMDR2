@@ -825,6 +825,36 @@ def test_upload_rule_json_writes_persisted_result():
         assert g.json()["results"] == payload
 
 
+def test_upload_rule_json_coordinate_mode_round_trips():
+    """A coordinate-mode envelope (point-to-point distance + to_entity
+    outline, no file_id) validates, persists, and round-trips
+    (add-rule-check-coordinate-display)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    with TestClient(app) as client:
+        _, vid = _new_version(client, "upload-rc-coords")
+        payload = {
+            "Cross-product gap": {
+                "pass": False,
+                "text": "ring-to-lid gap out of spec",
+                "rules": [{
+                    "part": "BD",
+                    "text": "gap 0.42 mm",
+                    "from_coordinates": [10.0, 20.0],
+                    "to_coordinates": [13.0, 24.0],
+                    "to_entity": [[0, 0], [5, 0], [5, 5], [0, 5]],
+                }],
+            },
+        }
+        r = client.post(f"/api/versions/{vid}/rule-check/upload", json=payload)
+        assert r.status_code == 200, r.text
+        assert r.json()["rule_count"] == 1
+        assert r.json()["pass_count"] == 0
+        g = client.get(f"/api/versions/{vid}/rule-check")
+        assert g.status_code == 200
+        assert g.json()["results"] == payload
+
+
 def test_upload_rule_json_rejects_invalid_envelope():
     """Envelope violation (`from` set, `file_id` null) returns 400 with
     the validator's error message so the user can fix the JSON

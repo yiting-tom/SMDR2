@@ -1323,6 +1323,37 @@ function drawFocusedSubRule(hairline) {
       drawEndpointMarker(tc, hairline);
     }
   }
+
+  // ---- coordinate mode (points already in this file's world frame) ----
+  // (add-rule-check-coordinate-display). Drawn in world space like the
+  // handle geometry above.
+  const fco = focusedSubRule.from_coordinates;
+  const tco = focusedSubRule.to_coordinates;
+  if (fco && tco) {
+    // Point-to-point distance: a SOLID line between the two raw points.
+    ctx.strokeStyle = FOCUS_COLOR;
+    ctx.lineWidth = hairline * 2.2;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(fco[0], fco[1]);
+    ctx.lineTo(tco[0], tco[1]);
+    ctx.stroke();
+    drawEndpointMarker(fco, hairline);
+    drawEndpointMarker(tco, hairline);
+  }
+  const poly = focusedSubRule.to_entity;
+  if (Array.isArray(poly) && poly.length) {
+    // Cross-product target outline: a CLOSED dashed polygon (last→first).
+    ctx.strokeStyle = FOCUS_COLOR;
+    ctx.lineWidth = hairline * 2.2;
+    ctx.setLineDash([8 * hairline, 5 * hairline]);
+    ctx.beginPath();
+    ctx.moveTo(poly[0][0], poly[0][1]);
+    for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 }
 
 function drawEndpointMarker(pt, hairline) {
@@ -1401,6 +1432,17 @@ function drawFocusedLabel() {
       const [mx, my] = worldToScreen(tc[0], tc[1]);
       drawLabelBox(focusedSubRule.tol_text, mx, my, FOCUS_COLOR);
     }
+  }
+
+  // Coordinate mode: distance (mm) at the midpoint of the from→to line —
+  // the measured value for a point-to-point sub-rule. `text` itself stays
+  // in the sidebar (add-rule-check-coordinate-display).
+  const fco = focusedSubRule.from_coordinates;
+  const tco = focusedSubRule.to_coordinates;
+  if (fco && tco) {
+    const d = Math.hypot(tco[0] - fco[0], tco[1] - fco[1]);
+    const [mx, my] = worldToScreen((fco[0] + tco[0]) / 2, (fco[1] + tco[1]) / 2);
+    drawLabelBox(`${fmtCoord(d)} mm`, mx, my, FOCUS_COLOR);
   }
 }
 
@@ -1836,10 +1878,18 @@ function resolveSubRuleFile(sub) {
 }
 
 function subRuleHasHandles(sub) {
-  if (sub.from) return true;
+  if (sub.from || sub.from_entity) return true;  // from_entity is an alias
   if (sub.tol) return true;
   if (Array.isArray(sub.to)) return sub.to.length > 0;
   return !!sub.to;
+}
+
+// Coordinate-mode geometry (add-rule-check-coordinate-display): a point-to-
+// point distance and/or a to_entity outline. Self-located in the open file's
+// world frame, so it's always drawable/focusable in the current view.
+function subRuleHasCoords(sub) {
+  if (sub.from_coordinates && sub.to_coordinates) return true;
+  return Array.isArray(sub.to_entity) && sub.to_entity.length > 0;
 }
 
 function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
@@ -1847,9 +1897,9 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
   li.dataset.ruleName = ruleName;
   li.dataset.idx = String(idx);
 
-  // No from/to/tol → nothing on the canvas can be highlighted, so render
-  // as plain text without nav hint or click.
-  if (!subRuleHasHandles(sub)) {
+  // No handle AND no coordinate geometry → nothing to draw, so render as
+  // plain text without nav hint or click.
+  if (!subRuleHasHandles(sub) && !subRuleHasCoords(sub)) {
     li.classList.add("text-only");
     li.innerHTML =
       `<span class="part">${escapeHtml(sub.part)}</span>` +
@@ -1859,10 +1909,13 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
   }
 
   const targetFile = resolveSubRuleFile(sub);
-  // "Local focus" only when the sub-rule's geometry is on THIS DXF.
-  // For multi-DXF roles `sub.part === currentRole` isn't enough — two
-  // BD siblings share a role but live in separate coordinate spaces.
-  const isLocal = !!targetFile && targetFile.id === FILE_ID;
+  // "Local focus" when the sub-rule's geometry is on THIS DXF (handle mode),
+  // OR it carries coordinate geometry (already in this file's frame —
+  // add-rule-check-coordinate-display). For multi-DXF roles
+  // `sub.part === currentRole` isn't enough — BD siblings share a role but
+  // live in separate coordinate spaces.
+  const isLocal = subRuleHasCoords(sub)
+    || (!!targetFile && targetFile.id === FILE_ID);
 
   let hintHtml = "";
   if (isLocal) {
@@ -1899,10 +1952,15 @@ function focusSubRule(ruleName, idx, rulePass, sub) {
     ruleText: currentRuleResults?.results?.[ruleName]?.text ?? "",
     idx,
     part: sub.part,
-    from:     sub.from     ?? null,
+    // `from_entity` is an alias of `from` (add-rule-check-coordinate-display).
+    from:     sub.from     ?? sub.from_entity ?? null,
     to:       sub.to       ?? null,
     tol:      sub.tol      ?? null,
     tol_text: sub.tol_text ?? null,
+    // Coordinate mode — points already in this file's world frame (DXF mm).
+    from_coordinates: sub.from_coordinates ?? null,
+    to_coordinates:   sub.to_coordinates ?? null,
+    to_entity:        sub.to_entity ?? null,
     text: sub.text || "",
   };
   render();
