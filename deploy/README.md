@@ -52,7 +52,22 @@ ingress 公開 URL vs cluster 內 service URL 的對應。
 | 2 | jobs 表 + worker service、web 只 enqueue(`SMDR2_EMBEDDED_WORKER=0`) | ✅ |
 | 3 | Keycloak BFF + 自建權限(`SMDR2_AUTH_MODE=oidc` 已開) | ✅ |
 
-## k8s 部署([`deploy/k8s/conform.yaml`](k8s/conform.yaml))
+## 正式部署:Helm(生產環境用這個)
+
+生產走 Helm chart [`deploy/helm/conform`](helm/conform),完整步驟文件見
+**[`deploy/PRODUCTION_DEPLOY.md`](PRODUCTION_DEPLOY.md)**。一行版:
+
+```bash
+helm upgrade --install conform deploy/helm/conform \
+  -n conform --create-namespace \
+  -f deploy/helm/conform/values-prod.yaml --atomic --timeout 10m
+```
+
+migration 走 Helm pre-upgrade hook(`alembic upgrade head`,失敗即中止 release);
+secrets(5 把)走 Vault / kubectl,不進 chart。下面的原始 manifest 是這份 chart
+的對照來源,保留作參考。
+
+## k8s 原始 manifest(參考用,[`deploy/k8s/conform.yaml`](k8s/conform.yaml))
 
 單一 manifest,8 個資源,apply 順序已排好:
 

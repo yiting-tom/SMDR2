@@ -1,0 +1,90 @@
+# Default values for the Conform chart.
+# Production overrides go in a values-prod.yaml (see values-prod.example.yaml).
+# Secrets are NEVER in values — they live in an existing k8s Secret (Vault /
+# kubectl), referenced by name below.
+
+image:
+  repository: registry.example.internal/conform-app
+  # ALWAYS pin to an immutable commit SHA in production. "latest" only for
+  # throwaway clusters — it breaks rollback and makes pods non-reproducible.
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets: [{ name: regcred }]
+imagePullSecrets: []
+
+# Non-secret config → rendered into the conform-config ConfigMap and mounted
+# into every pod via envFrom. Fill the *.example.internal hosts and
+# bootstrapAdmins per environment.
+config:
+  SMDR2_DATA_DIR: /scratch
+  SMDR2_MAX_UPLOAD_MB: "200"
+  SMDR2_AUTH_MODE: oidc
+  SMDR2_DEV_TOOLS: "0"            # dev overrides are process-local — must be off with >1 pod
+  S3_BUCKET: conform
+  S3_ENDPOINT_URL: http://minio.example.internal:9000
+  OIDC_ISSUER: https://keycloak.example.internal/realms/conform
+  OIDC_INTERNAL_BASE: http://keycloak.keycloak.svc:8080/realms/conform
+  OIDC_CLIENT_ID: conform-web
+  OIDC_REDIRECT_URI: https://conform.example.internal/auth/callback
+  COOKIE_SECURE: "true"          # requires TLS on the ingress host
+  # Comma-separated userids seeded as admins on first boot. SET BEFORE THE
+  # FIRST ROLLOUT — it is the only way the first admin comes into existence.
+  BOOTSTRAP_ADMINS: ""
+
+# The Secret holding the 5 required keys (DATABASE_URL, S3_ACCESS_KEY_ID,
+# S3_SECRET_ACCESS_KEY, OIDC_CLIENT_SECRET, SESSION_SECRET). Created out of
+# band (Vault injection or `kubectl create secret`). The chart only
+# references it — it never creates or templates secret values.
+existingSecret: conform-secrets
+
+# Alembic `upgrade head`, run as a Helm pre-install/pre-upgrade hook so the
+# schema is migrated (with the NEW image) before any web/worker pod rolls.
+migrate:
+  enabled: true
+  backoffLimit: 2
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+web:
+  replicas: 2                    # company policy — do not reduce below 2
+  # Stateless: surge one, never drop below 2 during a rollout.
+  maxSurge: 1
+  maxUnavailable: 0
+  pdbMinAvailable: 1             # node drains never take both webs at once
+  scratchSizeLimit: 2Gi
+  resources:
+    requests: { cpu: 250m, memory: 1Gi }
+    limits: { cpu: "2", memory: 4Gi }
+
+worker:
+  replicas: 2                    # company policy: every Deployment >= 2
+  # Never a 3rd 8Gi pod mid-rollout; the one going down hands its job over
+  # via the 120s stale-claim protocol.
+  maxSurge: 0
+  maxUnavailable: 1
+  terminationGracePeriodSeconds: 30
+  scratchSizeLimit: 4Gi          # >= workers x 150MB src + 401MB derived
+  # 150MB DXF ~= 6.3GiB peak per concurrent preprocess (measured 2026-06-11).
+  # Raise maxWorkers and memory together, never just the worker count.
+  maxWorkers: "1"
+  resources:
+    requests: { cpu: "1", memory: 8Gi }
+    limits: { cpu: "4", memory: 10Gi }
+
+service:
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  host: conform.example.internal
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 200m   # matches SMDR2_MAX_UPLOAD_MB + headroom
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+  # TLS terminates at the ingress (company wildcard cert / cert-manager).
+  # Leave tls.enabled false if IT terminates TLS upstream of this ingress.
+  tls:
+    enabled: false
+    secretName: ""

@@ -1,0 +1,24 @@
+尋形 Conform — release {{ .Release.Name }} (ns {{ .Release.Namespace }})
+
+Image:   {{ include "conform.image" . }}
+Web:     {{ .Values.web.replicas }} replica(s)   Worker: {{ .Values.worker.replicas }} replica(s)
+Auth:    SMDR2_AUTH_MODE={{ .Values.config.SMDR2_AUTH_MODE }}
+
+1. The pre-upgrade hook ran `alembic upgrade head`. Confirm it succeeded:
+     kubectl -n {{ .Release.Namespace }} get job conform-migrate
+
+2. Watch the rollout:
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/conform-web
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/conform-worker
+
+3. Health (auth-exempt):
+     kubectl -n {{ .Release.Namespace }} exec deploy/conform-web -- \
+       wget -qO- http://localhost:8000/healthz
+
+{{- if eq (.Values.config.BOOTSTRAP_ADMINS | toString) "" }}
+
+⚠  BOOTSTRAP_ADMINS is EMPTY. No admin will exist. Set config.BOOTSTRAP_ADMINS
+   to a comma-separated list of userids and `helm upgrade` before first login.
+{{- end }}
+
+App: https://{{ .Values.ingress.host }}

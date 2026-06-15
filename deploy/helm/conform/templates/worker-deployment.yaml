@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conform-worker
+  labels:
+    {{- include "conform.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:               # never a 3rd 8Gi pod; the one going down hands
+      maxSurge: {{ .Values.worker.maxSurge }}            # its job over via the
+      maxUnavailable: {{ .Values.worker.maxUnavailable }}  # 120s stale-claim
+  selector:
+    matchLabels:
+      app: conform-worker
+  template:
+    metadata:
+      labels:
+        app: conform-worker
+        {{- include "conform.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ .Values.config | toYaml | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:          # two 8Gi workers should not share a node
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: conform-worker
+      containers:
+        - name: worker
+          image: {{ include "conform.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
+          env:
+            - name: SMDR2_MAX_WORKERS
+              value: {{ .Values.worker.maxWorkers | quote }}
+          envFrom:
+            {{- include "conform.envFrom" . | nindent 12 }}
+          # No HTTP surface → no probes. A hung loop self-heals: claims go
+          # stale after 120s and another pod picks them up.
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: scratch
+              mountPath: {{ .Values.config.SMDR2_DATA_DIR | quote }}
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.worker.scratchSizeLimit }}

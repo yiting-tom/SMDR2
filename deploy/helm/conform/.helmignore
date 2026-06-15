@@ -1,0 +1,6 @@
+.DS_Store
+*.tmp
+*.bak
+*.orig
+values-prod.yaml
+*-secret*.yaml

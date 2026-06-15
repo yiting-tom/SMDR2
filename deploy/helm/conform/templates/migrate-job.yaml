@@ -1,0 +1,39 @@
+{{- if .Values.migrate.enabled }}
+# Alembic `upgrade head`, run as a Helm hook BEFORE install/upgrade so the
+# schema is at head (using the new image) before web/worker pods roll. A
+# failed migration aborts the release — webs never serve against an
+# unmigrated DB. Alembic at head is idempotent, so re-running every upgrade
+# is safe. `before-hook-creation` drops the prior Job so names never collide.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: conform-migrate
+  labels:
+    {{- include "conform.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "conform.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "conform.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+          envFrom:
+            {{- include "conform.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+{{- end }}
