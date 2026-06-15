@@ -318,7 +318,7 @@ Every `file_entry` SHALL carry exactly these seven keys:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `role` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` | Functional role this DXF plays. The same role MAY appear in multiple entries — that is the multi-DXF case. All five roles are independent; a single product MAY carry entries under any subset of them, including both `"RING"` and `"LID"` simultaneously. |
+| `role` | `"SBT"` \| `"BD"` \| `"POD"` \| `"RING"` \| `"LID"` \| `"NovelLID"` | Functional role this DXF plays. The same role MAY appear in multiple entries — that is the multi-DXF case. All six roles are independent; a single product MAY carry entries under any subset of them, including any of `"RING"` / `"LID"` / `"NovelLID"` simultaneously. `"NovelLID"` added in `bundle_version` `2.2.0`. |
 | `file_id` | lowercase-hex string | SMDR2's content-hash-derived file identifier. The first 8 hex chars are the canonical short form used internally. |
 | `dxf` | bundle-relative POSIX path | The DXF file. MUST resolve to a regular file inside the bundle. |
 | `match_json` | bundle-relative POSIX path | The Match JSON for this DXF. Keys are `<class>.<index>` or `<view>.<class>.<index>` (see "RuleChecking JSON output shape" requirement above for `<view>` values). |

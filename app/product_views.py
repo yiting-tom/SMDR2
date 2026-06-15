@@ -1,7 +1,7 @@
 """Per-(product, role) view resolution.
 
-A product role (SBT / BD / POD / RING / LID) can be sourced from one
-or more DXF files; the five roles are independent and may all be
+A product role (SBT / BD / POD / RING / LID / NovelLID) can be sourced
+from one or more DXF files; the six roles are independent and may all be
 populated on the same product. Each file carries a `dxf_view`:
 
   - 'multi'           — the file contains per-view region rects; each

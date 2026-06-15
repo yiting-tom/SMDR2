@@ -279,8 +279,8 @@ function renderRoleSwitcher(version, file) {
   for (const role of ["SBT", "BD", "POD"]) {
     $roleSwitcher.appendChild(renderRoleSlot(version, file, role));
   }
-  // 4th position: split RING | LID pair — both halves render
-  // independently and may both be populated.
+  // 4th position: split RING | LID | NovelLID group — all three render
+  // independently and may all be populated.
   $roleSwitcher.appendChild(renderRingLidPair(version, file));
 }
 
@@ -362,6 +362,7 @@ function renderRingLidPair(version, file) {
   wrap.className = "role-btn-pair";
   wrap.appendChild(renderRoleSlot(version, file, "RING"));
   wrap.appendChild(renderRoleSlot(version, file, "LID"));
+  wrap.appendChild(renderRoleSlot(version, file, "NovelLID"));
   return wrap;
 }
 

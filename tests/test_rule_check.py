@@ -23,7 +23,7 @@ from app.rule_check import (
 
 # ---- envelope helper -----------------------------------------------------
 
-_VALID_PARTS = {"SBT", "BD", "POD", "RING", "LID"}
+_VALID_PARTS = {"SBT", "BD", "POD", "RING", "LID", "NovelLID"}
 
 
 def _check_envelope(result):

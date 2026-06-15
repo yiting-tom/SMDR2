@@ -10,7 +10,7 @@ the same role.
 
 A `(product_id, dxf_role)` pair SHALL accept any number of DXFs
 provided the `dxf_role` is in the valid role set
-`("SBT", "BD", "POD", "RING", "LID")`. The five roles are independent;
+`("SBT", "BD", "POD", "RING", "LID", "NovelLID")`. The six roles are independent;
 uploads to one role SHALL NOT be rejected on the basis of files held
 under any other role. Uploading to a product role SHALL be purely
 additive by default: an unconditional
@@ -153,9 +153,9 @@ are uploaded under them.
 
 #### Scenario: Rule check feeds both roles into the bundle
 - **WHEN** product `p1` has saved Match JSON for files under `SBT`,
-  `BD`, `POD`, `RING`, and `LID`
+  `BD`, `POD`, `RING`, `LID`, and `NovelLID`
 - **AND** the client posts `/api/products/{p1}/rule-check`
-- **THEN** the worker builds `dxfs_by_role` with all five role keys
+- **THEN** the worker builds `dxfs_by_role` with all six role keys
   populated
 - **AND** the job completes with HTTP 200 and writes
   `rule_check.json`

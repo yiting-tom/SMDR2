@@ -18,7 +18,7 @@ RuleChecking JSON shape::
             "text": str,                # overall rule description
             "rules": [                  # zero or more sub-rules
                 {
-                    "part":     "SBT" | "BD" | "POD" | "RING" | "LID",
+                    "part":     "SBT" | "BD" | "POD" | "RING" | "LID" | "NovelLID",
                     "file_id":  str | None,
                     # --- handle mode (entities in the open file) -----------
                     "from":     handleID | None,           # single source entity
@@ -79,7 +79,7 @@ SubRule = dict[str, object]
 RuleResult = dict[str, dict[str, object]]
 
 
-_VALID_PARTS = frozenset({"SBT", "BD", "POD", "RING", "LID"})
+_VALID_PARTS = frozenset({"SBT", "BD", "POD", "RING", "LID", "NovelLID"})
 
 
 class RuleCheckOutputError(ValueError):

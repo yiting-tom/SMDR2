@@ -8,9 +8,9 @@ import { openLayoutModal } from "./layout_modal.js";
 import { mountDevParamsModal } from "./dev_params.js";
 
 // SBT/BD/POD always render as single-role slots. The 4th grid cell
-// holds a split pair (RING on the left, LID on the right) — both
-// halves are independent slots and may be filled concurrently. See
-// the `viewer-ui` / `product-files` specs.
+// holds a split group (RING | LID | NovelLID) — all three are
+// independent slots and may be filled concurrently. See the
+// `viewer-ui` / `product-files` specs.
 const SINGLE_ROLES = ["SBT", "BD", "POD"];
 
 const $list = document.getElementById("product-list");
@@ -936,6 +936,7 @@ function ringLidPairCell(product, version) {
   cell.className = "slot-pair";
   cell.appendChild(slotCell(product, version, "RING"));
   cell.appendChild(slotCell(product, version, "LID"));
+  cell.appendChild(slotCell(product, version, "NovelLID"));
   return cell;
 }
 

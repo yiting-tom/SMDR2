@@ -162,7 +162,7 @@ def test_build_bundle_carries_unit_fields_and_validates(
     seeded_version, manifest_schema
 ):
     """Every file_entry carries `user_unit` + `original_unit` + `view`, the
-    manifest still validates against the (2.1.0) schema, and a declared-mm
+    manifest still validates against the (2.2.0) schema, and a declared-mm
     file with no override / no side regions reports `mm` / `mm` / `[]`."""
     from app.drc_bundle import build_bundle
     from app.files import FILE_STORE
@@ -179,7 +179,7 @@ def test_build_bundle_carries_unit_fields_and_validates(
     manifest = _read_manifest(zip_bytes)
 
     jsonschema.validate(manifest, manifest_schema)
-    assert manifest["bundle_version"] == "2.1.0"
+    assert manifest["bundle_version"] == "2.2.0"
     entry = manifest["files"][0]
     assert set(entry) == {
         "role", "file_id", "dxf", "match_json",
@@ -458,6 +458,25 @@ def test_build_bundle_includes_both_ring_and_lid(seeded_version, manifest_schema
     assert "LID" in roles
 
 
+def test_build_bundle_accepts_novel_lid_role(seeded_version, manifest_schema):
+    """NovelLID is an independent role: a version with RING, LID and
+    NovelLID files produces a manifest carrying all three, and the
+    manifest validates against the (2.2.0) schema that admits NovelLID."""
+    from app.drc_bundle import build_bundle
+
+    product, version, seed = seeded_version
+    seed("RING")
+    seed("LID")
+    seed("NovelLID")
+
+    zip_bytes, _ = build_bundle(product, version, _files_of(version))
+    manifest = _read_manifest(zip_bytes)
+    jsonschema.validate(manifest, manifest_schema)
+
+    roles = {e["role"] for e in manifest["files"]}
+    assert {"RING", "LID", "NovelLID"} <= roles
+
+
 # ---- 3.7 version fields ---------------------------------------------------
 # (The 1.x customer/customer_id fields died with the shared-library
 # topology, 2026-06-10 — the manifest now identifies the snapshot via
@@ -516,13 +535,13 @@ def test_manifest_check_dam_reflects_version_flag(seeded_version, manifest_schem
     jsonschema.validate(m_on, manifest_schema)
 
 
-def test_bundle_version_is_2_1_0():
-    """2.0.0 → 2.1.0: the optional `check_dam` manifest field is a
-    backward-compatible (minor) addition — absent reads as false, so
-    pre-2.1.0 consumers stay valid."""
+def test_bundle_version_is_2_2_0():
+    """2.1.0 → 2.2.0: the `NovelLID` role enum value is a
+    backward-compatible (minor) addition — pre-2.2.0 consumers simply
+    never see it. (2.1.0 added the optional `check_dam` field.)"""
     from app.drc_bundle import BUNDLE_VERSION
 
-    assert BUNDLE_VERSION == "2.1.0"
+    assert BUNDLE_VERSION == "2.2.0"
 
 
 # ---- build_bundle_dir parity ------------------------------------------

@@ -721,14 +721,14 @@ left-to-right order:
 1. `SBT`
 2. `BD`
 3. `POD`
-4. A **split sub-slot pair** with `RING` on the left and `LID` on
-   the right (see "Per-product 4th-slot pair rendering" below)
+4. A **split sub-slot group** with `RING`, `LID` and `NovelLID`
+   left-to-right (see "Per-product 4th-slot pair rendering" below)
 
 Positions 1–3 are immutable single-role slots and follow the
-existing per-slot rules below. Position 4 is two adjacent role
-buttons (`RING` on the left, `LID` on the right) sharing one
+existing per-slot rules below. Position 4 is three adjacent role
+buttons (`RING`, `LID`, `NovelLID`, left-to-right) sharing one
 conceptual position so the toolbar still presents four columns —
-each half is an independent role-btn for hit-testing.
+each is an independent role-btn for hit-testing.
 
 **Sibling navigability gate:**
 

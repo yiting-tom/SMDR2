@@ -55,9 +55,9 @@
       "additionalProperties": false,
       "properties": {
         "role": {
-          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). All five roles are independent; a single manifest MAY contain entries under any subset, including both RING and LID.",
+          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). All six roles are independent; a single manifest MAY contain entries under any subset, including any of RING / LID / NovelLID. `NovelLID` was added in bundle_version 2.2.0; pre-2.2.0 consumers will not see it.",
           "type": "string",
-          "enum": ["SBT", "BD", "POD", "RING", "LID"]
+          "enum": ["SBT", "BD", "POD", "RING", "LID", "NovelLID"]
         },
         "file_id": {
           "description": "SMDR2 internal file identifier — lowercase hex, derived from the DXF content hash. Stable across re-exports of the same file. The first 8 hex characters are the canonical short form used elsewhere in SMDR2.",

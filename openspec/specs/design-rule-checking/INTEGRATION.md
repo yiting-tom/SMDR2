@@ -130,7 +130,7 @@ drc-bundle-<product_id>.zip
 | `exported_at` | — | UTC ISO-8601，秒精度。 |
 | `check_dam` | — | boolean。操作員是否對此版本啟用 DAM（封膠壩）檢查。**`true` 才跑 DAM 規則**；不存在 ≡ `false`（`2.1.0` 前的 bundle）。`2.1.0` 新增。 |
 | `files[]` | ✅ | 每筆對應一個 (DXF, Match JSON)；下節說明。 |
-| `files[].role` | ✅ | `"SBT"` / `"BD"` / `"POD"` / `"RING"` 之一。**同一個 role 可能出現多次** — 多 DXF 情境。 |
+| `files[].role` | ✅ | `"SBT"` / `"BD"` / `"POD"` / `"RING"` / `"LID"` / `"NovelLID"` 之一。**同一個 role 可能出現多次** — 多 DXF 情境。`"NovelLID"` 於 `2.2.0` 新增。 |
 | `files[].file_id` | ✅ | lowercase hex；前 8 字元是 SMDR2 內部慣用的短碼。 |
 | `files[].dxf` | ✅ | zip 相對路徑（POSIX 分隔）。 |
 | `files[].match_json` | ✅ | 同上。 |

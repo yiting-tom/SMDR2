@@ -45,7 +45,7 @@ from app.storage import match_key, upload_key
 from app.versions import Version
 
 
-BUNDLE_VERSION = "2.1.0"
+BUNDLE_VERSION = "2.2.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"

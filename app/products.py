@@ -6,7 +6,8 @@ bindings. Rules are product-level and version-independent. Products no
 longer reference a library directly — `products.library_id` died with
 the shared-library topology.
 
-Valid DXF roles are SBT, BD, POD, RING and LID — all five independent.
+Valid DXF roles are SBT, BD, POD, RING, LID and NovelLID — all six
+independent.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
 
 
-VALID_ROLES: tuple[str, ...] = ("SBT", "BD", "POD", "RING", "LID")
+VALID_ROLES: tuple[str, ...] = ("SBT", "BD", "POD", "RING", "LID", "NovelLID")
 
 
 PRODUCTS_SCHEMA = """
