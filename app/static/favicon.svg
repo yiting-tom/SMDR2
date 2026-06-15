@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="尋形 Conform">
+  <!-- 尋形 mark: frame-select marquee corners bracketing a "form" tile.
+       Ported from competition/build_deck.py brandmark() (cover variant:
+       cyan tile + white brackets on a navy plate, so the badge stays
+       legible on any tab / header background). -->
+  <rect x="0" y="0" width="100" height="100" rx="22" fill="#162039"/>
+  <!-- the "form" (形) — centered rounded tile -->
+  <rect x="27" y="27" width="46" height="46" rx="9" fill="#22D3EE"/>
+  <!-- top-left marquee corner -->
+  <rect x="6" y="6" width="32" height="8.5" rx="1.5" fill="#ffffff"/>
+  <rect x="6" y="6" width="8.5" height="32" rx="1.5" fill="#ffffff"/>
+  <!-- bottom-right marquee corner -->
+  <rect x="62" y="85.5" width="32" height="8.5" rx="1.5" fill="#ffffff"/>
+  <rect x="85.5" y="62" width="8.5" height="32" rx="1.5" fill="#ffffff"/>
+</svg>

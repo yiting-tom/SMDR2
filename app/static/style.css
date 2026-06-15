@@ -97,8 +97,17 @@ header .brand {
   color: #e8eef5;
   text-decoration: none;
   display: inline-flex;
-  align-items: baseline;
-  gap: 0.35rem;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* 尋形 brandmark badge — self-contained SVG (navy plate + cyan tile +
+   white marquee corners), shared with the favicon. */
+header .brand .brand-mark {
+  width: 1.35rem;
+  height: 1.35rem;
+  display: block;
+  border-radius: 5px;
+  flex-shrink: 0;
 }
 header .brand:hover { color: #00ffff; }
 header .brand .brand-sub {
