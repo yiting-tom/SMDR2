@@ -352,12 +352,30 @@ def test_legacy_library_gets_c4ball_seeded_and_ranked(tmp_db):
 # ---- LidOuter re-introduction (openspec add-lidouter-class) ----------------
 def test_legacy_library_gets_lidouter_seeded_and_ranked(tmp_db):
     """A library that pre-dates the LidOuter re-introduction gains it on
-    next boot, ranked directly after Lid, with the signature default."""
+    next boot, ranked directly after RingInner, with the signature default."""
     _seed_library_missing_class(tmp_db, "LidOuter")
     lib = _lib(tmp_db)
     assert "LidOuter" in lib.classes
-    assert lib.classes.index("LidOuter") == lib.classes.index("Lid") + 1
+    assert lib.classes.index("LidOuter") == lib.classes.index("RingInner") + 1
     assert lib.strategy_of("LidOuter") == ("signature", 0.0001)
+
+
+def test_lidinner_survives_rename_pass(tmp_db):
+    """LidInner was re-introduced 2026-06-15 as its own class; like LidOuter
+    it must NOT appear in LEGACY_CLASS_RENAME, else the old LidInner→RingInner
+    mapping would wipe every new LidInner class and its templates on reboot."""
+    from app.library import LEGACY_CLASS_RENAME, Template
+    assert "LidInner" not in LEGACY_CLASS_RENAME
+    lib = _lib(tmp_db)
+    assert "LidInner" in lib.classes
+    assert lib.strategy_of("LidInner") == ("signature", 0.0001)
+    _, dup = lib.add_template_for_file(Template.from_entities(
+        "LidInner", [[(0.0, 0.0), (9.0, 0.0), (9.0, 7.0), (0.0, 7.0)]]
+    ))
+    assert not dup
+    lib2 = _lib(tmp_db)  # reboot runs the rename pass
+    assert "LidInner" in lib2.classes
+    assert len(lib2.templates_of("LidInner")) == 1
 
 
 def test_lidouter_survives_rename_pass(tmp_db):
@@ -378,7 +396,7 @@ def test_lidouter_survives_rename_pass(tmp_db):
 
 def test_legacy_snake_lid_outer_renames_to_lidouter(tmp_db):
     """The snake_case legacy id goes back to its literal meaning now that
-    LidOuter exists again (lid_inner keeps converging to RingInner)."""
+    LidOuter exists again (lid_inner likewise → the re-introduced LidInner)."""
     import sqlite3
     import time
     Store(tmp_db)

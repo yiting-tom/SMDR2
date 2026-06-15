@@ -37,10 +37,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_CLASSES: list[str] = [
     "Substrate",
     "Pin-1",
-    "Lid",
-    "LidOuter",
     "RingOuter",
     "RingInner",
+    "LidOuter",
+    "LidInner",
+    "Lid(SideView)",
+    "NovelLidOuter",
+    "NovelLidFP",
     "DieArea",
     "DAM1",
     "DAM2",
@@ -83,11 +86,15 @@ DEPRECATED_CLASSES: frozenset[str] = frozenset({"FiducialMark", "Side", "DAM"})
 # the 0.0005 bbox_ratio leaves headroom for minor per-instance size variation.
 # DAM1 / DAM2 are the encapsulation dam rings — same large-outline rationale.
 CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
-    "Substrate": ("signature", 0.0001),
-    "LidOuter":  ("signature", 0.0001),
-    "RingOuter": ("signature", 0.0001),
-    "RingInner": ("signature", 0.0001),
-    "Pin-1":     ("signature", 0.0005),
+    "Substrate":     ("signature", 0.0001),
+    "RingOuter":     ("signature", 0.0001),
+    "RingInner":     ("signature", 0.0001),
+    "LidOuter":      ("signature", 0.0001),
+    "LidInner":      ("signature", 0.0001),
+    "Lid(SideView)": ("signature", 0.0001),
+    "NovelLidOuter": ("signature", 0.0001),
+    "NovelLidFP":    ("signature", 0.0001),
+    "Pin-1":         ("signature", 0.0005),
     "DieArea":   ("signature", 0.0005),
     "DAM1":      ("signature", 0.0005),
     "DAM2":      ("signature", 0.0005),
@@ -100,13 +107,16 @@ CLASS_DEFAULT_MATCH_CONFIG: dict[str, tuple[str, float | None]] = {
 CLASS_JSON_KEY: dict[str, str] = {
     "Substrate":      "substrate",
     "Pin-1":          "pin_1",
-    "Lid":            "lid",
+    "RingOuter":      "ring_outer",
+    "RingInner":      "ring_inner",
     # ⚠️ pre-2026-06-09 exports used lid_outer for what is now ring_outer;
     # since 2026-06-12 it means the (re-introduced) lid outer edge. Rules
     # team notified — prod starts empty, so no data carries the old sense.
     "LidOuter":       "lid_outer",
-    "RingOuter":      "ring_outer",
-    "RingInner":      "ring_inner",
+    "LidInner":       "lid_inner",
+    "Lid(SideView)":  "lid_side_view",
+    "NovelLidOuter":  "novel_lid_outer",
+    "NovelLidFP":     "novel_lid_fp",
     "DieArea":        "die_area",
     "DAM1":           "dam1",
     "DAM2":           "dam2",
@@ -132,18 +142,18 @@ LEGACY_CLASS_RENAME: dict[str, str] = {
     "substrate":     "Substrate",
     "die_area":      "DieArea",
     "lid_outer":     "LidOuter",
-    "lid_inner":     "RingInner",
+    "lid_inner":     "LidInner",
     "bga_ball":      "BGABall",
     "pin_mark":      "Pin-1",
     "2d_barcode":    "2DBarcode",
     # 2026-06-09 renamed LidOuter/LidInner into RingOuter/RingInner;
     # 2026-06-12 re-introduced LidOuter as its own class (lid outer edge ≠
-    # stiffener ring edge), so it MUST NOT appear as a key here any more —
-    # the rename pass rewrites classes AND templates, and would wipe every
-    # new LidOuter on the next boot. LidInner stays deleted (→ RingInner).
-    # Rows already converted to RingOuter by the 06-09 pass stay put: there
-    # is no way to tell which of them were genuine ring features.
-    "LidInner":      "RingInner",
+    # stiffener ring edge); 2026-06-15 re-introduced LidInner the same way.
+    # Both MUST NOT appear as canonical-form keys here — the rename pass
+    # rewrites classes AND templates, so a `"LidInner": "RingInner"` key
+    # would wipe every new LidInner on the next boot. Rows already converted
+    # to RingOuter/RingInner by the 06-09 pass stay put: there is no way to
+    # tell which of them were genuine ring features.
 }
 
 
@@ -213,10 +223,13 @@ CLASS_CATEGORY: dict[str, str] = {
     "DieArea":        "structure",
     "DAM1":           "structure",
     "DAM2":           "structure",
-    "Lid":            "structure",
-    "LidOuter":       "structure",
     "RingOuter":      "structure",
     "RingInner":      "structure",
+    "LidOuter":       "structure",
+    "LidInner":       "structure",
+    "Lid(SideView)":  "structure",
+    "NovelLidOuter":  "structure",
+    "NovelLidFP":     "structure",
     "Protrusion":     "structure",
     "C4Ball":         "balls",
     "BGABall":        "balls",

@@ -573,8 +573,8 @@ const DOT_THRESHOLD_CSS_PX = 12.0;
 
 // Per-class colors for Scan All overlay. Chosen for contrast on the DXF's
 // dark background and for mutual distinguishability. SMD-2T/3T/8T/14T share
-// a red family so the eye groups SMD variants together; RingOuter/RingInner/Lid
-// share a purple family for the same reason; C4Ball and BGABall share the
+// a red family so the eye groups SMD variants together; the Ring/Lid classes
+// share a purple/violet family for the same reason; C4Ball and BGABall share the
 // exact same orange (both are ball-type interconnect — user chose visual
 // unification over per-class distinction).
 const CLASS_COLORS = {
@@ -586,8 +586,11 @@ const CLASS_COLORS = {
   "DieArea":      "#ffeb3b",  // yellow
   "RingOuter":    "#ba68c8",  // purple
   "RingInner":    "#f06292",  // pink
-  "Lid":          "#9575cd",  // muted purple
-  "LidOuter":     "#7e57c2",  // deep lavender — sibling of Lid / RingOuter
+  "LidOuter":     "#7e57c2",  // deep lavender — sibling of RingOuter
+  "LidInner":     "#9575cd",  // muted purple — sibling of LidOuter
+  "Lid(SideView)":"#673ab7",  // strong violet — lid side-view profile
+  "NovelLidOuter":"#5e35b1",  // indigo-violet — novel lid family
+  "NovelLidFP":   "#3949ab",  // indigo — novel lid footprint
   "C4Ball":       "#ffab40",  // orange — shares BGABall color (both are ball-type interconnect)
   "BGABall":      "#ffab40",  // orange
   "Protrusion":   "#80d8ff",  // light blue — distinct from SMD reds / BGA orange
@@ -666,10 +669,13 @@ const CLASS_CATEGORY = {
   "DieArea":        "structure",
   "DAM1":           "structure",
   "DAM2":           "structure",
-  "Lid":            "structure",
-  "LidOuter":       "structure",
   "RingOuter":      "structure",
   "RingInner":      "structure",
+  "LidOuter":       "structure",
+  "LidInner":       "structure",
+  "Lid(SideView)":  "structure",
+  "NovelLidOuter":  "structure",
+  "NovelLidFP":     "structure",
   "Protrusion":     "structure",
   "C4Ball":         "balls",
   "BGABall":        "balls",
