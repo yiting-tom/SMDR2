@@ -24,6 +24,11 @@ x-web: &web
   build: .
   restart: unless-stopped
   environment: &web-env
+    # ⚠️ DEV PLACEHOLDERS ONLY. Every secret below (DB password, S3 keys,
+    # OIDC_CLIENT_SECRET, SESSION_SECRET) is a throwaway for the local mirror.
+    # Production MUST inject real values via Vault/k8s secrets — never copy
+    # these. validate_startup_config() (app/main.py) hard-fails boot if the
+    # oidc/S3 secret groups are missing, so prod cannot fall back to a default.
     # ---- consumed by the app today ----
     SMDR2_DATA_DIR: /data
     SMDR2_MAX_WORKERS: "2"

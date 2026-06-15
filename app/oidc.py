@@ -49,6 +49,13 @@ class OidcConfig:
         issuer = os.environ.get("OIDC_ISSUER", "")
         if not issuer:
             raise OidcError("OIDC_ISSUER not configured")
+        # No dev fallback: this key signs the in-flight state cookie. A weak
+        # default silently shipped to production would let an attacker forge
+        # login state. Fail loudly instead — `validate_startup_config` catches
+        # this at boot so it never surfaces on a live login request.
+        session_secret = os.environ.get("SESSION_SECRET", "")
+        if not session_secret:
+            raise OidcError("SESSION_SECRET not configured")
         return cls(
             issuer=issuer.rstrip("/"),
             internal_base=(
@@ -57,9 +64,7 @@ class OidcConfig:
             client_id=os.environ.get("OIDC_CLIENT_ID", ""),
             client_secret=os.environ.get("OIDC_CLIENT_SECRET", ""),
             redirect_uri=os.environ.get("OIDC_REDIRECT_URI", ""),
-            session_secret=os.environ.get(
-                "SESSION_SECRET", "dev-insecure"
-            ).encode(),
+            session_secret=session_secret.encode(),
         )
 
 

@@ -284,8 +284,45 @@ def _assert_api_routes_guarded(app_: FastAPI) -> None:
         raise RuntimeError(f"unguarded /api routes: {sorted(set(unguarded))}")
 
 
+def validate_startup_config() -> None:
+    """Fail-fast on missing production secrets/config at boot.
+
+    Without this, a missing OIDC secret only blows up on the first login
+    request, and a missing S3 key only on the first upload — both long after
+    the pod reports healthy. Validate the *required-together* groups up front
+    so a misconfigured deploy never starts serving traffic.
+
+    Env-driven and skipped in bypass mode (dev/tests), so it adds no friction
+    to the default local path.
+    """
+    missing: list[str] = []
+    if os.environ.get("SMDR2_AUTH_MODE", "bypass") != "bypass":
+        for var in (
+            "SESSION_SECRET",
+            "OIDC_ISSUER",
+            "OIDC_CLIENT_ID",
+            "OIDC_CLIENT_SECRET",
+            "OIDC_REDIRECT_URI",
+        ):
+            if not os.environ.get(var):
+                missing.append(var)
+    # S3 is optional (unset → local store), but a half-configured S3 silently
+    # inits with empty credentials and only fails on first use. Require the
+    # whole group once the endpoint is set.
+    if os.environ.get("S3_ENDPOINT_URL"):
+        for var in ("S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY"):
+            if not os.environ.get(var):
+                missing.append(var)
+    if missing:
+        raise RuntimeError(
+            "Missing required configuration (set via environment / secrets): "
+            + ", ".join(missing)
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_startup_config()
     _assert_api_routes_guarded(_app)
     # Idempotent BOOTSTRAP_ADMINS seeding (specs/authorization) — the only
     # way the first admin comes into existence.

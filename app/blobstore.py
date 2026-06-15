@@ -275,11 +275,30 @@ def get_blobstore() -> BlobStore:
         if _blobstore is None:
             endpoint = os.environ.get("S3_ENDPOINT_URL")
             if endpoint:
+                # Worker pods resolve this without running the web lifespan,
+                # so re-check the required group here too: a half-set S3 env
+                # would otherwise init with empty creds / a default bucket and
+                # only fail on first upload. No silent defaults.
+                bucket = os.environ.get("S3_BUCKET", "")
+                access_key = os.environ.get("S3_ACCESS_KEY_ID", "")
+                secret_key = os.environ.get("S3_SECRET_ACCESS_KEY", "")
+                missing = [
+                    name for name, val in (
+                        ("S3_BUCKET", bucket),
+                        ("S3_ACCESS_KEY_ID", access_key),
+                        ("S3_SECRET_ACCESS_KEY", secret_key),
+                    ) if not val
+                ]
+                if missing:
+                    raise RuntimeError(
+                        "S3_ENDPOINT_URL is set but required vars are missing: "
+                        + ", ".join(missing)
+                    )
                 _blobstore = S3BlobStore(
                     endpoint_url=endpoint,
-                    bucket=os.environ.get("S3_BUCKET", "conform"),
-                    access_key=os.environ.get("S3_ACCESS_KEY_ID", ""),
-                    secret_key=os.environ.get("S3_SECRET_ACCESS_KEY", ""),
+                    bucket=bucket,
+                    access_key=access_key,
+                    secret_key=secret_key,
                 )
             else:
                 _blobstore = LocalBlobStore()

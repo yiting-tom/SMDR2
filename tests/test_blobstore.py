@@ -115,6 +115,19 @@ def test_backend_selection(monkeypatch):
     reset_blobstore()
     monkeypatch.setenv("S3_ENDPOINT_URL", "http://minio:9000")
     monkeypatch.setenv("S3_BUCKET", "conform")
+    monkeypatch.setenv("S3_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "s")
     from app.blobstore import S3BlobStore
     assert isinstance(get_blobstore(), S3BlobStore)
+    reset_blobstore()
+
+
+def test_s3_endpoint_without_credentials_fails_fast(monkeypatch):
+    reset_blobstore()
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("S3_BUCKET", "conform")
+    monkeypatch.delenv("S3_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("S3_SECRET_ACCESS_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="S3_ACCESS_KEY_ID"):
+        get_blobstore()
     reset_blobstore()
