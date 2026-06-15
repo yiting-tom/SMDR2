@@ -37,6 +37,10 @@
       "type": "string",
       "format": "date-time"
     },
+    "check_dam": {
+      "description": "Whether the operator enabled the DAM (encapsulation dam) check for this version. The downstream rule-checker SHOULD run its DAM rules only when true. Absent is equivalent to false (pre-2.1.0 bundles).",
+      "type": "boolean"
+    },
     "files": {
       "description": "Every DXF + Match JSON pair in the bundle, one entry per file. Order is significant only as a stable tie-breaker — consumers SHOULD group by `role` rather than rely on positional ordering.",
       "type": "array",

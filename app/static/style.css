@@ -1320,6 +1320,26 @@ body.dashboard main.dashboard-main {
   background: transparent;
 }
 
+/* "檢查DAM" toggle — sits beside the Rule Check button in the footer. */
+.product-card .check-dam-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+.product-card .check-dam-switch input { cursor: pointer; margin: 0; }
+.product-card .check-dam-switch:has(input:checked) { color: var(--ok); }
+.product-card .check-dam-switch:has(input:disabled) {
+  color: #4a5868;
+  cursor: not-allowed;
+}
+.product-card .check-dam-switch:has(input:disabled) input {
+  cursor: not-allowed;
+}
+
 /* Developer mode toggle (dashboard header, top-right) */
 #dev-mode-toggle {
   background: transparent;

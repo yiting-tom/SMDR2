@@ -45,7 +45,7 @@ from app.storage import match_key, upload_key
 from app.versions import Version
 
 
-BUNDLE_VERSION = "2.0.0"
+BUNDLE_VERSION = "2.1.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -141,6 +141,7 @@ def build_manifest(
         "product_id": product.id,
         "version_id": version.id,
         "version_label": version.label,
+        "check_dam": version.check_dam,
         "exported_at": _format_exported_at(now),
         "files": [_file_entry(f) for f in files],
     }

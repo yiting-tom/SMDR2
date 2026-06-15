@@ -151,6 +151,32 @@ def test_sign_off_with_evidence_roundtrip():
         assert g.content == PNG
 
 
+def test_check_dam_defaults_false_and_toggles():
+    with _client() as c:
+        pid, vid = _new_product(c)
+        versions = c.get(f"/api/products/{pid}/versions").json()["versions"]
+        assert versions[0]["check_dam"] is False
+
+        r = c.patch(f"/api/versions/{vid}/check-dam", json={"check_dam": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["check_dam"] is True
+        # Persisted across a fresh read.
+        versions = c.get(f"/api/products/{pid}/versions").json()["versions"]
+        assert versions[0]["check_dam"] is True
+
+        r = c.patch(f"/api/versions/{vid}/check-dam", json={"check_dam": False})
+        assert r.status_code == 200
+        assert r.json()["check_dam"] is False
+
+
+def test_check_dam_rejected_on_signed_version():
+    with _client() as c:
+        _, vid = _new_product(c)
+        assert c.post(f"/api/versions/{vid}/sign-off").status_code == 200
+        r = c.patch(f"/api/versions/{vid}/check-dam", json={"check_dam": True})
+        assert r.status_code == 409
+
+
 def test_evidence_magic_bytes_not_content_type():
     """A text file lying about its Content-Type is rejected and the
     version stays unsigned."""

@@ -162,7 +162,7 @@ def test_build_bundle_carries_unit_fields_and_validates(
     seeded_version, manifest_schema
 ):
     """Every file_entry carries `user_unit` + `original_unit` + `view`, the
-    manifest still validates against the (2.0.0) schema, and a declared-mm
+    manifest still validates against the (2.1.0) schema, and a declared-mm
     file with no override / no side regions reports `mm` / `mm` / `[]`."""
     from app.drc_bundle import build_bundle
     from app.files import FILE_STORE
@@ -179,7 +179,7 @@ def test_build_bundle_carries_unit_fields_and_validates(
     manifest = _read_manifest(zip_bytes)
 
     jsonschema.validate(manifest, manifest_schema)
-    assert manifest["bundle_version"] == "2.0.0"
+    assert manifest["bundle_version"] == "2.1.0"
     entry = manifest["files"][0]
     assert set(entry) == {
         "role", "file_id", "dxf", "match_json",
@@ -497,13 +497,32 @@ def test_manifest_raises_on_product_version_mismatch(seeded_version):
         PRODUCT_STORE.delete(other_p.id)
 
 
-def test_bundle_version_bumped_to_2_0_0():
-    """The customer→version manifest change is a breaking contract change,
-    paired with a major bundle_version bump (1.4.0 → 2.0.0) so consumers
-    can detect and refuse what they don't understand."""
+def test_manifest_check_dam_reflects_version_flag(seeded_version, manifest_schema):
+    """`check_dam` in the manifest mirrors the version's live flag — false
+    by default, true once toggled — and the manifest still validates."""
+    from app.drc_bundle import build_manifest
+    from app.versions import VERSION_STORE
+
+    product, version, seed = seeded_version
+    seed("BD")
+
+    m_off = build_manifest(product, version, _files_of(version))
+    assert m_off["check_dam"] is False
+    jsonschema.validate(m_off, manifest_schema)
+
+    version = VERSION_STORE.set_check_dam(version.id, True)
+    m_on = build_manifest(product, version, _files_of(version))
+    assert m_on["check_dam"] is True
+    jsonschema.validate(m_on, manifest_schema)
+
+
+def test_bundle_version_is_2_1_0():
+    """2.0.0 → 2.1.0: the optional `check_dam` manifest field is a
+    backward-compatible (minor) addition — absent reads as false, so
+    pre-2.1.0 consumers stay valid."""
     from app.drc_bundle import BUNDLE_VERSION
 
-    assert BUNDLE_VERSION == "2.0.0"
+    assert BUNDLE_VERSION == "2.1.0"
 
 
 # ---- build_bundle_dir parity ------------------------------------------

@@ -311,6 +311,7 @@ the contract at that boundary.)
 | `customer_id` | string | yes | SMDR2 internal `library_id` the product is bound to. Opaque to the consumer; stable across library renames. Mirrors how `product_id` is treated. |
 | `customer` | string | no | Human-readable customer / library name. Omitted when the underlying library has no name; consumers that need a stable display name SHOULD key by `customer_id` and join against their own customer table. |
 | `exported_at` | ISO 8601 string | no | Bundle generation time, second precision or finer. |
+| `check_dam` | boolean | no | Whether the operator enabled the DAM (encapsulation dam) check for this version. The consumer SHOULD run its DAM rules only when `true`. Absent ≡ `false` (pre-`2.1.0` bundles). Added in `2.1.0`. |
 | `files` | array of `file_entry` | yes | Every (DXF, Match JSON) pair in the bundle. |
 
 Every `file_entry` SHALL carry exactly these seven keys:

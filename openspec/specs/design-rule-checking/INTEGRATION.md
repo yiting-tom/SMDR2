@@ -94,10 +94,11 @@ drc-bundle-<product_id>.zip
 
 ```json
 {
-  "bundle_version": "1.0.0",
+  "bundle_version": "2.1.0",
   "product_id": "35a8dbb0-6ee",
   "product_name": "Sample",
   "exported_at": "2026-05-19T07:30:00Z",
+  "check_dam": true,
   "files": [
     {
       "role": "BD",
@@ -127,6 +128,7 @@ drc-bundle-<product_id>.zip
 | `product_id` | ✅ | SMDR2 內部 ID。對你方而言不透明，做報告 cross-ref 用。 |
 | `product_name` | — | 人類可讀名稱，**可能不存在**。 |
 | `exported_at` | — | UTC ISO-8601，秒精度。 |
+| `check_dam` | — | boolean。操作員是否對此版本啟用 DAM（封膠壩）檢查。**`true` 才跑 DAM 規則**；不存在 ≡ `false`（`2.1.0` 前的 bundle）。`2.1.0` 新增。 |
 | `files[]` | ✅ | 每筆對應一個 (DXF, Match JSON)；下節說明。 |
 | `files[].role` | ✅ | `"SBT"` / `"BD"` / `"POD"` / `"RING"` 之一。**同一個 role 可能出現多次** — 多 DXF 情境。 |
 | `files[].file_id` | ✅ | lowercase hex；前 8 字元是 SMDR2 內部慣用的短碼。 |

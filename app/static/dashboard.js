@@ -653,6 +653,11 @@ function productCard(p) {
   // Rule Check kicks off a job (a write) — editors+ only. Viewers keep
   // "查看結果" below to read an existing result.
   if (!readOnly) {
+    // "檢查DAM" switch — a per-version flag surfaced in the DRC manifest
+    // (check_dam). Sits beside Rule Check; read-only once the version is
+    // signed off (the freeze covers the rule-check input).
+    footer.appendChild(checkDamSwitch(version, signed));
+
     const rcBtn = document.createElement("button");
     rcBtn.type = "button";
     rcBtn.className = "rule-check-btn";
@@ -733,6 +738,52 @@ function productCard(p) {
   card.appendChild(footer);
 
   return card;
+}
+
+// "檢查DAM" toggle for one version. The flag rides in the DRC manifest
+// (check_dam), read live at bundle build, so flipping it takes effect on
+// the next Rule Check / Download All without re-saving any file. Disabled
+// on a signed-off version. Reverts on a failed PATCH.
+function checkDamSwitch(version, signed) {
+  const wrap = document.createElement("label");
+  wrap.className = "check-dam-switch";
+  wrap.title = signed
+    ? "版本已畫押(唯讀)"
+    : "勾選後 DRC manifest 的 check_dam 帶 true(下次 Rule Check / Download All 生效)";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = !!version.check_dam;
+  cb.disabled = signed;
+  const txt = document.createElement("span");
+  txt.textContent = "檢查DAM";
+  wrap.append(cb, txt);
+  cb.addEventListener("change", async () => {
+    const want = cb.checked;
+    cb.disabled = true;
+    try {
+      const r = await fetch(
+        `/api/versions/${encodeURIComponent(version.id)}/check-dam`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ check_dam: want }),
+        },
+      );
+      if (!r.ok) {
+        cb.checked = !want;
+        $status.textContent = `檢查DAM 更新失敗: ${r.status}`;
+      } else {
+        version.check_dam = want;
+        $status.textContent = `檢查DAM ${want ? "已開啟" : "已關閉"}`;
+      }
+    } catch (e) {
+      cb.checked = !want;
+      $status.textContent = `檢查DAM 更新失敗: ${e.message}`;
+    } finally {
+      cb.disabled = signed;
+    }
+  });
+  return wrap;
 }
 
 // ---- developer-mode download handlers -----------------------------------

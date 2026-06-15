@@ -1059,6 +1059,42 @@ async def sign_off_version(
     return v.to_dict()
 
 
+class CheckDamRequest(BaseModel):
+    check_dam: bool
+
+
+@app.patch("/api/versions/{version_id}/check-dam")
+async def set_version_check_dam(
+    version_id: str,
+    req: CheckDamRequest,
+    ident=Depends(editor_guard),
+) -> dict:
+    """Toggle the version's 'check DAM' flag. Surfaced in the DRC manifest
+    as `check_dam` (read live at bundle build, so the next Rule Check /
+    Download All reflects it without re-saving). Rejected on a signed-off
+    version — the freeze covers the rule-check input."""
+    from app.versions import SignedOff
+    v0 = _resolve_version(version_id)
+    try:
+        v = VERSION_STORE.set_check_dam(version_id, req.check_dam)
+    except SignedOff as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version already signed-off",
+                "signed_off_by": exc.by,
+                "signed_off_at": exc.at,
+            },
+        )
+    AUTH_STORE.audit(
+        actor=ident.userid, action="version.set_check_dam",
+        target_type="version", target_id=version_id,
+        product_id=v0.product_id, version_id=version_id,
+        detail={"check_dam": req.check_dam},
+    )
+    return v.to_dict()
+
+
 @app.get(
     "/api/versions/{version_id}/sign-off/evidence",
     dependencies=[Depends(viewer_guard)],

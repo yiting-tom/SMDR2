@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS versions (
     signed_off_at REAL,
     evidence_name TEXT,
     evidence_type TEXT,
+    check_dam     INTEGER NOT NULL DEFAULT 0,
     created_at    REAL NOT NULL,
     UNIQUE (product_id, label)
 );
@@ -68,6 +69,7 @@ class Version:
     created_at: float
     evidence_name: str | None = None
     evidence_type: str | None = None
+    check_dam: bool = False
 
     @property
     def is_signed_off(self) -> bool:
@@ -82,6 +84,7 @@ class Version:
             "signed_off_by": self.signed_off_by,
             "signed_off_at": self.signed_off_at,
             "evidence_name": self.evidence_name,
+            "check_dam": self.check_dam,
             "created_at": self.created_at,
         }
 
@@ -97,6 +100,7 @@ def _row_to_version(row: db.Row) -> Version:
         created_at=row["created_at"],
         evidence_name=row["evidence_name"],
         evidence_type=row["evidence_type"],
+        check_dam=bool(row["check_dam"]),
     )
 
 
@@ -129,8 +133,9 @@ class VersionStore:
             self._migrate_evidence()
 
     def _migrate_evidence(self) -> None:
-        """Idempotent per-boot upkeep: pre-evidence SQLite dev DBs gain
-        the columns (MariaDB schema is Alembic-owned, rev 0005)."""
+        """Idempotent per-boot upkeep: older SQLite dev DBs gain newer
+        columns (MariaDB schema is Alembic-owned — evidence rev 0005,
+        check_dam rev 0007)."""
         if not self.conn.is_sqlite:
             return
         cols = [r[1] for r in self.conn.execute(
@@ -139,6 +144,10 @@ class VersionStore:
         for col in ("evidence_name", "evidence_type"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE versions ADD COLUMN {col} TEXT")
+        if "check_dam" not in cols:
+            self.conn.execute(
+                "ALTER TABLE versions ADD COLUMN check_dam INTEGER NOT NULL DEFAULT 0"
+            )
 
     # ---- reads -----------------------------------------------------------
     def get(self, version_id: str) -> Version | None:
@@ -334,6 +343,28 @@ class VersionStore:
             )
             if cur.rowcount == 0:
                 raise KeyError(version_id)
+        v = self.get(version_id)
+        assert v is not None
+        return v
+
+    # ---- check-DAM toggle ------------------------------------------------
+    def set_check_dam(self, version_id: str, value: bool) -> Version:
+        """Toggle the per-version 'check DAM' flag (surfaced in the DRC
+        manifest as `check_dam`). Rejected on a signed-off version —
+        flipping it would change the rule-check input behind the freeze."""
+        with self.lock, self.conn:
+            row = self.conn.execute(
+                "SELECT signed_off_by, signed_off_at FROM versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(version_id)
+            if row["signed_off_by"] is not None:
+                raise SignedOff(row["signed_off_by"], row["signed_off_at"])
+            self.conn.execute(
+                "UPDATE versions SET check_dam = ? WHERE id = ?",
+                (1 if value else 0, version_id),
+            )
         v = self.get(version_id)
         assert v is not None
         return v
