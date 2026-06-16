@@ -73,7 +73,8 @@ secrets(5 把)走 Vault / kubectl,不進 chart。下面的原始 manifest 是這
 
 ```
 Namespace → ConfigMap → (Secret: Vault / kubectl create, 不進 repo)
-→ Job conform-migrate(alembic upgrade head,冪等;CD 先 delete job 再 apply)
+→ Job conform-migrate(alembic upgrade head,冪等;chart 以 pre-upgrade hook 跑,
+   CD 走 Helm,不再 kubectl apply 這份 manifest)
 → Deployment conform-web ×2(maxSurge 1 / maxUnavailable 0、anti-affinity 分節點、
    readiness+liveness 皆打 /healthz、SMDR2_EMBEDDED_WORKER=0)
 → PodDisruptionBudget(minAvailable 1 — drain 不會同時帶走兩台 web)
@@ -89,8 +90,22 @@ Secret 五把(DATABASE_URL / S3 兩把 / OIDC_CLIENT_SECRET / SESSION_SECRET)缺
 
 ## CI/CD([`azure-pipelines.yml`](../azure-pipelines.yml))
 
+公司用 **Azure Pipelines + Helm**。三 stage:
+
 `CI`(ruff+pytest 零依賴 ∥ MariaDB/MinIO smoke 用 docker 起真引擎)→ `Build`
 (main 限定,push image,tag = commit SHA)→ `Deploy`(`conform-prod`
-environment 掛 approval;sed 換 tag → 重跑 migration Job → apply → 等
-migration complete → 等 web rollout)。要填的只有三個:`REGISTRY_SC`、
-`IMAGE_REPO`、`K8S_SC`(說明在檔頭)。secrets 不經 pipeline。
+environment 掛 approval)。
+
+Deploy 就是 `helm upgrade --install conform deploy/helm/conform`:
+`-f deploy/helm/conform/values-prod.yaml`、`--set image.repository/tag` 指向
+Build 剛 push 的 image、`--atomic --timeout 10m`。`--atomic` 會先跑 alembic
+**pre-upgrade hook**(migration),再滾 web/worker,任何一步沒健康就整包
+rollback — migration+rollout 是一個 all-or-nothing 步驟,不再需要分開的
+kubectl wait。
+
+要填的只有三個 service connection:`REGISTRY_SC`、`IMAGE_REPO`、`K8S_SC`
+(說明在 yml 檔頭)。`values-prod.yaml` **進 git**(只有 host/bucket/
+BOOTSTRAP_ADMINS,無 secret;`.helmignore` 只是不打進 chart 包,不影響 git);
+secrets 五把不經 pipeline(Vault → k8s Secret `conform-secrets`)。手動
+`helm upgrade`(見 PRODUCTION_DEPLOY.md)是 break-glass / 首次 bootstrap 路徑,
+跟 pipeline 跑的是同一條 chart。
