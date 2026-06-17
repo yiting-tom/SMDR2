@@ -1,30 +1,30 @@
 ## 1. Viewer — zoom-to-extents (`canvas.js`, `viewer.html`, `style.css`)
 
-- [ ] 1.1 In `canvas.js`, add a module-level `let loadedBbox = null;` and set it where the drawing loads (`fitToBbox(data.bbox)` site) before the fit call.
-- [ ] 1.2 Add `function zoomExtents()` that calls `fitToBbox(loadedBbox)` then `render()`, guarded to no-op when `loadedBbox` is null.
-- [ ] 1.3 Bind middle-mouse double-click → `zoomExtents()`: in the middle-button `mousedown` branch, compare a `lastMiddleDownAt` timestamp; two middle-downs within 400 ms call `zoomExtents()` (and skip starting a pan for the second).
-- [ ] 1.4 Add `Home` to the main keydown handler → `zoomExtents()`, guarded like the other viewer hotkeys (ignore while typing in an input / a modal open).
-- [ ] 1.5 Add a "Fit" toolbar button in `viewer.html` (title includes the `Home` hint) and wire its click to `zoomExtents()`.
+- [x] 1.1 In `canvas.js`, add a module-level `let loadedBbox = null;` and set it where the drawing loads (`fitToBbox(data.bbox)` site) before the fit call.
+- [x] 1.2 Add `function zoomExtents()` that calls `fitToBbox(loadedBbox)` then `render()`, guarded to no-op when `loadedBbox` is null.
+- [x] 1.3 Bind middle-mouse double-click → `zoomExtents()`: in the middle-button `mousedown` branch, compare a `lastMiddleDownAt` timestamp; two middle-downs within 400 ms call `zoomExtents()` (and skip starting a pan for the second).
+- [x] 1.4 Add `Home` to the main keydown handler → `zoomExtents()`, guarded like the other viewer hotkeys (ignore while typing in an input / a modal open).
+- [x] 1.5 Add a "Fit" toolbar button in `viewer.html` (title includes the `Home` hint) and wire its click to `zoomExtents()`.
 
 ## 2. Viewer — pan cursor + drag recovery (`canvas.js`, `style.css`)
 
-- [ ] 2.1 In `style.css`, add `#dxf-canvas.panning { cursor: grabbing; }`.
-- [ ] 2.2 In `canvas.js`, add a `window` `blur` handler: if any drag is active (`drag` or `markDrag`), clear `drag`, `markDrag`, remove `.panning` from the canvas, and `render()`.
+- [x] 2.1 In `style.css`, add `#dxf-canvas.panning { cursor: grabbing; }`.
+- [x] 2.2 In `canvas.js`, add a `window` `blur` handler: if any drag is active (`drag` or `markDrag`), clear `drag`, `markDrag`, remove `.panning` from the canvas, and `render()`.
 
 ## 3. Viewer — sub-pixel dot floor (`canvas.js`)
 
-- [ ] 3.1 In `flushDotBuckets`, paint each collapsed dot at `d = Math.max(1, Math.round(dpr))` device px instead of 1×1 (square `d × d`, offset so it stays centred on the point). Leave `DOT_THRESHOLD_CSS_PX` and the batching unchanged.
+- [x] 3.1 In `flushDotBuckets`, paint each collapsed dot at `d = Math.max(1, Math.round(dpr))` device px instead of 1×1 (square `d × d`, offset so it stays centred on the point). Leave `DOT_THRESHOLD_CSS_PX` and the batching unchanged.
 
 ## 4. Viewer — shortcut reference + box-mode label (`canvas.js`, `viewer.html`, `style.css`)
 
-- [ ] 4.1 Add a hidden `#shortcut-help` overlay to `viewer.html` listing the shortcuts from the `canvas.js` header comment (middle-drag pan, wheel zoom, single/shift pick, L→R window / R→L crossing, Esc cascade, A scan-all, D measure, V views, Home fit, `?` help).
-- [ ] 4.2 In `canvas.js`, toggle `#shortcut-help` on `?` keydown (no input focused); hide on `?` again, `Esc`, or backdrop click. Add a small `?` affordance to the toolbar that opens it.
-- [ ] 4.3 In the box-drag mousemove/render path, set `#mode-hint` to `WINDOW` / `CROSSING` per `drag.mode` while `drag.kind === "box"`, and clear it on drag end (mouseup / Esc / blur).
-- [ ] 4.4 In `style.css`, style `#shortcut-help` (overlay panel + backdrop) consistent with existing floating panels.
+- [x] 4.1 Add a hidden `#shortcut-help` overlay to `viewer.html` listing the shortcuts from the `canvas.js` header comment (middle-drag pan, wheel zoom, single/shift pick, L→R window / R→L crossing, Esc cascade, A scan-all, D measure, V views, Home fit, `?` help).
+- [x] 4.2 In `canvas.js`, toggle `#shortcut-help` on `?` keydown (no input focused); hide on `?` again, `Esc`, or backdrop click. Add a small `?` affordance to the toolbar that opens it.
+- [x] 4.3 In the box-drag mousemove/render path, set `#mode-hint` to `WINDOW` / `CROSSING` per `drag.mode` while `drag.kind === "box"`, and clear it on drag end (mouseup / Esc / blur).
+- [x] 4.4 In `style.css`, style `#shortcut-help` (overlay panel + backdrop) consistent with existing floating panels.
 
 ## 5. Viewer — tabular readouts (`style.css`)
 
-- [ ] 5.1 Add `font-variant-numeric: tabular-nums;` to `#canvas-statusbar` (covering `#status`, `#mode-hint`, `#handle-info`, `#cursor-coords`).
+- [x] 5.1 Add `font-variant-numeric: tabular-nums;` to `#canvas-statusbar` (covering `#status`, `#mode-hint`, `#handle-info`, `#cursor-coords`).
 
 ## 6. Dashboard — in-app dialogs (`dashboard.js`, `dashboard.html`, `style.css`)
 

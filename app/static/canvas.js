@@ -93,6 +93,7 @@ const $roleSwitcher = document.getElementById("role-switcher");
 let focusedSubRule = null;
 // {ruleName, rulePass, ruleText, part, from, to, text, idx}
 const $modeHint = document.getElementById("mode-hint");
+const $shortcutHelp = document.getElementById("shortcut-help");
 const $classToolbar = document.getElementById("class-toolbar");
 // Single floating class-selector panel overlaid on the canvas (replaces the
 // long toolbar row): one "Objects" panel holding every category
@@ -463,6 +464,8 @@ let pinnedRuleName = null;    // name of the currently-pinned rule (or null)
 
 // Drag state. kind ∈ {"pan", "box", "click_pending"}.
 let drag = null;
+// Timestamp of the last middle-button press, for double-press Zoom Extents.
+let lastMiddleDownAt = 0;
 
 const PICKBOX_CSS_PX = 5;      // tolerance for single-pick (in CSS px)
 const CLICK_DRAG_THRESHOLD_CSS = 3;  // drag exceeding this is no longer a click
@@ -817,6 +820,10 @@ function eventToWorld(e) {
 }
 
 // ---- fit-to-view ----------------------------------------------------------
+// The drawing bbox captured at load, so zoom-extents can re-fit the whole
+// drawing without a page reload (AutoCAD Zoom Extents).
+let loadedBbox = null;
+
 function fitToBbox(bbox) {
   if (!bbox) return;
   const [xmin, ymin, xmax, ymax] = bbox;
@@ -825,6 +832,36 @@ function fitToBbox(bbox) {
   const w = xmax - xmin, h = ymax - ymin;
   if (w <= 0 || h <= 0) { view.zoom = 1; return; }
   view.zoom = Math.min(($canvas.width / w) * 0.92, ($canvas.height / h) * 0.92);
+}
+
+// Re-frame the whole drawing (Home key / middle double-click / "Fit" button).
+// No-op when nothing is loaded yet.
+function zoomExtents() {
+  if (!loadedBbox) return;
+  fitToBbox(loadedBbox);
+  render();
+}
+
+// ---- in-app shortcut reference (? key / toolbar ? button) ----------------
+function shortcutHelpOpen() {
+  return $shortcutHelp && !$shortcutHelp.hidden;
+}
+function hideShortcutHelp() {
+  if ($shortcutHelp) $shortcutHelp.hidden = true;
+}
+function toggleShortcutHelp() {
+  if ($shortcutHelp) $shortcutHelp.hidden = !$shortcutHelp.hidden;
+}
+if ($shortcutHelp) {
+  // Backdrop / × close.
+  $shortcutHelp.querySelectorAll("[data-close]").forEach((el) =>
+    el.addEventListener("click", hideShortcutHelp));
+}
+{
+  const $fitBtn = document.getElementById("fit-btn");
+  if ($fitBtn) $fitBtn.addEventListener("click", zoomExtents);
+  const $helpBtn = document.getElementById("help-btn");
+  if ($helpBtn) $helpBtn.addEventListener("click", toggleShortcutHelp);
 }
 
 // ---- recentre on a focused sub-rule (center-entity-on-rule-navigation) ---
@@ -1051,12 +1088,17 @@ function flushDotBuckets(dotBuckets) {
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   const halfWpx = $canvas.width / 2, halfHpx = $canvas.height / 2;
+  // Minimum painted dot footprint in device px. On a 1× display this stays a
+  // crisp 1×1; on HiDPI it scales with DPR so a dense small-circle field (BGA
+  // balls) stays perceptible at low zoom instead of fading to near-nothing.
+  const d = Math.max(1, Math.round(dpr));
+  const off = (d - 1) >> 1;   // keep the dot centred on the point
   for (const [color, xs] of dotBuckets) {
     const path = new Path2D();
     for (let k = 0; k < xs.length; k += 2) {
       const sx = (xs[k]     - view.cx) * view.zoom + halfWpx;
       const sy = -(xs[k + 1] - view.cy) * view.zoom + halfHpx;
-      path.rect(sx | 0, sy | 0, 1, 1);
+      path.rect((sx | 0) - off, (sy | 0) - off, d, d);
     }
     ctx.fillStyle = color;
     ctx.fill(path);
@@ -2469,8 +2511,16 @@ $canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
 $canvas.addEventListener("mousedown", (e) => {
   if (e.button === 1) {
-    // Middle: pan
+    // Middle: pan — or, on a double middle-press (≤400 ms), AutoCAD Zoom
+    // Extents. The double-press re-fits and does not start a pan.
     e.preventDefault();
+    const now = e.timeStamp;
+    if (now - lastMiddleDownAt < 400) {
+      lastMiddleDownAt = 0;
+      zoomExtents();
+      return;
+    }
+    lastMiddleDownAt = now;
     drag = {
       kind: "pan",
       startClient: { x: e.clientX, y: e.clientY },
@@ -2576,6 +2626,7 @@ window.addEventListener("mousemove", (e) => {
         mode: e.clientX >= drag.startClient.x ? "window" : "crossing",
         shift: drag.shift,
       };
+      $modeHint.textContent = drag.mode === "window" ? "WINDOW" : "CROSSING";
       render();
     }
     return;
@@ -2585,6 +2636,7 @@ window.addEventListener("mousemove", (e) => {
     drag.currentClient = { x: e.clientX, y: e.clientY };
     // Update mode live based on current direction relative to start.
     drag.mode = e.clientX >= drag.startClient.x ? "window" : "crossing";
+    $modeHint.textContent = drag.mode === "window" ? "WINDOW" : "CROSSING";
     render();
   }
 });
@@ -2644,6 +2696,18 @@ window.addEventListener("mouseup", (e) => {
     selectByBox(x1, y1, x2, y2, drag.mode, drag.shift);
   }
   drag = null;
+  render();
+});
+
+// Recover from a drag the window never saw end: if focus is lost (alt-tab, or
+// the mouse button released outside the browser) mid pan / box / mark, clear
+// the in-flight state so the canvas is never stuck in a ghost drag.
+window.addEventListener("blur", () => {
+  if (!drag && !markDrag) return;
+  drag = null;
+  markDrag = null;
+  $canvas.classList.remove("panning");
+  updateStatus();
   render();
 });
 
@@ -3404,12 +3468,20 @@ window.addEventListener("keydown", (e) => {
   // Ignore when typing in an input (none right now, but defensive).
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
+  // ? = toggle the in-app shortcut reference. When it is open, Esc closes it
+  // first (before the Esc cascade below runs).
+  if (e.key === "?") { toggleShortcutHelp(); e.preventDefault(); return; }
+  if (e.key === "Escape" && shortcutHelpOpen()) { hideShortcutHelp(); e.preventDefault(); return; }
+
+  // Home = Zoom Extents — re-frame the whole drawing (AutoCAD ZE).
+  if (e.key === "Home") { zoomExtents(); e.preventDefault(); return; }
+
   // Esc cascade: cancel active box drag → clear every measurement (active
   // chain + every committed chain; stay in measure mode) → cancel mark-mode
   // drag / exit mark mode → clear scan-all overlay → exit add-mode → clear
   // selection.
   if (e.key === "Escape") {
-    if (drag && drag.kind === "box") { drag = null; render(); return; }
+    if (drag && drag.kind === "box") { drag = null; updateStatus(); render(); return; }
     if (measureMode && (measureState.picks.length || measureState.chains.length)) {
       measureState.chains = [];
       measureState.picks = [];
@@ -4003,6 +4075,7 @@ async function load() {
 
   primitives = data.primitives;
   background = data.background || "#1a1f26";
+  loadedBbox = data.bbox;
   fitToBbox(data.bbox);
 
   const tBox0 = performance.now();

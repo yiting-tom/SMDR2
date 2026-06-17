@@ -396,6 +396,9 @@ header button.active {
   gap: 0.6rem;
   padding: 0.2rem 0.8rem;
   font-size: 0.78rem;
+  /* Tabular figures so coordinate / handle readouts don't shift horizontally
+     as digit widths change while the cursor moves. */
+  font-variant-numeric: tabular-nums;
   background: rgba(15, 19, 24, 0.72);
   backdrop-filter: blur(2px);
   border-top: 1px solid #2a3340;
@@ -608,6 +611,60 @@ nav#class-toolbar .toolbar-sep {
 }
 
 main { flex: 1; position: relative; overflow: hidden; }
+
+/* Pan cursor feedback — the .panning class is toggled on the canvas for the
+   duration of a middle-drag pan (AutoCAD shows a hand). */
+#dxf-canvas.panning { cursor: grabbing; }
+
+/* ---- In-app shortcut reference (? key / toolbar ? button) ------------- */
+.shortcut-help {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.shortcut-help[hidden] { display: none; }
+.shortcut-help-bg {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 11, 15, 0.55);
+}
+.shortcut-help-panel {
+  position: relative;
+  background: #161c24;
+  border: 1px solid #2a3340;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  max-height: 80vh;
+  overflow: auto;
+  padding: 0.4rem 1rem 1rem;
+  min-width: min(440px, 90vw);
+}
+.shortcut-help-panel header {
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: #161c24;
+  padding: 0.5rem 0;
+}
+.shortcut-help-panel header h2 { font-size: 0.95rem; margin: 0; }
+.shortcut-help-panel header .spacer { flex: 1; }
+.shortcut-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+.shortcut-list dt {
+  font-family: var(--font-mono);
+  color: #00e5ff;
+  white-space: nowrap;
+}
+.shortcut-list dd { margin: 0; color: #c0cad6; }
 
 /* ---- Rule sidebar (in viewer) ----------------------------------------- */
 #rule-sidebar {
