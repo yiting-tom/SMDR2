@@ -13,7 +13,9 @@
   --border-soft: rgba(42, 51, 64, 0.6);
   --text: #e8eef5;
   --text-2: #9aa5b1;
-  --text-3: #6b7886;
+  /* --text-3 lifted from #6b7886 (~4:1) to clear ~4.5:1 on the dark surfaces;
+     secondary/helper text was hard to read on dark + small sizes. */
+  --text-3: #8492a0;
   --accent: #00e5ff;
   --accent-soft: rgba(0, 229, 255, 0.09);
   --ok: #69f0ae;
@@ -26,6 +28,21 @@
   --radius-lg: 8px;
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.35);
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Scale tokens — introduced here and used by rules this change adds/touches.
+     A full retro-tokenisation of the existing literals is a deliberate
+     incremental follow-up (see openspec improve-gui-ux proposal Impact). */
+  --radius-sm: 3px;
+  --radius-pill: 9999px;
+  --sp-xs: 0.2rem;
+  --sp-sm: 0.35rem;
+  --sp-md: 0.6rem;
+  --sp-lg: 1rem;
+  --fs-xs: 0.72rem;
+  --fs-sm: 0.78rem;
+  --fs-base: 0.84rem;
+  --fs-lg: 0.95rem;
+  --fs-xl: 1.15rem;
 }
 
 * { box-sizing: border-box; }
@@ -775,7 +792,7 @@ main { flex: 1; position: relative; overflow: hidden; }
   content: "▾";
   grid-column: 1;
   grid-row: 1;
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.7rem;
   align-self: center;
   transition: transform 0.12s ease;
@@ -844,7 +861,7 @@ main { flex: 1; position: relative; overflow: hidden; }
   cursor: not-allowed;
   opacity: 0.55;
 }
-#rule-sidebar .subrules li.missing-file .part { color: #5d8aa8; }
+#rule-sidebar .subrules li.missing-file .part { color: #6e93b3; }
 #rule-sidebar .subrules li.text-only {
   cursor: default;
   border-left-color: #2a3340;
@@ -862,11 +879,11 @@ main { flex: 1; position: relative; overflow: hidden; }
 #rule-sidebar .subrules li .sub-text { color: #c0cad6; }
 #rule-sidebar .subrules li .nav-hint {
   font-size: 0.7rem;
-  color: #5d8aa8;
+  color: #6e93b3;
   font-family: ui-monospace, monospace;
 }
 #rule-sidebar .empty-msg {
-  color: #5d8aa8;
+  color: #6e93b3;
   text-align: center;
   padding: 1rem;
   font-size: 0.82rem;
@@ -960,7 +977,7 @@ main { flex: 1; position: relative; overflow: hidden; }
   line-height: 1.35;
 }
 #rule-list .rule-count {
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.72rem;
   font-family: ui-monospace, monospace;
   margin-top: 0.2rem;
@@ -1266,7 +1283,7 @@ body.dashboard main.dashboard-main {
   cursor: help;
 }
 .rescaled-pill {
-  color: #5d8aa8;
+  color: #6e93b3;
   margin-left: 0.5em;
   font-size: 0.78rem;
   cursor: help;
@@ -1596,12 +1613,12 @@ body.dashboard main.dashboard-main {
   background: rgba(105, 240, 174, 0.07);
 }
 .rule-result-card .subrules li .no-file {
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.78rem;
 }
 .rule-result-card .subrules li.empty {
   display: block;
-  color: #5d8aa8;
+  color: #6e93b3;
   border-left: 2px dashed #2a3340;
   text-align: center;
   font-size: 0.78rem;
@@ -1717,7 +1734,7 @@ body.dashboard main.dashboard-main {
   color: #00ffff;
 }
 .diff-config-table td.diff-arrow { color: #9aa5b1; width: 2ch; }
-.diff-config-table td.diff-null { color: #5d8aa8; font-style: italic; }
+.diff-config-table td.diff-null { color: #6e93b3; font-style: italic; }
 
 /* Section 3 — binding change rows */
 .diff-binding-list {
@@ -1835,7 +1852,7 @@ body.dashboard main.dashboard-main {
 #file-list .status-done     { color: #69f0ae; }
 
 /* In-card "no version" notice (data anomaly). */
-.product-card .empty { color: #5d8aa8; padding: 0.6rem 1rem; }
+.product-card .empty { color: #6e93b3; padding: 0.6rem 1rem; }
 
 /* ---- Modal (Library Manager) ------------------------------------------ */
 .modal {
@@ -2051,7 +2068,7 @@ body.dashboard main.dashboard-main {
   color: #ff5252;
   border-color: #ff5252;
 }
-.library-empty { color: #5d8aa8; padding: 1rem; text-align: center; }
+.library-empty { color: #6e93b3; padding: 1rem; text-align: center; }
 
 /* ---- Layer-selection modal --------------------------------------------- */
 .layer-modal-body {
@@ -2115,12 +2132,12 @@ body.dashboard main.dashboard-main {
   color: #c0cad6;
 }
 .layer-count {
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.74rem;
   font-variant-numeric: tabular-nums;
 }
 .layer-empty {
-  color: #5d8aa8;
+  color: #6e93b3;
   padding: 1rem;
   text-align: center;
 }
@@ -2136,7 +2153,7 @@ body.dashboard main.dashboard-main {
 .modal .modal-footer .link-btn {
   background: transparent;
   border: none;
-  color: #5d8aa8;
+  color: #6e93b3;
   cursor: pointer;
   font: inherit;
   font-size: 0.82rem;
@@ -2158,7 +2175,7 @@ body.dashboard main.dashboard-main {
 .modal .modal-footer .primary:disabled {
   background: #1a2530;
   border-color: #2a3340;
-  color: #5d8aa8;
+  color: #6e93b3;
   cursor: not-allowed;
 }
 
@@ -2332,7 +2349,7 @@ body.dashboard main.dashboard-main {
   letter-spacing: 0.03em;
 }
 .floating-panel > header .hint {
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.7rem;
 }
 .floating-panel > header .spacer { flex: 1; }
@@ -2358,7 +2375,7 @@ body.dashboard main.dashboard-main {
 .floating-panel > footer .link-btn {
   background: transparent;
   border: none;
-  color: #5d8aa8;
+  color: #6e93b3;
   cursor: pointer;
   font: inherit;
   font-size: 0.74rem;
@@ -2395,7 +2412,7 @@ body.dashboard main.dashboard-main {
   justify-content: center;
   padding: 0;
 }
-.vis-row.hidden .vis-eye { color: #5d8aa8; }
+.vis-row.hidden .vis-eye { color: #6e93b3; }
 .vis-row .vis-name {
   flex: 1;
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -2404,9 +2421,9 @@ body.dashboard main.dashboard-main {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.vis-row.hidden .vis-name { color: #5d8aa8; text-decoration: line-through; }
+.vis-row.hidden .vis-name { color: #6e93b3; text-decoration: line-through; }
 .vis-row .vis-count {
-  color: #5d8aa8;
+  color: #6e93b3;
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
 }
@@ -2872,3 +2889,13 @@ body.dashboard main.dashboard-main {
 }
 .pill.role-viewer { color: var(--text-2); }
 .admin-empty { color: var(--text-3); font-size: 0.82rem; padding: 0.6rem 0; text-align: center; }
+
+/* ---- Viewer: narrow-viewport behaviour (split-screen / laptop) ---------
+   The rule sidebar/panel are fixed-width and the class toolbar h-scrolls;
+   below this breakpoint shrink the panels and let the toolbar wrap so no
+   control is pushed off-screen. */
+@media (max-width: 900px) {
+  #rule-sidebar { width: min(300px, 82vw); }
+  #rule-panel { width: min(280px, 82vw); }
+  nav#class-toolbar { flex-wrap: wrap; overflow-x: visible; gap: var(--sp-sm); }
+}

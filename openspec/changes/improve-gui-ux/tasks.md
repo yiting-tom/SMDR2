@@ -37,14 +37,14 @@
 
 ## 7. Visual — contrast floor + responsive (`style.css`)
 
-- [ ] 7.1 Raise `--text-3` and the helper colours near 3:1 (e.g. the `#5d8aa8` family used by rule counts, rescaled / unit badges, link buttons) to the next blue-grey step clearing ≈4.5:1 on `--surface` / `--bg-page`.
-- [ ] 7.2 Introduce `:root` scale tokens (`--sp-*`, `--fs-*`, `--radius-*`) and use them in the rules this change adds/touches (not a full retro-sweep — see proposal Impact).
-- [ ] 7.3 Add `@media (max-width: 900px)`: reduce `#rule-sidebar` / `#rule-panel` width and set `#class-toolbar { flex-wrap: wrap; overflow-x: visible; }`.
+- [x] 7.1 Raise `--text-3` and the helper colours near 3:1 (e.g. the `#5d8aa8` family used by rule counts, rescaled / unit badges, link buttons) to the next blue-grey step clearing ≈4.5:1 on `--surface` / `--bg-page`.
+- [x] 7.2 Introduce `:root` scale tokens (`--sp-*`, `--fs-*`, `--radius-*`) and use them in the rules this change adds/touches (not a full retro-sweep — see proposal Impact).
+- [x] 7.3 Add `@media (max-width: 900px)`: reduce `#rule-sidebar` / `#rule-panel` width and set `#class-toolbar { flex-wrap: wrap; overflow-x: visible; }`.
 
 ## 8. Regression gate
 
-- [ ] 8.1 Run `uv run ruff check app tests` and `uv run pytest -q`; confirm green (frontend-only change must not have touched anything the suite covers).
-- [ ] 8.2 `git grep -n "prompt(\|confirm(\|alert("` `app/static/dashboard.js` returns no hits for the three replaced call sites.
+- [x] 8.1 Run `uv run ruff check app tests` and `uv run pytest -q`; confirm green (frontend-only change must not have touched anything the suite covers).
+- [x] 8.2 `git grep -n "prompt(\|confirm(\|alert("` `app/static/dashboard.js` returns no hits for the three replaced call sites.
 
 ## 9. Manual verification
 
