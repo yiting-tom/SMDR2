@@ -1126,6 +1126,11 @@ body.dashboard main.dashboard-main {
 @media (max-width: 720px) {
   .product-card .slot-grid { grid-template-columns: 1fr; }
 }
+/* Grid tracks are 1fr = minmax(auto, 1fr); without this the `auto` minimum
+   grows to a long unbreakable filename's max-content, blowing the column
+   past the card and pushing later slots off-page. min-width:0 lets the track
+   shrink so the .file-name ellipsis can actually kick in. */
+.product-card .slot-grid > * { min-width: 0; }
 .product-card .slot {
   background: var(--surface-inset);
   border: 1px solid var(--border);
@@ -1217,6 +1222,7 @@ body.dashboard main.dashboard-main {
 }
 .product-card .slot .slot-actions {
   display: flex;
+  flex-wrap: wrap;       /* up to ~5 actions per slot — wrap, never overflow the cell */
   gap: 0.4rem;
   margin-top: 0.2rem;
 }
