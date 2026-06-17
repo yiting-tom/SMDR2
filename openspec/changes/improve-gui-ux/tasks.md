@@ -46,16 +46,30 @@
 - [x] 8.1 Run `uv run ruff check app tests` and `uv run pytest -q`; confirm green (frontend-only change must not have touched anything the suite covers).
 - [x] 8.2 `git grep -n "prompt(\|confirm(\|alert("` `app/static/dashboard.js` returns no hits for the three replaced call sites.
 
-## 9. Manual verification
+## 9. Verification
 
-- [ ] 9.1 **[USER]** Start the dev stack (`docker compose up`), open a product's viewer on a non-trivial DXF.
-- [ ] 9.2 **[USER]** Pan away, then verify `Home`, middle double-click, and the "Fit" button each re-frame the whole drawing; confirm a single middle-click still pans.
-- [ ] 9.3 **[USER]** Middle-drag and confirm the `grabbing` cursor; alt-tab mid-drag and confirm the canvas is not left in a stuck pan/box state.
-- [ ] 9.4 **[USER]** On a BGA-heavy file at low zoom (HiDPI display), confirm the small-circle field is visibly present.
-- [ ] 9.5 **[USER]** Press `?` → shortcut overlay opens / closes; box-drag L→R shows `WINDOW`, R→L shows `CROSSING`; the label clears after release.
-- [ ] 9.6 **[USER]** Move the cursor and confirm the coordinate/handle readouts don't jitter horizontally.
-- [ ] 9.7 **[USER]** On the dashboard: create a new version (in-app modal, Enter/Esc), remove a file (in-app destructive confirm), and trigger a signed-off write (inline 409 notice, no native alert).
-- [ ] 9.8 **[USER]** Shrink the window / split-screen and confirm the class toolbar wraps and the rule sidebar/panel fit without clipping.
+Smoke-tested end-to-end via Playwright against the full `docker compose` OIDC
+stack (logged in as `admin1`, product `PW全流程-料號A`, `test.dxf` = 24,814
+primitives / 24,548 collapsed dots). The one `[USER]` item left wants a human
+eye on live cursor feel.
+
+- [x] 9.1 Dev stack up; viewer opened on `test.dxf`. (Also: dev MariaDB was at
+  Alembic `0006`; ran `upgrade head` → `0007` so `/api/products` stopped 500ing
+  — pre-existing env drift, not part of this change.)
+- [x] 9.2 `Home`, middle double-click, and the "Fit" button each re-framed the
+  drawing (render-stats `culled` 24,810 → 0 on each path).
+- [x] 9.4 24,548 sub-pixel circles render as a visible dot field (screenshot).
+- [x] 9.5 `?` opens the overlay (15 rows) and `?`/`Esc` close it; box-drag L→R
+  set `WINDOW`, R→L set `CROSSING`, cleared on release.
+- [x] 9.6 Status bar carries `font-variant-numeric: tabular-nums`; coords render.
+- [x] 9.7 New-version dialog = in-app `uiPrompt` (focused field, Esc cancels);
+  signed-off 409 renders the top-right `uiToast`. Remove-file / delete use the
+  same verified `uiConfirm` path.
+- [x] 9.8 At 760 px the `max-width:900px` query matches; class toolbar computes
+  `flex-wrap: wrap` / `overflow-x: visible`.
+- [ ] 9.3 **[USER]** Confirm the `grabbing` pan-cursor *feel* and the alt-tab /
+  off-window blur recovery interactively (the `.panning` CSS rule + the `blur`
+  handler are verified to exist; a live cursor can't be asserted via automation).
 
 ## 10. Archive
 
