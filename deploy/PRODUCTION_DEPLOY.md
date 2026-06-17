@@ -9,14 +9,6 @@ faithful Helm port of [`deploy/k8s/conform.yaml`](k8s/conform.yaml).
 > and reached purely by env var. Moving between environments = changing
 > `values` + the secret, never code.
 
-> **CI/CD:** on `main`, [`azure-pipelines.yml`](../azure-pipelines.yml) runs
-> this exact Helm upgrade for you (CI → build/push image → `helm upgrade
-> --install` behind a `conform-prod` approval, passing the committed
-> `values-prod.yaml` and pinning the image to the built commit SHA). The manual
-> commands below are the **break-glass / first-bootstrap** path and the source
-> of truth for what the pipeline automates. Secrets (§2) are always supplied
-> out of band — never through the pipeline.
-
 ---
 
 ## 0. What the chart does (and does not) manage
@@ -87,16 +79,9 @@ kubectl -n conform create secret generic conform-secrets \
 
 ```bash
 cd deploy/helm/conform
-cp values-prod.example.yaml values-prod.yaml
+cp values-prod.example.yaml values-prod.yaml    # values-prod.yaml is .helmignore'd
 $EDITOR values-prod.yaml
 ```
-
-> **Commit `values-prod.yaml` to git** — it carries no secrets (only hosts,
-> bucket, `BOOTSTRAP_ADMINS`), and the CI/CD pipeline references it by path
-> with `-f`. `.helmignore` lists it only to keep it out of the packaged chart
-> tarball; that has no effect on git or on `helm upgrade -f`. The pipeline
-> overrides `image.repository`/`image.tag` with the built SHA, so you do **not**
-> hand-edit the image in this file for routine deploys.
 
 Must-set before the **first** rollout:
 
@@ -158,17 +143,12 @@ kubectl -n conform exec deploy/conform-web -- wget -qO- http://localhost:8000/he
 
 ## 6. Routine deploy (new image)
 
-**Normally you do nothing here — merging to `main` triggers the pipeline**
-([`azure-pipelines.yml`](../azure-pipelines.yml)), which runs the command below
-after the `conform-prod` approval. Run it by hand only as break-glass.
-
 Each release is just a new SHA:
 
 ```bash
 helm upgrade conform deploy/helm/conform \
   --namespace conform \
   -f deploy/helm/conform/values-prod.yaml \
-  --set image.repository=<REGISTRY>/conform-app \
   --set image.tag=<NEW_COMMIT_SHA> \
   --atomic --timeout 10m
 ```

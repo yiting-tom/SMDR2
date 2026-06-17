@@ -1,18 +1,12 @@
-# Conform — Azure Pipelines: CI → image build/push → Helm deploy.
+# Conform — Azure Pipelines: CI → image build/push → k8s deploy.
 #
-# Monorepo layout: app code, Dockerfile, alembic, deploy/helm/, tests all
-# live here; this file is the only CI/CD entry point. Deploy = `helm upgrade
-# --install` of deploy/helm/conform (the same chart deploy/PRODUCTION_DEPLOY.md
-# documents); deploy/k8s/conform.yaml is reference-only, no longer applied.
+# Monorepo layout: app code, Dockerfile, alembic, deploy/k8s/, tests all
+# live here; this file is the only CI/CD entry point.
 #
 # Fill these once (Project settings → Service connections / Library):
 #   REGISTRY_SC   docker registry service connection (company registry)
 #   IMAGE_REPO    e.g. registry.example.internal/conform-app
 #   K8S_SC        kubernetes service connection (prod cluster, ns conform)
-# Prod config: deploy/helm/conform/values-prod.yaml is committed to git (it
-# holds NO secrets — only hostnames, bucket, BOOTSTRAP_ADMINS) and passed with
-# -f. The Deploy stage overrides image.repository/tag with exactly what Build
-# pushed, so values-prod.yaml never has to track the SHA.
 # Approvals: add a check on the `conform-prod` environment so Deploy
 # waits for a human. Secrets (DB/S3/OIDC/SESSION) never pass through the
 # pipeline — they live in Vault → k8s Secret `conform-secrets`.
@@ -117,7 +111,7 @@ stages:
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: deploy
-        displayName: helm upgrade — migrate hook + rollout (ns conform)
+        displayName: migrate + rollout (ns conform)
         pool: {vmImage: ubuntu-latest}
         environment: conform-prod                   # ← put the approval check here
         strategy:
@@ -125,27 +119,41 @@ stages:
             deploy:
               steps:
                 - checkout: self
-                - task: HelmInstaller@1
-                  displayName: install helm 3
-                  inputs:
-                    helmVersionToInstall: latest
-                - task: HelmDeploy@0
-                  displayName: helm upgrade --install conform
+                - script: |
+                    # Pin the immutable tag — :latest in the manifest is a
+                    # placeholder; without a tag change k8s won't roll.
+                    sed -i "s|registry.example.internal/conform-app:latest|$(IMAGE_REPO):$(TAG)|g" \
+                      deploy/k8s/conform.yaml
+                  displayName: pin image tag
+                - task: Kubernetes@1
+                  displayName: re-run migration job (idempotent at head)
                   inputs:
                     connectionType: Kubernetes Service Connection
-                    kubernetesServiceConnection: K8S_SC   # ← service connection name
+                    kubernetesServiceEndpoint: K8S_SC   # ← service connection name
                     namespace: conform
-                    command: upgrade
-                    chartType: FilePath
-                    chartPath: deploy/helm/conform
-                    releaseName: conform
-                    valueFile: deploy/helm/conform/values-prod.yaml
-                    install: true
-                    # Deploy exactly the image Build pushed (override the chart
-                    # default + values-prod placeholder). --atomic runs the
-                    # alembic pre-upgrade hook, then rolls web/worker, and rolls
-                    # the WHOLE release back if the hook or any pod fails to go
-                    # healthy within the timeout — so migration+rollout is one
-                    # all-or-nothing step, no separate kubectl waits needed.
-                    overrideValues: image.repository=$(IMAGE_REPO),image.tag=$(TAG)
-                    arguments: --atomic --timeout 10m --create-namespace
+                    command: delete
+                    arguments: job conform-migrate --ignore-not-found
+                - task: Kubernetes@1
+                  displayName: kubectl apply
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: apply
+                    arguments: -f deploy/k8s/conform.yaml
+                - task: Kubernetes@1
+                  displayName: wait for migration
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: wait
+                    arguments: --for=condition=complete --timeout=300s job/conform-migrate
+                - task: Kubernetes@1
+                  displayName: wait for web rollout
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: rollout
+                    arguments: status deployment/conform-web --timeout=300s
