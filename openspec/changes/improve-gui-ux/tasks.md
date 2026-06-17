@@ -28,12 +28,12 @@
 
 ## 6. Dashboard — in-app dialogs (`dashboard.js`, `dashboard.html`, `style.css`)
 
-- [ ] 6.1 Add `uiPrompt({title, label, value, confirmText})` → `Promise<string|null>` and `uiConfirm({title, body, confirmText, danger})` → `Promise<boolean>` in `dashboard.js`, built on the existing `.modal` markup; `Enter` confirms, `Esc` / backdrop cancels, focus moves to the field / confirm button on open.
-- [ ] 6.2 Add the dialog container markup to `dashboard.html` (a reusable `#ui-dialog` modal the helpers populate), if a reusable host isn't already present.
-- [ ] 6.3 Replace the `createNewVersion` `prompt()` with `await uiPrompt(...)` (cancel → return without creating).
-- [ ] 6.4 Replace the remove-file `confirm()` with `await uiConfirm({..., danger: true})`.
-- [ ] 6.5 Replace the signed-off 409 `alert()` with an inline, auto-dismissing notice rendered near the affected product card (who signed off + when).
-- [ ] 6.6 In `style.css`, add styling for the destructive confirm variant and the inline 409 notice (reuse existing tokens).
+- [x] 6.1 Add `uiPrompt({title, label, value, confirmText})` → `Promise<string|null>` and `uiConfirm({title, body, confirmText, danger})` → `Promise<boolean>` in `dashboard.js`, built on the existing `.modal` markup; `Enter` confirms, `Esc` / backdrop cancels, focus moves to the field / confirm button on open.
+- [x] 6.2 Add the dialog container markup to `dashboard.html` (a reusable `#ui-dialog` modal the helpers populate), if a reusable host isn't already present.
+- [x] 6.3 Replace the `createNewVersion` `prompt()` with `await uiPrompt(...)` (cancel → return without creating).
+- [x] 6.4 Replace the remove-file `confirm()` with `await uiConfirm({..., danger: true})`.
+- [x] 6.5 Replace the signed-off 409 `alert()` with an inline, auto-dismissing notice rendered near the affected product card (who signed off + when).
+- [x] 6.6 In `style.css`, add styling for the destructive confirm variant and the inline 409 notice (reuse existing tokens).
 
 ## 7. Visual — contrast floor + responsive (`style.css`)
 
