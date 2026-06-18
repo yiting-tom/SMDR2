@@ -358,6 +358,15 @@ async def lifespan(_app: FastAPI):
 
 logger = logging.getLogger(__name__)
 
+# uvicorn configures only its own loggers, so without this the app.* lines
+# (startup summary, connectivity, authz denials, …) would propagate to a
+# handler-less root and never appear. basicConfig is a no-op when the root
+# already has handlers (e.g. under pytest's caplog), so it doesn't double-log.
+logging.basicConfig(
+    level=os.environ.get("SMDR2_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+
 
 app = FastAPI(title="SMDR2", lifespan=lifespan)
 # Compress large JSON responses (notably GET /primitives — tens of MB on a
