@@ -10,11 +10,13 @@ JSONs are shipped **per-file** with raw, unprefixed handles — the
 for the internal mock checker stays internal and never leaves the
 process boundary.
 
-Since the one-library-per-version topology (2026-06-10) the customer
-dimension is gone — the manifest instead carries the **version**
-(``version_id`` + ``version_label``) whose bindings and Match JSONs
-the bundle was built from. Rules remain product-keyed
-(``product_id``); the version identifies which snapshot was checked.
+The manifest carries the **version** (``version_id`` + ``version_label``)
+whose bindings and Match JSONs the bundle was built from; rules remain
+product-keyed (``product_id``). It also carries the **customer** grouping
+that sits above product — ``customer_id`` (``products.customer_id``, the
+customer entity, NOT the long-dead ``library_id``) and the optional
+human-readable ``customer`` name, resolved from the customers table at
+export time.
 
 Layout inside the zip:
 
@@ -45,7 +47,7 @@ from app.storage import match_key, upload_key
 from app.versions import Version
 
 
-BUNDLE_VERSION = "2.2.0"
+BUNDLE_VERSION = "2.3.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -124,12 +126,19 @@ def build_manifest(
     version: Version,
     files: list[FileRecord],
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Assemble the manifest dict for one version's role-bound files.
 
     Pure: no disk I/O. ``files`` MUST already be filtered to
     role-bound records (``dxf_role is not None``) of this version.
+
+    ``customer_id`` is taken from ``product.customer_id`` (always present —
+    defaults to the seeded ``"uncategorized"`` customer). ``customer_name``
+    is the human-readable name the caller resolved from the customers table;
+    when falsy the ``customer`` key is omitted (keeping this function pure /
+    store-free).
     """
     if version.product_id != product.id:
         raise ValueError(
@@ -139,6 +148,7 @@ def build_manifest(
     manifest: dict = {
         "bundle_version": BUNDLE_VERSION,
         "product_id": product.id,
+        "customer_id": product.customer_id,
         "version_id": version.id,
         "version_label": version.label,
         "check_dam": version.check_dam,
@@ -147,6 +157,8 @@ def build_manifest(
     }
     if product.name:
         manifest["product_name"] = product.name
+    if customer_name:
+        manifest["customer"] = customer_name
     return manifest
 
 
@@ -155,6 +167,7 @@ def build_bundle(
     version: Version,
     files: list[FileRecord],
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> tuple[bytes, str]:
     """Build the DRC handoff zip for one version of a product.
@@ -178,7 +191,8 @@ def build_bundle(
     hundred MB, swap for a ``SpooledTemporaryFile`` without changing
     the public contract.
     """
-    manifest = build_manifest(product, version, files, now=now)
+    manifest = build_manifest(
+        product, version, files, customer_name=customer_name, now=now)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
@@ -203,6 +217,7 @@ def build_bundle_dir(
     files: list[FileRecord],
     dst_dir: str | Path,
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> Path:
     """Materialise the DRC handoff bundle as a directory tree.
@@ -222,7 +237,8 @@ def build_bundle_dir(
     (dst / DXF_DIR).mkdir(parents=True, exist_ok=True)
     (dst / MATCH_DIR).mkdir(parents=True, exist_ok=True)
 
-    manifest = build_manifest(product, version, files, now=now)
+    manifest = build_manifest(
+        product, version, files, customer_name=customer_name, now=now)
     (dst / MANIFEST_FILENAME).write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)
     )

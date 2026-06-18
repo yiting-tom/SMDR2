@@ -2268,7 +2268,12 @@ async def get_drc_bundle(version_id: str) -> Response:
             status_code=400,
             detail=f"these roles still need Save Match: {', '.join(sorted(missing))}",
         )
-    zip_bytes, filename = build_bundle(product, version, files)
+    # Resolve the human-readable customer name for the manifest (customer_id
+    # itself is product.customer_id, always present). Omitted when unresolved.
+    cust = AUTH_STORE.get_customer(product.customer_id)
+    customer_name = (cust or {}).get("name") or None
+    zip_bytes, filename = build_bundle(
+        product, version, files, customer_name=customer_name)
     return Response(
         content=zip_bytes,
         media_type="application/zip",

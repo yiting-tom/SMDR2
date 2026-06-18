@@ -179,7 +179,7 @@ def test_build_bundle_carries_unit_fields_and_validates(
     manifest = _read_manifest(zip_bytes)
 
     jsonschema.validate(manifest, manifest_schema)
-    assert manifest["bundle_version"] == "2.2.0"
+    assert manifest["bundle_version"] == "2.3.0"
     entry = manifest["files"][0]
     assert set(entry) == {
         "role", "file_id", "dxf", "match_json",
@@ -477,11 +477,8 @@ def test_build_bundle_accepts_novel_lid_role(seeded_version, manifest_schema):
     assert {"RING", "LID", "NovelLID"} <= roles
 
 
-# ---- 3.7 version fields ---------------------------------------------------
-# (The 1.x customer/customer_id fields died with the shared-library
-# topology, 2026-06-10 — the manifest now identifies the snapshot via
-# version_id + version_label instead.)
-def test_manifest_carries_version_fields(seeded_version):
+# ---- 3.7 version + customer fields ----------------------------------------
+def test_manifest_carries_version_and_customer_fields(seeded_version):
     from app.drc_bundle import build_manifest
 
     product, version, seed = seeded_version
@@ -491,8 +488,23 @@ def test_manifest_carries_version_fields(seeded_version):
 
     assert manifest["version_id"] == version.id
     assert manifest["version_label"] == "v1"
-    assert "customer_id" not in manifest
+    # customer_id is always present (products.customer_id, default seeded).
+    assert manifest["customer_id"] == product.customer_id == "uncategorized"
+    # No customer_name passed → the human-readable name is omitted.
     assert "customer" not in manifest
+
+
+def test_manifest_carries_customer_name_when_resolved(seeded_version):
+    from app.drc_bundle import build_manifest
+
+    product, version, seed = seeded_version
+    seed("BD")
+
+    manifest = build_manifest(
+        product, version, _files_of(version), customer_name="ACME Corp")
+
+    assert manifest["customer_id"] == product.customer_id
+    assert manifest["customer"] == "ACME Corp"
 
 
 def test_manifest_raises_on_product_version_mismatch(seeded_version):
@@ -535,13 +547,13 @@ def test_manifest_check_dam_reflects_version_flag(seeded_version, manifest_schem
     jsonschema.validate(m_on, manifest_schema)
 
 
-def test_bundle_version_is_2_2_0():
-    """2.1.0 → 2.2.0: the `NovelLID` role enum value is a
-    backward-compatible (minor) addition — pre-2.2.0 consumers simply
-    never see it. (2.1.0 added the optional `check_dam` field.)"""
+def test_bundle_version_is_2_3_0():
+    """2.2.0 → 2.3.0: `customer` / `customer_id` re-added (customer-entity
+    semantics) — a backward-compatible (minor) addition for 2.x consumers.
+    (2.2.0 added the `NovelLID` role; 2.1.0 added `check_dam`.)"""
     from app.drc_bundle import BUNDLE_VERSION
 
-    assert BUNDLE_VERSION == "2.2.0"
+    assert BUNDLE_VERSION == "2.3.0"
 
 
 # ---- build_bundle_dir parity ------------------------------------------

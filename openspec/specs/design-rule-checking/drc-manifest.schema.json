@@ -4,14 +4,14 @@
   "title": "SMDR2 DRC Handoff Manifest",
   "description": "Top-level manifest accompanying every DRC handoff bundle. The bundle is a directory (or zip) containing this file at its root plus the DXF + Match JSON files referenced by every entry in `files`. The downstream rule-checking team consumes this manifest to group files by role and run their own DRC.",
   "type": "object",
-  "required": ["bundle_version", "product_id", "version_id", "version_label", "files"],
+  "required": ["bundle_version", "product_id", "customer_id", "version_id", "version_label", "files"],
   "additionalProperties": false,
   "properties": {
     "bundle_version": {
       "description": "Semantic version of the manifest contract. Consumers MUST refuse manifests whose major version they do not understand.",
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["2.0.0"]
+      "examples": ["2.3.0"]
     },
     "product_id": {
       "description": "SMDR2 internal product identifier. Opaque to the consumer; useful for cross-referencing reports.",
@@ -20,6 +20,15 @@
     },
     "product_name": {
       "description": "Optional human-readable product name. Purely informational.",
+      "type": "string"
+    },
+    "customer_id": {
+      "description": "The product's customer grouping (products.customer_id, the customer entity above product). Opaque to the consumer; stable across customer renames. Mirrors product_id. Defaults to \"uncategorized\" when the product was never assigned a customer.",
+      "type": "string",
+      "minLength": 1
+    },
+    "customer": {
+      "description": "Optional human-readable customer name, resolved from the customers table at export. Omitted when the customer cannot be resolved or has no name; consumers needing a stable display name SHOULD key by customer_id.",
       "type": "string"
     },
     "version_id": {
