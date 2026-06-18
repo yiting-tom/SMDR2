@@ -65,13 +65,40 @@ kubectl -n conform create secret generic conform-secrets \
 
 | Key | Notes |
 |---|---|
-| `DATABASE_URL` | SQLAlchemy URL, `mysql+pymysql://…?charset=utf8mb4`. |
+| `DATABASE_URL` | Full SQLAlchemy URL, `mysql+pymysql://…?charset=utf8mb4`. **Or** split it — see "DB from parts" below. |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | MinIO credentials. |
 | `OIDC_CLIENT_SECRET` | Keycloak `conform-web` client secret. |
 | `SESSION_SECRET` | Signs the OIDC state cookie. **Generate once, keep stable** — rotating it invalidates in-flight logins. |
 
 > `SESSION_SECRET` rotation is a deliberate, low-blast-radius event (only
 > mid-login users are affected). Treat it as a real secret, store it in Vault.
+
+### DB from parts (Vault holds only username + password)
+
+If the Vault entry for the database is just a **username + password** (no
+full URL), don't hand-build a `DATABASE_URL` — a password with `@ : / # ?`
+breaks a naively concatenated URL. Instead put **`DB_USER` + `DB_PASSWORD`**
+in the secret and the non-secret host/db in the ConfigMap; the app composes
+the URL itself (password URL-encoded via SQLAlchemy `URL.create`):
+
+```bash
+# secret: just the two credentials (instead of DATABASE_URL)
+kubectl -n conform create secret generic conform-secrets \
+  --from-literal=DB_USER='conform' \
+  --from-literal=DB_PASSWORD='...' \
+  --from-literal=S3_ACCESS_KEY_ID='...' --from-literal=S3_SECRET_ACCESS_KEY='...' \
+  --from-literal=OIDC_CLIENT_SECRET='...' \
+  --from-literal=SESSION_SECRET="$(openssl rand -hex 32)"
+```
+
+ConfigMap (non-secret): `DB_HOST` (required), `DB_PORT` (default 3306),
+`DB_NAME` (default `conform`), optionally `DB_DRIVERNAME` (default
+`mysql+pymysql`) / `DB_CHARSET` (default `utf8mb4`).
+
+**Precedence:** `DATABASE_URL` (if set) always wins; otherwise `DB_HOST` +
+`DB_USER` trigger the composed URL; otherwise the app falls back to local
+SQLite. So the two styles are mutually exclusive — pick one. The migration
+Job and the web/worker pods resolve the URL identically.
 
 ---
 

@@ -1,4 +1,3 @@
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -6,14 +5,16 @@ from sqlalchemy import pool
 
 from alembic import context
 
+from app.db import resolve_database_url
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# URL precedence: DATABASE_URL env (prod MariaDB / compose) → fallback to
-# the app's default SQLite file. Mirrors app/db.py resolve_url so `alembic
-# upgrade head` targets the same DB the app would open.
-_env_url = os.environ.get("DATABASE_URL")
+# URL precedence: DATABASE_URL → DB_* parts → app's default SQLite file.
+# Routed through app/db.resolve_database_url so `alembic upgrade head` targets
+# the exact same DB the app would open (incl. the Vault-friendly parts path).
+_env_url = resolve_database_url()
 if not _env_url:
     from app.storage import DB_PATH
     _env_url = f"sqlite:///{DB_PATH}"

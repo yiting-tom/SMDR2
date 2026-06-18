@@ -34,6 +34,79 @@ def test_default_path_follows_database_url(monkeypatch):
     assert db.resolve_url(DB_PATH).startswith("sqlite:///")
 
 
+# ---- DB URL from parts (Vault holds only username + password) ---------------
+def _clear_db_env(monkeypatch):
+    for k in ("DATABASE_URL", "DB_HOST", "DB_USER", "DB_PASSWORD",
+              "DB_PORT", "DB_NAME", "DB_DRIVERNAME", "DB_CHARSET"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def test_database_url_wins_over_parts(monkeypatch):
+    _clear_db_env(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "mysql+pymysql://x:y@h/db")
+    monkeypatch.setenv("DB_HOST", "ignored")
+    monkeypatch.setenv("DB_USER", "ignored")
+    assert db.resolve_database_url() == "mysql+pymysql://x:y@h/db"
+
+
+def test_compose_from_parts(monkeypatch):
+    _clear_db_env(monkeypatch)
+    monkeypatch.setenv("DB_HOST", "mariadb.prod.svc")
+    monkeypatch.setenv("DB_USER", "conform")
+    monkeypatch.setenv("DB_PASSWORD", "s3cret")
+    monkeypatch.setenv("DB_PORT", "3306")
+    monkeypatch.setenv("DB_NAME", "conform")
+    url = db.resolve_database_url()
+    assert url == (
+        "mysql+pymysql://conform:s3cret@mariadb.prod.svc:3306/"
+        "conform?charset=utf8mb4"
+    )
+
+
+def test_compose_defaults(monkeypatch):
+    # Only the mandatory host+user → driver/db/charset defaults, no port.
+    _clear_db_env(monkeypatch)
+    monkeypatch.setenv("DB_HOST", "h")
+    monkeypatch.setenv("DB_USER", "u")
+    url = db.resolve_database_url()
+    assert url == "mysql+pymysql://u@h/conform?charset=utf8mb4"
+
+
+def test_compose_password_special_chars_round_trip(monkeypatch):
+    from sqlalchemy.engine import make_url
+    _clear_db_env(monkeypatch)
+    pw = "p@ss:w/o#rd?x"
+    monkeypatch.setenv("DB_HOST", "h")
+    monkeypatch.setenv("DB_USER", "u")
+    monkeypatch.setenv("DB_PASSWORD", pw)
+    url = db.resolve_database_url()
+    # The raw password must NOT appear unescaped, but must parse back exactly.
+    assert pw not in url
+    assert make_url(url).password == pw
+
+
+def test_no_db_env_is_none_and_sqlite(monkeypatch):
+    from app.storage import DB_PATH
+    _clear_db_env(monkeypatch)
+    assert db.resolve_database_url() is None
+    assert db.resolve_url(DB_PATH).startswith("sqlite:///")
+
+
+def test_partial_parts_fall_back_to_sqlite(monkeypatch):
+    # DB_HOST without DB_USER must NOT compose (avoid a half-built URL).
+    _clear_db_env(monkeypatch)
+    monkeypatch.setenv("DB_HOST", "h")
+    assert db.resolve_database_url() is None
+
+
+def test_non_default_path_stays_sqlite_with_parts(tmp_path, monkeypatch):
+    # Even with full DB_* parts, a non-default store path stays SQLite.
+    _clear_db_env(monkeypatch)
+    monkeypatch.setenv("DB_HOST", "h")
+    monkeypatch.setenv("DB_USER", "u")
+    assert db.resolve_url(tmp_path / "iso.sqlite").startswith("sqlite:///")
+
+
 # ---- qmark translation --------------------------------------------------------
 def test_qmark_translation_skips_quoted_literals():
     # '?' inside literals survives; '%' is escaped even inside literals

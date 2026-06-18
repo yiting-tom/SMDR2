@@ -84,8 +84,10 @@ Namespace → ConfigMap → (Secret: Vault / kubectl create, 不進 repo)
 ```
 
 上線前要換的佔位:image registry、`*.example.internal` 三處、`BOOTSTRAP_ADMINS`。
-Secret 五把(DATABASE_URL / S3 兩把 / OIDC_CLIENT_SECRET / SESSION_SECRET)缺一不可,
-建法寫在 manifest 註解裡。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。
+Secret:S3 兩把 / OIDC_CLIENT_SECRET / SESSION_SECRET,再加 DB —— `DATABASE_URL`
+**或** `DB_USER`+`DB_PASSWORD`(Vault 只存帳密時用後者,host/port/db 放 ConfigMap,
+app 自動組 URL 並跳脫密碼;見 PRODUCTION_DEPLOY.md §2「DB from parts」)。建法寫在
+manifest 註解裡。oidc 切換演練:compose 即為 oidc 模式;裸跑/測試仍預設 bypass。
 
 ## CI/CD([`azure-pipelines.yml`](../azure-pipelines.yml))
 

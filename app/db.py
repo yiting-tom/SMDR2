@@ -5,11 +5,14 @@ Stores were written against the sqlite3 DBAPI (qmark params, sqlite3.Row,
 surface while routing through SQLAlchemy Core, so the per-store change is
 just the connect call — and the same store code runs on MariaDB.
 
-URL resolution (`resolve_url`):
+URL resolution (`resolve_url` → `resolve_database_url`):
 - An explicit non-default path (tests' tmp dirs) → sqlite file URL. Test
   isolation never silently lands in a shared MariaDB.
 - The default `DB_PATH` with `DATABASE_URL` set → `DATABASE_URL`
   (production MariaDB).
+- The default `DB_PATH` with `DB_HOST` + `DB_USER` set (no `DATABASE_URL`) →
+  a URL composed from the `DB_*` parts (for Vaults that store only
+  username + password; the password is URL-encoded by `URL.create`).
 - Otherwise → sqlite file at DB_PATH (current behaviour).
 
 Dialect handling lives HERE, not in stores:
@@ -44,12 +47,47 @@ class IntegrityError(Exception):
     """Engine-neutral integrity violation (UNIQUE/PK/CHECK/FK)."""
 
 
+def resolve_database_url() -> str | None:
+    """Resolve the production DB URL from the environment, or None for the
+    SQLite fallback. Precedence:
+
+    1. ``DATABASE_URL`` verbatim (compose / local / tests).
+    2. ``DB_HOST`` + ``DB_USER`` set → compose via SQLAlchemy ``URL.create``
+       from ``DB_USER`` / ``DB_PASSWORD`` (secret) and ``DB_HOST`` /
+       ``DB_PORT`` / ``DB_NAME`` / ``DB_DRIVERNAME`` / ``DB_CHARSET`` (config).
+       ``URL.create`` percent-encodes the password, so a secret store that
+       holds only username + password works without a hand-built — and easily
+       mis-escaped — connection string.
+    3. Neither → None (the caller falls back to SQLite).
+    """
+    url = os.environ.get("DATABASE_URL")
+    if url:
+        return url
+    host = os.environ.get("DB_HOST")
+    user = os.environ.get("DB_USER")
+    if not (host and user):
+        return None
+    from sqlalchemy.engine import URL
+    port = os.environ.get("DB_PORT")
+    composed = URL.create(
+        os.environ.get("DB_DRIVERNAME", "mysql+pymysql"),
+        username=user,
+        password=os.environ.get("DB_PASSWORD"),
+        host=host,
+        port=int(port) if port else None,
+        database=os.environ.get("DB_NAME", "conform"),
+        query={"charset": os.environ.get("DB_CHARSET", "utf8mb4")},
+    )
+    return composed.render_as_string(hide_password=False)
+
+
 def resolve_url(path: Path | str) -> str:
     """Map a store's path argument to a DB URL (see module docstring)."""
     from app.storage import DB_PATH
-    env_url = os.environ.get("DATABASE_URL")
-    if env_url and str(Path(path)) == str(DB_PATH):
-        return env_url
+    if str(Path(path)) == str(DB_PATH):
+        env_url = resolve_database_url()
+        if env_url:
+            return env_url
     return f"sqlite:///{Path(path)}"
 
 
