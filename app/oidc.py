@@ -21,11 +21,14 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
 from dataclasses import dataclass
 from urllib.parse import urlencode, urlsplit
+
+logger = logging.getLogger(__name__)
 
 STATE_COOKIE = "conform_oidc"
 STATE_TTL_SECONDS = 600.0
@@ -85,6 +88,9 @@ def _unsign(secret: bytes, value: str) -> bytes:
         raise OidcError("malformed state cookie") from e
     expect = hmac.new(secret, payload, hashlib.sha256).digest()
     if not hmac.compare_digest(mac, expect):
+        # Security signal: a forged/replayed state cookie. Reason only — the
+        # cookie value and secret never go to the logs.
+        logger.warning("OIDC state cookie signature mismatch")
         raise OidcError("state cookie signature mismatch")
     return payload
 
@@ -150,8 +156,10 @@ def exchange_code(
 
     blob = json.loads(_unsign(cfg.session_secret, state_cookie))
     if time.time() - blob.get("ts", 0) > STATE_TTL_SECONDS:
+        logger.warning("OIDC login state expired (> %.0fs)", STATE_TTL_SECONDS)
         raise OidcError("login took too long — retry")
     if not state or not hmac.compare_digest(state, blob.get("state", "")):
+        logger.warning("OIDC state mismatch on callback")
         raise OidcError("state mismatch")
 
     token_url = f"{cfg.internal_base}/protocol/openid-connect/token"
@@ -164,20 +172,34 @@ def exchange_code(
         "code_verifier": blob["verifier"],
     }, timeout=10.0)
     if resp.status_code != 200:
+        # Body snippet (never the token — this is the error body) so a
+        # login-broken incident has a server-side cause.
+        logger.error("OIDC token exchange failed: status=%s body=%s",
+                     resp.status_code, resp.text[:200])
         raise OidcError(f"token exchange failed: {resp.status_code} {resp.text[:200]}")
     tokens = resp.json()
 
-    jwks = httpx.get(
-        f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=10.0
-    ).json()
-    jwt = JsonWebToken(["RS256"])
-    claims = jwt.decode(
-        tokens["id_token"], jwks,
-        claims_options={
-            "iss": {"essential": True, "value": cfg.issuer},
-            "aud": {"essential": True, "value": cfg.client_id},
-            "exp": {"essential": True},
-        },
-    )
-    claims.validate()
+    # JWKS fetch + id_token verification can raise (network, JWKS rotation, bad
+    # signature, expired). Wrap so the callback returns a 400 instead of an
+    # uncaught 500, and log the reason (no token material).
+    try:
+        jwks = httpx.get(
+            f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=10.0
+        ).json()
+        jwt = JsonWebToken(["RS256"])
+        claims = jwt.decode(
+            tokens["id_token"], jwks,
+            claims_options={
+                "iss": {"essential": True, "value": cfg.issuer},
+                "aud": {"essential": True, "value": cfg.client_id},
+                "exp": {"essential": True},
+            },
+        )
+        claims.validate()
+    except OidcError:
+        raise
+    except Exception as e:
+        logger.error("OIDC id_token verification failed: %s: %s",
+                     type(e).__name__, e)
+        raise OidcError(f"id_token verification failed: {e}") from e
     return dict(claims), blob.get("next") or "/"

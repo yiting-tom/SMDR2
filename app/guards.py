@@ -16,10 +16,14 @@ the test suite encodes.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, HTTPException, Request
 
 from app import auth as _auth
 from app.auth import Identity, dev_resolve_grants, get_identity
+
+logger = logging.getLogger(__name__)
 
 _RANK = {"viewer": 1, "editor": 2, "admin": 3}
 
@@ -77,6 +81,14 @@ def _enforce(
     between the generic guards and the template guard."""
     role = effective_role(ident, product_id)
     if role is None or _RANK[role] < _RANK[min_role]:
+        # Authz denials are NOT written to audit_log (which only records
+        # successful mutations), so without this line a denied privileged
+        # action leaves no trace anywhere.
+        logger.warning(
+            "authz denied: user=%s needs %s on %s (had role=%s)",
+            ident.userid, min_role,
+            product_id or "system", role,
+        )
         raise HTTPException(
             status_code=403,
             detail=f"requires {min_role} on this "
@@ -85,6 +97,10 @@ def _enforce(
     if with_lock and product_id is not None and not ident.is_bypass:
         holder = _store().lock_holder(product_id)
         if holder != ident.userid:
+            logger.info(
+                "edit-lock denied: user=%s product=%s held_by=%s",
+                ident.userid, product_id, holder,
+            )
             raise HTTPException(
                 status_code=423,
                 detail={"error": "edit lock required", "held_by": holder},

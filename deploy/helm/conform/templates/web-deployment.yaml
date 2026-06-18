@@ -49,12 +49,16 @@ spec:
             {{- include "conform.envFrom" . | nindent 12 }}
           resources:
             {{- toYaml .Values.web.resources | nindent 12 }}
-          # /healthz is auth-exempt in every mode — /api/* would 401 the
-          # kubelet under oidc and the rollout would hang.
+          # Both are auth-exempt (non-/api). Readiness uses /readyz, which
+          # pings DB / MinIO / Keycloak — a pod that can't reach a dependency
+          # is pulled from the Service so it stops taking traffic. Liveness
+          # stays on /healthz (pure liveness): a dependency blip must NOT
+          # restart the pod (that would be a restart storm), only un-ready it.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8000 }
+            httpGet: { path: /readyz, port: 8000 }
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
             httpGet: { path: /healthz, port: 8000 }
             initialDelaySeconds: 30

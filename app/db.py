@@ -32,6 +32,7 @@ reconnected and the statement retried once.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
@@ -41,6 +42,8 @@ from typing import Any, Iterator, Sequence
 import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy import exc as sa_exc
+
+logger = logging.getLogger(__name__)
 
 
 class IntegrityError(Exception):
@@ -88,6 +91,15 @@ def resolve_url(path: Path | str) -> str:
         env_url = resolve_database_url()
         if env_url:
             return env_url
+        # The app's default DB landed on SQLite because no DB env is set. Fine
+        # for bypass/local; in any other mode this is almost certainly a
+        # misconfig (per-pod, ephemeral SQLite breaks multi-replica) — say so.
+        if os.environ.get("SMDR2_AUTH_MODE", "bypass") != "bypass":
+            logger.warning(
+                "DB resolved to local SQLite fallback (no DATABASE_URL / "
+                "DB_HOST set) while not in bypass mode — NOT safe for "
+                "multi-replica; set the DB config",
+            )
     return f"sqlite:///{Path(path)}"
 
 
@@ -119,6 +131,15 @@ def _engine_for(url: str) -> sqlalchemy.Engine:
                     isolation_level="READ COMMITTED",
                 )
             _engines[url] = eng
+            # One line per backend so prod logs show what each store bound to.
+            # Render host/database only — URL.render_as_string default hides
+            # the password (so it never reaches the logs).
+            try:
+                safe = sqlalchemy.make_url(url).render_as_string(
+                    hide_password=True)
+            except Exception:
+                safe = "sqlite" if url.startswith("sqlite") else "<db>"
+            logger.info("DB engine created: %s", safe)
         return eng
 
 
@@ -275,6 +296,10 @@ class Connection:
             # (MariaDB wait_timeout) — only outside explicit transactions.
             if not (e.connection_invalidated and self._tx is None):
                 raise
+            logger.warning(
+                "DB connection invalidated (%s); reconnecting and retrying "
+                "statement", type(e.orig).__name__ if e.orig else type(e).__name__,
+            )
             self._conn = self._engine.connect()
             cur = self._raw_execute(sql, params)
         if self._tx is None:

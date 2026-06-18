@@ -159,8 +159,18 @@ kubectl -n conform get pods -o wide          # webs should land on different nod
 kubectl -n conform rollout status deploy/conform-web
 kubectl -n conform rollout status deploy/conform-worker
 
-# Health endpoint (auth-exempt)
+# Liveness (auth-exempt, touches nothing)
 kubectl -n conform exec deploy/conform-web -- wget -qO- http://localhost:8000/healthz
+
+# Readiness — pings DB / MinIO / Keycloak; 200 = all reachable, 503 = one down.
+# This is the k8s readinessProbe target; hit it to see per-dependency status.
+kubectl -n conform exec deploy/conform-web -- wget -qO- http://localhost:8000/readyz
+
+# Startup log: each pod logs a connectivity summary on boot —
+#   "connectivity db: ok (...)", "connectivity blob: ...", "connectivity oidc: ..."
+# plus "startup config OK (...)". A failing dependency logs ERROR here and the
+# pod stays NotReady (readiness on /readyz) until it recovers.
+kubectl -n conform logs deploy/conform-web | grep -E "connectivity|startup config"
 
 # End-to-end: log in via the ingress host, confirm a BOOTSTRAP_ADMINS user
 # lands as admin, upload a small DXF, run a match + rule check.
@@ -224,7 +234,7 @@ exactly why §7 mandates expand/contract.
 |---|---|---|
 | Pods `CrashLoopBackOff`, log `Missing required configuration: …` | A `conform-secrets` key or required `config` var missing (fail-fast). | Complete the secret / values; `helm upgrade`. |
 | Release aborts at the hook; `conform-migrate` failed | DB unreachable / bad `DATABASE_URL` / migration error. | `kubectl logs job/conform-migrate`; fix DB/creds; re-run `helm upgrade`. |
-| Rollout hangs, web never Ready | Probe hitting an authed path, or app not up. | Probes use `/healthz` (auth-exempt) — confirm; check web logs. |
+| Rollout hangs, web never Ready | Readiness `/readyz` is 503 — a dependency (DB / MinIO / Keycloak) is unreachable, or the app isn't up. | `wget -qO- …/readyz` for the failing service; grep the pod's `connectivity` startup logs; fix the dependency / its config. Both probes are auth-exempt (non-`/api`). |
 | Login loops / `iss` mismatch | `OIDC_ISSUER` ≠ the URL Keycloak mints, or redirect URI not registered. | Align `OIDC_ISSUER` with the public host; register `https://<host>/auth/callback` in Keycloak. |
 | Logout returns to a logged-in app | Post-logout redirect URI not registered in Keycloak. | Register `https://<host>/*` (or `+`) as a valid post-logout redirect URI. |
 | Uploads fail at ~200 MB | Ingress body cap. | `ingress.annotations` already sets `proxy-body-size: 200m`; keep it ≥ `SMDR2_MAX_UPLOAD_MB`. |

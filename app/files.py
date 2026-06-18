@@ -20,6 +20,7 @@ data/uploads/{file_id}.dxf (shared) and data/parsed/{version_id}/{file_id}.json
 from __future__ import annotations
 
 import json as _json
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from pathlib import Path
 from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
+
+logger = logging.getLogger(__name__)
 
 # Lifecycle states. The visible-to-user pipeline is:
 #   discovering_layers → awaiting_layers → preprocessing → ready_to_match
@@ -568,6 +571,12 @@ def _row_to_record(row: db.Row) -> FileRecord:
             if isinstance(parsed, list):
                 selected_layers = [str(x) for x in parsed]
         except (ValueError, TypeError):
+            # DB JSON should never be malformed; if it is, "all layers" is a
+            # silent, hard-to-diagnose behaviour change — flag it.
+            logger.warning(
+                "corrupt JSON in files.selected_layers for file=%s; "
+                "treating as null (all layers)", _get("file_id"),
+            )
             selected_layers = None
 
     def _decode_rect(raw: object) -> dict | None:
@@ -576,6 +585,8 @@ def _row_to_record(row: db.Row) -> FileRecord:
         try:
             parsed = _json.loads(raw)
         except (ValueError, TypeError):
+            logger.warning("corrupt JSON in a files side-region rect for "
+                           "file=%s; treating as null", _get("file_id"))
             return None
         if not isinstance(parsed, dict):
             return None
@@ -597,6 +608,8 @@ def _row_to_record(row: db.Row) -> FileRecord:
             if isinstance(parsed_notes, dict):
                 dxf_recover_notes = parsed_notes
         except (ValueError, TypeError):
+            logger.warning("corrupt JSON in files.dxf_recover_notes for "
+                           "file=%s; treating as null", _get("file_id"))
             dxf_recover_notes = None
 
     return FileRecord(

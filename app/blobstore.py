@@ -28,6 +28,7 @@ Contract notes:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -38,8 +39,11 @@ from typing import Any, BinaryIO, Iterable, Iterator, Protocol
 
 from app.storage import DATA_DIR
 
+logger = logging.getLogger(__name__)
+
 
 class BlobStore(Protocol):
+    def ping(self) -> None: ...  # connectivity probe; raises if unreachable
     def put_bytes(self, key: str, data: bytes) -> None: ...
     def get_bytes(self, key: str) -> bytes: ...
     def put_text(self, key: str, text: str) -> None: ...
@@ -60,6 +64,13 @@ class LocalBlobStore:
 
     def __init__(self, root: Path | str = DATA_DIR) -> None:
         self.root = Path(root)
+
+    def ping(self) -> None:
+        """Connectivity probe: the root dir is creatable and writable."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        probe = self.root / ".readyz"
+        probe.write_bytes(b"")
+        probe.unlink(missing_ok=True)
 
     def _p(self, key: str) -> Path:
         return self.root / key
@@ -148,10 +159,17 @@ class S3BlobStore:
             config=Config(signature_version="s3v4"),
         )
 
+    def ping(self) -> None:
+        """Connectivity probe: the bucket is reachable + we can see it."""
+        self._client.head_bucket(Bucket=self.bucket)
+
     def _missing(self, e: Exception, key: str) -> FileNotFoundError | None:
         code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
         if code in ("NoSuchKey", "404", "NotFound"):
             return FileNotFoundError(key)
+        # A genuine S3 error (auth, network, bucket policy …) — the caller will
+        # re-raise it; log it here so the opaque boto traceback gains context.
+        logger.warning("S3 error code=%r for key=%s (re-raising)", code, key)
         return None
 
     def put_bytes(self, key: str, data: bytes) -> None:
@@ -300,8 +318,16 @@ def get_blobstore() -> BlobStore:
                     access_key=access_key,
                     secret_key=secret_key,
                 )
+                logger.info("blob store: S3 endpoint=%s bucket=%s",
+                            endpoint, bucket)
             else:
                 _blobstore = LocalBlobStore()
+                # The worst silent prod fallback: per-pod local disk diverges
+                # across replicas ("files vanish between pods"). Be loud.
+                logger.warning(
+                    "blob store: S3_ENDPOINT_URL unset — using local disk "
+                    "(%s); NOT safe for multi-replica", DATA_DIR,
+                )
         return _blobstore
 
 

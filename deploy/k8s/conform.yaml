@@ -127,12 +127,15 @@ spec:
             # Viewer loads of huge parsed JSON can hold several hundred MB
             # (lru=4) — cap generously, monitor after launch.
             limits: {cpu: "2", memory: 4Gi}
-          # /healthz is auth-exempt in every mode — /api/* would 401 the
-          # kubelet under SMDR2_AUTH_MODE=oidc and the rollout would hang.
+          # Both auth-exempt (non-/api). Readiness = /readyz (pings DB / MinIO /
+          # Keycloak → un-ready a pod that can't reach a dependency, so it stops
+          # taking traffic). Liveness = /healthz (pure) — a dependency blip must
+          # not restart the pod, only un-ready it.
           readinessProbe:
-            httpGet: {path: /healthz, port: 8000}
+            httpGet: {path: /readyz, port: 8000}
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
             httpGet: {path: /healthz, port: 8000}
             initialDelaySeconds: 30

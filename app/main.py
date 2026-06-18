@@ -119,6 +119,8 @@ def _load_json_or_http(path: str | Path, *, kind: str) -> dict:
     try:
         return get_blobstore().get_json(path)
     except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("artifact unreadable: kind=%s path=%s: %s",
+                       kind, path, exc)
         raise HTTPException(
             status_code=400,
             detail=f"{kind} file is unreadable/corrupt: {path}: {exc}",
@@ -314,21 +316,33 @@ def validate_startup_config() -> None:
             if not os.environ.get(var):
                 missing.append(var)
     if missing:
+        logger.error("startup config invalid — missing: %s", ", ".join(missing))
         raise RuntimeError(
             "Missing required configuration (set via environment / secrets): "
             + ", ".join(missing)
         )
+    logger.info(
+        "startup config OK (auth_mode=%s, s3=%s)",
+        os.environ.get("SMDR2_AUTH_MODE", "bypass"),
+        "on" if os.environ.get("S3_ENDPOINT_URL") else "local",
+    )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     validate_startup_config()
     _assert_api_routes_guarded(_app)
+    # Boot-time connectivity summary: one line per external dependency
+    # (DB / blob / Keycloak). Non-fatal — logs the state, never blocks boot.
+    from app.connectivity import log_startup_connectivity
+    log_startup_connectivity()
     # Idempotent BOOTSTRAP_ADMINS seeding (specs/authorization) — the only
     # way the first admin comes into existence.
     admins = [u for u in os.environ.get("BOOTSTRAP_ADMINS", "").split(",") if u.strip()]
     if admins:
-        AUTH_STORE.bootstrap_admins(admins)
+        created = AUTH_STORE.bootstrap_admins(admins)
+        logger.info("BOOTSTRAP_ADMINS: %d new admin grant(s) from %s",
+                    created, admins)
     _ensure_test_dxf_registered()
     # Drain jobs persisted across a restart (the embedded worker otherwise
     # starts lazily on first submit; queued rows from a previous process
@@ -396,6 +410,8 @@ async def auth_callback(request: Request, code: str = "", state: str = ""):
         raise HTTPException(status_code=400, detail=str(exc))
     user, first_login = AUTH_STORE.upsert_user_from_claims(dict(claims))
     token, csrf = AUTH_STORE.create_session(user.userid)
+    logger.info("login ok: userid=%s first_login=%s source=oidc",
+                user.userid, first_login)
     r = RedirectResponse(next_path, status_code=302)
     r.set_cookie(
         SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -428,8 +444,11 @@ async def auth_logout(request: Request):
         body["end_session_url"] = oidc_mod.end_session_url(
             oidc_mod.OidcConfig.from_env(),
         )
-    except oidc_mod.OidcError:
-        pass
+    except oidc_mod.OidcError as exc:
+        # Local session is gone but we couldn't hand back the IdP end-session
+        # URL — the Keycloak SSO session survives ("appears never logged out").
+        logger.warning("logout: could not build IdP end-session URL "
+                       "(OIDC unconfigured?): %s", exc)
     r = JSONResponse(body)
     r.delete_cookie(SESSION_COOKIE)
     r.delete_cookie(CSRF_COOKIE)
@@ -438,9 +457,22 @@ async def auth_logout(request: Request):
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    """Liveness/readiness — exempt from auth in every mode
-    (specs/auth-session: internal endpoint exemption)."""
+    """Liveness — exempt from auth in every mode (specs/auth-session:
+    internal endpoint exemption). Pure: touches no dependency."""
     return {"ok": True}
+
+
+@app.get("/readyz")
+async def readyz() -> JSONResponse:
+    """Readiness — pings the external dependencies (DB / blob / Keycloak)
+    and returns 200 when all pass, else 503 with the per-service detail.
+    Auth-exempt (non-`/api`). Use this for the k8s readiness probe;
+    `/healthz` stays liveness-only."""
+    from app.connectivity import check_dependencies
+    checks = check_dependencies()
+    ok = all(c["ok"] for c in checks.values())
+    return JSONResponse({"ok": ok, "checks": checks},
+                        status_code=200 if ok else 503)
 
 
 @app.get("/api/me")

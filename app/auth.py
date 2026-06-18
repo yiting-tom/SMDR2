@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -38,6 +39,8 @@ from pathlib import Path
 from app import db
 from app.dbschema import ensure_versioned_schema
 from app.storage import DB_PATH
+
+logger = logging.getLogger(__name__)
 
 ROLES = ("admin", "editor", "viewer")
 SCOPE_TYPES = ("global", "customer", "product")
@@ -754,6 +757,11 @@ def get_identity(request=None) -> Identity:
         raise HTTPException(status_code=401, detail="session expired")
     if request is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
         if request.headers.get("X-CSRF-Token") != sess["csrf_token"]:
+            path = getattr(getattr(request, "url", None), "path", "?")
+            logger.warning(
+                "CSRF token mismatch: user=%s method=%s path=%s",
+                sess["userid"], request.method, path,
+            )
             raise HTTPException(status_code=403, detail="CSRF token mismatch")
     return Identity(
         userid=sess["userid"], deptid=sess["deptid"],
