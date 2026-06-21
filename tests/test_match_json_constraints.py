@@ -740,6 +740,13 @@ def test_preprocess_prematch_clean_when_radii_differ(
     assert bga_set.isdisjoint(fid_set)
     assert pm["total"] == len(grid_handles) + len(fid_handles)
 
+    # The snapshot is stamped with the library revision it was computed
+    # against, so the prematch endpoint can detect later staleness.
+    assert pm["library_revision"] == LIBRARIES.store.current_revision(
+        version.library_id
+    )
+    assert pm["library_revision"] > 0  # two add_template_for_file calls bumped it
+
 
 # ---- Regression: Save Match refreshes the stale pre-match snapshot ----------
 
@@ -778,6 +785,11 @@ def test_save_match_worker_refreshes_prematch_snapshot(monkeypatch, tmp_path):
     assert refreshed["total"] == 2
     assert "C4Ball" not in refreshed["by_class"]
     assert "BGABall" not in refreshed["by_class"]
+    # The refreshed snapshot is stamped, so the prematch endpoint reads it as
+    # fresh (not stale) — no redundant live scan on the next viewer load.
+    assert refreshed["library_revision"] == LIBRARIES.store.current_revision(
+        version.library_id
+    )
 
 
 # ---- Contained-match suppression -------------------------------------------

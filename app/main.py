@@ -2096,11 +2096,20 @@ def scan_all(file_id: str, version_id: str) -> dict:  # sync → threadpool
 @app.get("/api/files/{file_id}/prematch", dependencies=[Depends(viewer_guard)])
 async def prematch(file_id: str, version_id: str) -> dict:
     _resolve_file(version_id, file_id)
+    v = _resolve_version(version_id)
     pk = prematch_key(version_id, file_id)
     if not get_blobstore().exists(pk):
-        # The worker didn't get to this step yet — return empty.
+        # The worker didn't get to this step yet — return empty + stale so the
+        # viewer falls through to a live scan.
         return {"by_class": {}, "total": 0, "stale": True}
-    return _load_json_or_http(pk, kind="prematch")
+    data = _load_json_or_http(pk, kind="prematch")
+    # Stale when the snapshot was computed against an older library revision
+    # (templates added/removed/reclassed since preprocess) or carries no stamp
+    # (written before this signal existed). The viewer self-heals via scan-all.
+    stamped = data.get("library_revision")
+    current = LIBRARIES.store.current_revision(v.library_id)
+    data["stale"] = stamped is None or stamped != current
+    return data
 
 
 # ---- Match JSON ----------------------------------------------------------

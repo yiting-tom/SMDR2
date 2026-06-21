@@ -212,6 +212,47 @@ def test_phase2_filters_parsed_and_prematch(tmp_path):
             client.delete(f"/api/products/{pid}")
 
 
+def test_prematch_reports_staleness_after_library_change(tmp_path):
+    """`GET /prematch` reports `stale: false` for a snapshot computed against
+    the current library, and `stale: true` once a template is committed after
+    preprocess (fix-stale-prematch-cache)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.library import LIBRARIES, Template
+    from app.versions import VERSION_STORE
+
+    dxf = _build_synth_dxf(tmp_path)
+    with TestClient(app) as client:
+        pid, vid = _new_version(client, "t-prematch-stale")
+        try:
+            fid = _upload(client, vid, dxf)["file_id"]
+            _poll_status(client, vid, fid, "awaiting_layers")
+            r = client.post(
+                f"/api/files/{fid}/layers",
+                json={"layers": ["BD", "SMD"]},
+                params={"version_id": vid},
+            )
+            assert r.status_code < 400, r.text
+            _poll_status(client, vid, fid, "ready_to_match")
+
+            # Fresh: snapshot was stamped with the current library revision.
+            r = client.get(f"/api/files/{fid}/prematch", params={"version_id": vid})
+            assert r.status_code < 400, r.text
+            assert r.json()["stale"] is False
+
+            # Commit a template after preprocess → library revision bumps →
+            # the same snapshot is now stale.
+            lib_id = VERSION_STORE.get(vid).library_id
+            LIBRARIES.get(lib_id).add_template_for_file(
+                Template.from_entities("SMD-2T", [[(0.0, 0.0), (1.0, 0.0)]])
+            )
+            r = client.get(f"/api/files/{fid}/prematch", params={"version_id": vid})
+            assert r.status_code < 400, r.text
+            assert r.json()["stale"] is True
+        finally:
+            client.delete(f"/api/products/{pid}")
+
+
 def test_confirm_rejects_empty_and_unknown_layers(tmp_path):
     from fastapi.testclient import TestClient
     from app.main import app

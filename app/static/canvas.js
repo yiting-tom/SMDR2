@@ -3380,11 +3380,32 @@ function escapeHtml(s) {
 }
 
 // ---- Auto-load pre-match overlay ----------------------------------------
+// The auto-shown overlay reads the cached pre-match snapshot. That snapshot is
+// computed once at preprocess time and only kept fresh on Save Match, so it can
+// be stale (library grew from other files) or not-yet-written. The endpoint
+// reports this via `stale`. When the snapshot is unusable — fetch failed,
+// `stale`, or empty — we fall through to a single live Scan All (the same path
+// as a manual Scan All) so the overlay is complete on arrival instead of
+// silently empty. A fresh, non-empty snapshot renders directly with no scan.
 async function loadPrematch() {
+  // Only self-heal once a file has parsed data; not-ready files have no
+  // scan-all to fall through to. loadPrematch is reached from the
+  // primitives-loaded path, so this is normally already satisfied.
+  const ready =
+    currentFileInfo &&
+    currentFileInfo.status !== "discovering_layers" &&
+    currentFileInfo.status !== "awaiting_layers";
+
+  let data = null;
   const res = await fetch(API.prematch());
-  if (!res.ok) return;
-  const data = await res.json();
-  if (!data.total) return;
+  if (res.ok) data = await res.json();
+
+  if (!data || data.stale || !data.total) {
+    // Stale / missing / empty snapshot → live scan once (if ready).
+    if (ready) await runScanAll();
+    return;
+  }
+
   const byHandle = new Map();
   const byClass = {};
   for (const [cls, handles] of Object.entries(data.by_class)) {

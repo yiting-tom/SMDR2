@@ -59,6 +59,44 @@ def test_add_template_persists(tmp_db):
     assert lib2.templates_of("SMD-2T")[0].id == t.id
 
 
+def test_revision_bumps_on_every_result_affecting_write(tmp_db):
+    """The library `revision` strictly increases on insert / delete / reclass /
+    strategy-change, and a pure read leaves it unchanged (pre-match staleness
+    signal — see fix-stale-prematch-cache)."""
+    store = Store(tmp_db)
+    store.create_library(LIB_ID, "Test Library")
+    # Strategy bump needs the class row to exist (rowcount > 0 to count).
+    store.upsert_class(LIB_ID, "SMD-2T")
+    store.upsert_class(LIB_ID, "SMD-3T")
+    t = _make_template("SMD-2T")
+
+    r0 = store.current_revision(LIB_ID)
+    store.insert_template(LIB_ID, t)
+    r1 = store.current_revision(LIB_ID)
+    assert r1 > r0, "insert_template must bump revision"
+
+    # Pure read does not bump.
+    store.load_library(LIB_ID)
+    assert store.current_revision(LIB_ID) == r1
+
+    store.update_template_class(t.id, "SMD-3T")
+    r2 = store.current_revision(LIB_ID)
+    assert r2 > r1, "update_template_class must bump revision"
+
+    assert store.update_class_strategy(LIB_ID, "SMD-3T", "signature", 0.5) is True
+    r3 = store.current_revision(LIB_ID)
+    assert r3 > r2, "update_class_strategy must bump revision"
+
+    assert store.delete_template(t.id) is True
+    r4 = store.current_revision(LIB_ID)
+    assert r4 > r3, "delete_template must bump revision"
+
+
+def test_current_revision_unknown_library_is_zero(tmp_db):
+    store = Store(tmp_db)
+    assert store.current_revision("no-such-library") == 0
+
+
 def test_delete_template(tmp_db):
     lib = _lib(tmp_db)
     t = _make_template("SMD-2T")

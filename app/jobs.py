@@ -196,6 +196,12 @@ def _preprocess_worker(
     from app.library import CLASS_JSON_KEY
 
     store = Store(DB_PATH)
+    # Capture the revision BEFORE loading templates. If a template is committed
+    # while we scan, the snapshot reflects the pre-load set, so stamping the
+    # pre-load revision keeps it < current → the endpoint reports stale and the
+    # viewer self-heals. Reading it after the scan would stamp the newer
+    # revision against the older snapshot and falsely report fresh.
+    library_revision = store.current_revision(library_id)
     classes, configs_by_class, templates_by_class = store.load_library(library_id)
     out: dict[str, list[list[str]]] = {}
     # Iterate the `classes` list (deterministic order) and look up
@@ -243,9 +249,13 @@ def _preprocess_worker(
         k: sorted(v) for k, v in by_class_sets.items()
     }
 
+    # Stamp the library revision this snapshot was computed against (captured
+    # before load, see above) so the prematch endpoint can detect staleness
+    # when the library changes later (see dxf-pipeline / viewer-ui).
     blobs.put_json(prematch_dst, {
         "by_class": by_class,
         "total": sum(len(v) for v in by_class.values()),
+        "library_revision": library_revision,
     })
 
     # 5. Discard the transient primitives cache — Phase 2 succeeded.
@@ -891,6 +901,10 @@ def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any
         raise RuntimeError(
             f"library {version.library_id!r} not registered in worker"
         )
+    # Captured before load so a concurrent commit during the scan stamps the
+    # pre-load revision (< current) → endpoint reports stale → self-heal, never
+    # a falsely-fresh snapshot. Mirrors _preprocess_worker.
+    library_revision = store.current_revision(version.library_id)
     classes, configs_by_class, templates_by_class = store.load_library(
         version.library_id
     )
@@ -994,6 +1008,7 @@ def _save_match_worker(version_id: str, file_id: str, dst: str) -> dict[str, Any
         blobs.put_json(prematch_key(version_id, file_id), {
             "by_class": pm_by_class,
             "total": sum(len(v) for v in pm_by_class.values()),
+            "library_revision": library_revision,
         })
     except Exception:
         logger.warning(

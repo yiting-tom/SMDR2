@@ -386,7 +386,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS libraries (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    created_at  REAL NOT NULL
+    created_at  REAL NOT NULL,
+    revision    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS classes (
@@ -444,6 +445,16 @@ class Store:
         remains is rename/purge/seed/re-rank maintenance that must track
         code-level class-list changes across boots.
         """
+        # Additive `libraries.revision` column for DBs created before the
+        # pre-match staleness signal existed. CREATE TABLE IF NOT EXISTS won't
+        # add it to an existing table, so ALTER once (idempotent via column
+        # probe). Fresh DBs already get it from SCHEMA.
+        cols = [r[1] for r in self.conn.execute("PRAGMA table_info(libraries)")]
+        if "revision" not in cols:
+            self.conn.execute(
+                "ALTER TABLE libraries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
+            )
+
         # Legacy snake_case class names → new canonical IDs. Rewrite both the
         # `classes` and `templates` tables in place. UPDATE OR IGNORE skips
         # rows that would collide with an already-existing (library_id, NEW)
@@ -543,6 +554,26 @@ class Store:
                 (library_id,),
             ).fetchone()
 
+    # ---- pre-match staleness signal --------------------------------------
+    def _bump_revision(self, library_id: str) -> None:
+        """Increment a library's revision. Call inside an open write block,
+        from every mutation that can change scan-all / pre-match results, so a
+        stamped pre-match snapshot can be detected as stale (see dxf-pipeline /
+        viewer-ui). Only inequality matters; the absolute value is meaningless."""
+        self.conn.execute(
+            "UPDATE libraries SET revision = revision + 1 WHERE id = ?",
+            (library_id,),
+        )
+
+    def current_revision(self, library_id: str) -> int:
+        """Current revision for a library; 0 for an unknown/empty library."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT revision FROM libraries WHERE id = ?",
+                (library_id,),
+            ).fetchone()
+            return int(row["revision"]) if row else 0
+
     # ---- class / template writes (library-scoped) ------------------------
     def upsert_class(self, library_id: str, name: str) -> None:
         with self.lock, self.conn:
@@ -567,6 +598,8 @@ class Store:
                 "WHERE library_id = ? AND name = ?",
                 (strategy, bbox_ratio, library_id, name),
             )
+            if cur.rowcount > 0:
+                self._bump_revision(library_id)
             return cur.rowcount > 0
 
     def insert_template(self, library_id: str, t: Template) -> None:
@@ -585,18 +618,29 @@ class Store:
                     json.dumps(t.entity_kinds, separators=(",", ":")),
                 ),
             )
+            self._bump_revision(library_id)
 
     def delete_template(self, template_id: str) -> bool:
         with self.lock, self.conn:
+            row = self.conn.execute(
+                "SELECT library_id FROM templates WHERE id = ?", (template_id,)
+            ).fetchone()
             cur = self.conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+            if cur.rowcount > 0 and row:
+                self._bump_revision(row["library_id"])
             return cur.rowcount > 0
 
     def update_template_class(self, template_id: str, new_class: str) -> bool:
         with self.lock, self.conn:
+            row = self.conn.execute(
+                "SELECT library_id FROM templates WHERE id = ?", (template_id,)
+            ).fetchone()
             cur = self.conn.execute(
                 "UPDATE templates SET class_name = ? WHERE id = ?",
                 (new_class, template_id),
             )
+            if cur.rowcount > 0 and row:
+                self._bump_revision(row["library_id"])
             return cur.rowcount > 0
 
     def load_library(
@@ -675,6 +719,11 @@ class Library:
             if c not in self._templates:
                 self.add_class(c)
         self._warn_on_duplicate_signatures()
+
+    def current_revision(self) -> int:
+        """This library's current persisted revision (see Store.current_revision).
+        Used to stamp the pre-match snapshot and detect staleness on read."""
+        return self.store.current_revision(self.library_id)
 
     def _warn_on_duplicate_signatures(self) -> None:
         """Surface pre-dedup duplicate rows at startup.
