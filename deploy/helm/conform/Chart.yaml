@@ -1,0 +1,13 @@
+apiVersion: v2
+name: conform
+description: >-
+  尋形 Conform — DXF pattern-matching + DRC web app. Stateless web replicas
+  (sessions/jobs in MariaDB, blobs in MinIO) plus a separate job-worker
+  Deployment. Mirrors deploy/k8s/conform.yaml; MariaDB / MinIO / Keycloak
+  are IT-managed and referenced by env, not deployed by this chart.
+type: application
+# Chart version — bump on chart/template changes.
+version: 0.1.0
+# Tracks the app; the actual image tag is values.image.tag (pin to a commit
+# SHA in production, never "latest").
+appVersion: "1.0.0"

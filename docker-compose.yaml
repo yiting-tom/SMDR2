@@ -1,0 +1,162 @@
+# Conform (SMDR2) local dev environment — mirrors the company k8s target:
+#   nginx (round-robin LB, stands in for the k8s ingress/service)
+#     ├── web-1 ┐  two app replicas, REQUIRED: company k8s mandates 2 pods,
+#     └── web-2 ┘  multi-replica bugs only surface behind a real LB
+#   mariadb   (stands in for the IT-managed 3-replica MariaDB)
+#   minio     (stands in for the IT-managed MinIO; access via boto3 / S3 API)
+#   keycloak  (stands in for the company IdP; realm import fakes the corporate
+#              JWT claims: preferred_username, deptid, deptname, company, ...)
+#
+# Phase status: the app currently reads only SMDR2_* vars. DATABASE_URL /
+# S3_* / OIDC_* / SESSION_* below are the agreed config contract that
+# Phases 1–3 wire up — values are pre-plumbed so each phase only has to
+# consume them. Moving to k8s = swap these env values (prod secrets via
+# Vault), nothing else.
+#
+# Up:    docker compose up --build
+# App:   http://localhost:8080   (through the LB — always test through here)
+# KC:    http://localhost:8081   (admin / admin)
+# MinIO: http://localhost:9001   (dev-access-key / dev-secret-key)
+
+name: conform-dev
+
+x-web: &web
+  build: .
+  restart: unless-stopped
+  environment: &web-env
+    # ⚠️ DEV PLACEHOLDERS ONLY. Every secret below (DB password, S3 keys,
+    # OIDC_CLIENT_SECRET, SESSION_SECRET) is a throwaway for the local mirror.
+    # Production MUST inject real values via Vault/k8s secrets — never copy
+    # these. validate_startup_config() (app/main.py) hard-fails boot if the
+    # oidc/S3 secret groups are missing, so prod cannot fall back to a default.
+    # ---- consumed by the app today ----
+    SMDR2_DATA_DIR: /data
+    SMDR2_MAX_WORKERS: "2"
+    SMDR2_MAX_UPLOAD_MB: "200"
+    # ---- Phase 1: MariaDB ----
+    DATABASE_URL: mysql+pymysql://conform:dev@mariadb:3306/conform?charset=utf8mb4
+    # ---- Phase 1: MinIO via boto3 (company rule: S3 API only) ----
+    S3_ENDPOINT_URL: http://minio:9000
+    S3_ACCESS_KEY_ID: dev-access-key
+    S3_SECRET_ACCESS_KEY: dev-secret-key
+    S3_BUCKET: conform
+    # ---- Phase 3: Keycloak BFF ----
+    # ISSUER = what tokens carry (browser-facing URL); INTERNAL_BASE = how the
+    # backend reaches Keycloak inside the network (token/JWKS calls). Keycloak
+    # is started with KC_HOSTNAME + dynamic backchannel so both stay valid —
+    # same split applies in k8s (public ingress URL vs cluster-internal service).
+    OIDC_ISSUER: http://localhost:8081/realms/conform
+    OIDC_INTERNAL_BASE: http://keycloak:8080/realms/conform
+    OIDC_CLIENT_ID: conform-web
+    OIDC_CLIENT_SECRET: dev-client-secret
+    OIDC_REDIRECT_URI: http://localhost:8080/auth/callback
+    SESSION_SECRET: dev-session-secret-change-me
+    COOKIE_SECURE: "false"
+    BOOTSTRAP_ADMINS: admin1
+    # Webs only enqueue; the worker service claims and executes (Phase 2).
+    SMDR2_EMBEDDED_WORKER: "0"
+    # Phase 3: real Keycloak login in the dev mirror (code default stays
+    # bypass for tests / bare local runs).
+    SMDR2_AUTH_MODE: oidc
+  volumes:
+    # Shared scratch so both replicas see the same SQLite + data/ for now.
+    # Phase 1 moves blobs to MinIO and the DB to MariaDB; this volume then
+    # shrinks to per-request scratch and stops being shared.
+    - appdata:/data
+  depends_on:
+    mariadb:
+      condition: service_healthy
+    minio-init:
+      condition: service_completed_successfully
+    keycloak:
+      condition: service_started
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - web-1
+      - web-2
+
+  web-1:
+    <<: *web
+
+  web-2:
+    <<: *web
+
+  worker:
+    <<: *web
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.worker_loop"]
+
+  mariadb:
+    image: mariadb:11.4
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_ROOT_PASSWORD: dev
+      MARIADB_DATABASE: conform
+      MARIADB_USER: conform
+      MARIADB_PASSWORD: dev
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: dev-access-key
+      MINIO_ROOT_PASSWORD: dev-secret-key
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 dev-access-key dev-secret-key &&
+      mc mb --ignore-existing local/conform
+      "
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+      # Issuer pinned to the browser-facing URL; dynamic backchannel lets the
+      # backend call http://keycloak:8080 without breaking iss validation.
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./deploy/keycloak/realm-conform.json:/opt/keycloak/data/import/realm-conform.json:ro
+
+volumes:
+  appdata:
+  mariadb-data:
+  minio-data:

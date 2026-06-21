@@ -1,5 +1,122 @@
 # Changelog
 
+## 2026-06-12 — unified dashboard + admin UI, identity chip
+
+Both `/` and `/admin` now share one header: the 尋形 Conform wordmark, a
+page-context label, and a `#topnav` (static/topnav.js, loaded by both)
+that renders the signed-in identity + role tag + logout, plus the
+cross-page link (管理 for admins on the dashboard, ← 產品列表 on admin).
+The admin console dropped its bespoke inline `<style>` and now uses the
+site's design-system tokens — dark card panels, themed tables/forms,
+empty states — matching the dashboard product cards. The dashboard's
+JS-injected admin link was removed (now in the shared top-nav).
+
+The identity chip shows the corporate JWT `description` claim
+("<uid>, <中文名>, <英文名>"), plumbed through Identity → /api/me
+(users.description column, alembic 0006 + SQLite boot migration; dev
+realm seeds realistic values). `/api/me` is now `no-store`. Suite 700.
+
+
+## 2026-06-12 — docs consolidated to current state
+
+README and ARCHITECTURE rewritten to the production-era reality (DB job
+queue + worker loop, BlobStore keys, auth/guards, 66-route quick-ref,
+compose/k8s/CI pointers, 20-class list, awaiting_layout state, purge
+policy). Two superseded planning docs deleted (production-storage,
+multi-user-readiness — conclusions live in SYSTEM_DESIGN); the three
+decision-history docs (DISCUSSION, auth-permissions, product-versioning)
+got closed/implemented status headers and dead links repaired.
+schema-auth-jobs gains the 0005 postscript. Doc hierarchy is now:
+README (use/tune) → ARCHITECTURE (how it works/how to change) →
+SYSTEM_DESIGN (why/full design) → docs/ (schema spec + frozen history).
+
+
+## 2026-06-12 — LidOuter re-introduced (`add-lidouter-class`)
+
+Final structure-class set: Lid, LidOuter, RingOuter, RingInner (lid
+outer edge is a distinct feature from the stiffener-ring edges; LidInner
+stays deleted). Seeded into existing libraries by the boot pass, ranked
+after Lid, signature/0.0001 default, match-JSON key `lid_outer` (⚠️
+semantic change vs pre-06-09 exports — rules team to be notified). The
+06-09 LidOuter→RingOuter legacy rename is removed (it would have wiped
+new LidOuter classes on every boot — regression-tested); snake_case
+`lid_outer` now renames to LidOuter. canvas.js colour/category mirrors
+updated. Suite 699 green.
+
+
+## 2026-06-12 — sign-off evidence image (`add-signoff-evidence`)
+
+Sign-off optionally carries one proof image (paper-signature scan,
+approval screenshot): multipart `evidence` on the existing sign-off
+POST (body-less calls unchanged), magic-byte-validated PNG/JPEG/WebP
+≤10MB, bytes at `sign_off_evidence/{vid}`, name/MIME columns written
+atomically with the freeze (alembic 0005 + SQLite boot migration).
+Readable by viewers in scope; cleared on admin unsign; not cloned;
+included in the product-delete cascade. Dashboard sign-off confirm is
+now a small dialog with the optional file field, and signed versions
+show a 📎 證明 link. Suite 696 green; 0005 verified on compose MariaDB.
+
+
+## 2026-06-12 — CI/CD: azure-pipelines.yml + image fix
+
+Three-stage pipeline (CI: zero-dependency suite ∥ real-engine smokes via
+docker; Build: push image tagged with the commit SHA, main only; Deploy:
+approval-gated — pin tag, re-run migration Job, apply, wait for
+migration + rollout). Dockerfile fix found on the way: the image never
+copied `alembic.ini`/`alembic/`, so the k8s migration Job would have
+died on first rollout — verified fixed by running `alembic upgrade
+head` inside the built image (compose never hit this because dev
+migrations ran from the host).
+
+
+## 2026-06-12 — blob storage: no list API (company MinIO rule)
+
+`ListObjectsV2` removed entirely (it had one user: the product-delete
+cascade's `delete_prefix`). The `BlobStore` interface now has no list
+operation — deletes enumerate exact keys from DB file bindings plus the
+layer/layout manifests and go through `delete_many` (batched
+DeleteObjects, blind). Layer-discovery reruns now delete thumbnails the
+old manifest referenced before rewriting it, so renamed/removed layers
+can't leave unreachable objects in a bucket nobody can list. Suite 690
+green; MinIO smoke green.
+
+
+## 2026-06-12 — full-branch review pass (12 fixes)
+
+Adversarial review over `production-infra-auth` before merge: one
+unguarded mutating route (+ a boot-time default-deny assertion so the
+class of bug can't recur), stale-exhausted jobs now run the normal
+failure side effects, MySQL %-escaping inside quoted literals, k8s
+readiness probe moved to the new auth-exempt `/healthz`, scoped-viewer
+access to `/api/customers`, open-redirect backslash variants, store-lock
+discipline in guards, boot-time queue drain, dashboard-side edit-lock
+control, plus efficiency/cleanup items (idle backoff + submit kick,
+blind S3 delete, single CSRF parser, jobstore unit tests). Deferred
+items recorded in SYSTEM_DESIGN §11.5. Suite 687 green.
+
+
+## 2026-06-12 — production infra + auth (`add-production-infra-and-auth`)
+
+Branch `production-infra-auth`, one OpenSpec change spanning four phases:
+
+- **DB**: SQLAlchemy-Core connection layer (`app/db.py`) — stores run
+  unchanged on SQLite (dev/tests) and MariaDB (prod, Alembic-owned schema,
+  utf8mb4, READ COMMITTED after a measured cross-replica stale read).
+- **Blobs**: `app/blobstore.py` Local/S3 backends (boto3); all artifact I/O
+  via keys; 150MB DXF measured (preprocess peak ~6.3GiB, derived JSON 401MB).
+- **Jobs**: in-memory `_jobs` dict → MariaDB queue (`app/jobstore.py`) +
+  worker loop (claim/heartbeat/120s requeue/7d prune); web×2 + worker split;
+  kill-worker recovery verified on compose. k8s replicas=2 unblocked.
+- **Auth**: Keycloak BFF (code+PKCE, signed state cookie, JWKS-verified),
+  MariaDB sessions (idle 8h / abs 24h, SHA-256 at rest, CSRF), self-built
+  authorization — admin/editor/viewer × global/customer/product, person or
+  dept grantees, customer grouping, product edit lock (30s heartbeat /
+  5min TTL), audit log, admin console (`/admin`), BOOTSTRAP_ADMINS seeding.
+  Bypass mode keeps dev/tests byte-identical; compose runs full oidc.
+- Suite: 609 → 681 tests; compose e2e covers login → grant → lock →
+  version clone → sign-off → audit.
+
+
 All notable changes to SMDR2. Entries are grouped by area; within each group,
 newer work is listed first. Source of truth is the git history on `main` plus
 the OpenSpec changes under `openspec/changes/` (archived = formally closed;
@@ -16,6 +133,19 @@ Every feature that has been built is on `main`.
   `/opsx:archive` (and spec-sync) remain. The 25 active changes are in this state.
 
 ---
+
+## Product versioning（2026-06-11）
+
+- **Shipped（versioning-impl 分支）** — `add-product-versioning`：一
+  version 一 library 模型落地。新增 `versions` / `version_files` 表；
+  product 建立必填版號（同 product 不重複、version 不可刪）；建新版 =
+  clone 上一版（templates + 調參 + 綁定，檔案 bytes 以 content-hash 共
+  用）；衍生 artifact 改 `(version_id, file_id)` keying（舊版結果永久可
+  回看）；畫押 sign-off 凍結 version（所有寫入 409，僅可解押後再編）；
+  兩層 scope（`PRODUCT_SCOPED_CLASSES`）與 library CRUD API 移除;DRC
+  manifest 升 2.0.0（customer 欄位 → version_id/version_label）。不遷移
+  舊資料（C9）：偵測到舊 schema 直接重建。測試改跑隔離 `SMDR2_DATA_DIR`
+  tmp dir（不再污染 `data/library.sqlite`）。
 
 ## Matching / detection engine
 

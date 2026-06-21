@@ -1,0 +1,159 @@
+# Conform — Azure Pipelines: CI → image build/push → k8s deploy.
+#
+# Monorepo layout: app code, Dockerfile, alembic, deploy/k8s/, tests all
+# live here; this file is the only CI/CD entry point.
+#
+# Fill these once (Project settings → Service connections / Library):
+#   REGISTRY_SC   docker registry service connection (company registry)
+#   IMAGE_REPO    e.g. registry.example.internal/conform-app
+#   K8S_SC        kubernetes service connection (prod cluster, ns conform)
+# Approvals: add a check on the `conform-prod` environment so Deploy
+# waits for a human. Secrets (DB/S3/OIDC/SESSION) never pass through the
+# pipeline — they live in Vault → k8s Secret `conform-secrets`.
+#
+# PR validation: Azure Repos triggers the CI stage via branch policy
+# (Build Validation on main); the `pr:` keyword only applies to
+# GitHub-hosted repos.
+
+trigger:
+  branches:
+    include: [main]
+
+variables:
+  IMAGE_REPO: registry.example.internal/conform-app   # ← company registry
+  TAG: $(Build.SourceVersion)                          # immutable tag = commit SHA
+  UV_CACHE_DIR: $(Pipeline.Workspace)/.uv-cache
+
+stages:
+  # ---------------------------------------------------------------- CI
+  - stage: CI
+    jobs:
+      - job: test
+        displayName: ruff + pytest (SQLite / Local blob / bypass — no services)
+        pool: {vmImage: ubuntu-latest}
+        steps:
+          - script: curl -LsSf https://astral.sh/uv/install.sh | sh
+            displayName: install uv
+          - task: Cache@2
+            inputs:
+              key: 'uv | "$(Agent.OS)" | uv.lock'
+              path: $(UV_CACHE_DIR)
+            displayName: uv cache
+          - script: |
+              set -e
+              export PATH="$HOME/.local/bin:$PATH"
+              uv sync --frozen
+              uv run ruff check app tests
+              uv run pytest -q
+            displayName: lint + unit/integration suite
+
+      - job: smoke
+        displayName: MariaDB + MinIO smokes (real engines via docker)
+        pool: {vmImage: ubuntu-latest}
+        steps:
+          - script: curl -LsSf https://astral.sh/uv/install.sh | sh
+            displayName: install uv
+          - script: |
+              set -e
+              docker run -d --name mariadb -p 3306:3306 \
+                -e MARIADB_DATABASE=conform -e MARIADB_USER=conform \
+                -e MARIADB_PASSWORD=dev -e MARIADB_ROOT_PASSWORD=root \
+                --health-cmd='healthcheck.sh --connect --innodb_initialized' \
+                --health-interval=2s mariadb:11.4
+              docker run -d --name minio -p 9000:9000 \
+                -e MINIO_ROOT_USER=dev-access-key \
+                -e MINIO_ROOT_PASSWORD=dev-secret-key \
+                minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+              for i in $(seq 60); do
+                [ "$(docker inspect -f '{{.State.Health.Status}}' mariadb)" = healthy ] && break
+                sleep 2
+              done
+            displayName: start MariaDB + MinIO
+          - script: |
+              set -e
+              export PATH="$HOME/.local/bin:$PATH"
+              uv sync --frozen
+              # smoke fixtures assume the bucket exists (compose has minio-init)
+              uv run python -c "
+              import boto3
+              boto3.client('s3', endpoint_url='http://127.0.0.1:9000',
+                           aws_access_key_id='dev-access-key',
+                           aws_secret_access_key='dev-secret-key').create_bucket(Bucket='conform')"
+              export SMDR2_MARIADB_SMOKE_URL='mysql+pymysql://conform:dev@127.0.0.1:3306/conform?charset=utf8mb4'
+              export SMDR2_MINIO_SMOKE=1
+              uv run pytest tests/test_mariadb_smoke.py tests/test_minio_smoke.py -q
+            displayName: run gated smokes
+          # OIDC smoke needs the full compose stack (Keycloak realm import,
+          # nginx LB) — run it locally / pre-release, not per-commit.
+
+  # ------------------------------------------------------------- Build
+  - stage: Build
+    dependsOn: CI
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: image
+        displayName: build + push $(IMAGE_REPO):$(TAG)
+        pool: {vmImage: ubuntu-latest}
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: REGISTRY_SC        # ← service connection name
+              repository: conform-app               # registry-relative repo
+              command: buildAndPush
+              Dockerfile: Dockerfile
+              buildContext: .
+              tags: |
+                $(TAG)
+
+  # ------------------------------------------------------------ Deploy
+  - stage: Deploy
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: deploy
+        displayName: migrate + rollout (ns conform)
+        pool: {vmImage: ubuntu-latest}
+        environment: conform-prod                   # ← put the approval check here
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    # Pin the immutable tag — :latest in the manifest is a
+                    # placeholder; without a tag change k8s won't roll.
+                    sed -i "s|registry.example.internal/conform-app:latest|$(IMAGE_REPO):$(TAG)|g" \
+                      deploy/k8s/conform.yaml
+                  displayName: pin image tag
+                - task: Kubernetes@1
+                  displayName: re-run migration job (idempotent at head)
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC   # ← service connection name
+                    namespace: conform
+                    command: delete
+                    arguments: job conform-migrate --ignore-not-found
+                - task: Kubernetes@1
+                  displayName: kubectl apply
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: apply
+                    arguments: -f deploy/k8s/conform.yaml
+                - task: Kubernetes@1
+                  displayName: wait for migration
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: wait
+                    arguments: --for=condition=complete --timeout=300s job/conform-migrate
+                - task: Kubernetes@1
+                  displayName: wait for web rollout
+                  inputs:
+                    connectionType: Kubernetes Service Connection
+                    kubernetesServiceEndpoint: K8S_SC
+                    namespace: conform
+                    command: rollout
+                    arguments: status deployment/conform-web --timeout=300s

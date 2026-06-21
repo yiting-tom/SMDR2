@@ -1,0 +1,64 @@
+{
+  "Rule1_SubstrateToSMD": {
+    "pass": true,
+    "text": "Substrate ↔ nearest SMD distance ≥ 5 mm",
+    "rules": [
+      {
+        "part": "BD",
+        "file_id": "REPLACE_BD_FILE_ID",
+        "from": "REPLACE_SUBSTRATE_HANDLE",
+        "to": "REPLACE_SMD_HANDLE",
+        "text": "distance = 8.5 mm (≥ 5)",
+        "tol": null,
+        "tol_text": null
+      }
+    ]
+  },
+
+  "Rule2_BgaCountAcrossViews": {
+    "pass": false,
+    "text": "BGA count must agree between SBT and POD",
+    "rules": [
+      {
+        "part": "SBT",
+        "file_id": "REPLACE_SBT_FILE_ID",
+        "from": "REPLACE_SBT_BGA_HANDLE",
+        "to": null,
+        "text": "SBT carries 144 BGA",
+        "tol": null,
+        "tol_text": null
+      },
+      {
+        "part": "POD",
+        "file_id": "REPLACE_POD_FILE_ID",
+        "from": "REPLACE_POD_BGA_HANDLE",
+        "to": null,
+        "text": "POD carries 142 BGA (Δ = −2, DISAGREE)",
+        "tol": null,
+        "tol_text": null
+      }
+    ]
+  },
+
+  "Rule3_PadSpacingTolerance": {
+    "pass": false,
+    "text": "Pad-to-pad spacing exceeds spec tolerance",
+    "rules": [
+      {
+        "part": "BD",
+        "file_id": "REPLACE_BD_FILE_ID",
+        "from": "REPLACE_PAD_A_HANDLE",
+        "to": "REPLACE_PAD_B_HANDLE",
+        "text": "edge-to-edge = 3.2 mm (spec 2.5)",
+        "tol": "REPLACE_PAD_A_HANDLE",
+        "tol_text": "⚠ ±0.7 mm"
+      }
+    ]
+  },
+
+  "Rule4_EnvelopeSmoke_EmptyOK": {
+    "pass": true,
+    "text": "Nothing to check on this product configuration",
+    "rules": []
+  }
+}

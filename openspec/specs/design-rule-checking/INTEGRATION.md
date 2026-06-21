@@ -94,10 +94,11 @@ drc-bundle-<product_id>.zip
 
 ```json
 {
-  "bundle_version": "1.0.0",
+  "bundle_version": "2.1.0",
   "product_id": "35a8dbb0-6ee",
   "product_name": "Sample",
   "exported_at": "2026-05-19T07:30:00Z",
+  "check_dam": true,
   "files": [
     {
       "role": "BD",
@@ -127,8 +128,9 @@ drc-bundle-<product_id>.zip
 | `product_id` | ✅ | SMDR2 內部 ID。對你方而言不透明，做報告 cross-ref 用。 |
 | `product_name` | — | 人類可讀名稱，**可能不存在**。 |
 | `exported_at` | — | UTC ISO-8601，秒精度。 |
+| `check_dam` | — | boolean。操作員是否對此版本啟用 DAM（封膠壩）檢查。**`true` 才跑 DAM 規則**；不存在 ≡ `false`（`2.1.0` 前的 bundle）。`2.1.0` 新增。 |
 | `files[]` | ✅ | 每筆對應一個 (DXF, Match JSON)；下節說明。 |
-| `files[].role` | ✅ | `"SBT"` / `"BD"` / `"POD"` / `"RING"` 之一。**同一個 role 可能出現多次** — 多 DXF 情境。 |
+| `files[].role` | ✅ | `"SBT"` / `"BD"` / `"POD"` / `"RING"` / `"LID"` / `"NovelLID"` 之一。**同一個 role 可能出現多次** — 多 DXF 情境。`"NovelLID"` 於 `2.2.0` 新增。 |
 | `files[].file_id` | ✅ | lowercase hex；前 8 字元是 SMDR2 內部慣用的短碼。 |
 | `files[].dxf` | ✅ | zip 相對路徑（POSIX 分隔）。 |
 | `files[].match_json` | ✅ | 同上。 |
@@ -194,9 +196,10 @@ DXF 內部統一用 snake_case key：
 | `substrate` | 基板輪廓 |
 | `pin_1` | 1 號接腳標示 |
 | `lid` | 封裝蓋板（整體） |
-| `lid_outer` | 蓋板外輪廓 |
-| `lid_inner` | 蓋板內輪廓 |
+| `ring_outer` | 環外輪廓 |
+| `ring_inner` | 環內輪廓 |
 | `die_area` | 晶粒區 |
+| `dam1` / `dam2` | 封裝壩（內 / 外） |
 | `fiducial_circle` | 圓形對位標 |
 | `fiducial_cross` | 十字對位標 |
 | `smd_2t` / `smd_3t` / `smd_8t` / `smd_14t` | 對應接點數的 SMD |

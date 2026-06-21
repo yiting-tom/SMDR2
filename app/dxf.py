@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import math
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -96,13 +96,16 @@ class RenderOutput:
     # {"strict_error": "<ExcCls>: <msg>", "n_fixed": int,
     #  "n_unrecoverable": int, "audit_messages": ["<msg>", …]}.
     recover_notes: dict[str, Any] | None = None
-
-
-# Expected packaging-design diagonal range (mm) for the unitless path of
-# `detect_scale_factor`. A factor M is accepted iff
-# `original_diagonal * M ∈ [EXPECTED_LOW, EXPECTED_HIGH]`.
-EXPECTED_DIAGONAL_LOW_MM = 10.0
-EXPECTED_DIAGONAL_HIGH_MM = 5000.0
+    # Which DXF "tab" these primitives were rendered from: "Model" for
+    # modelspace (the historical default), or a paper-space layout name
+    # (e.g. "Layout1") when the file's geometry lives in a layout tab. Set
+    # by `flatten_for_render` after layout resolution; surfaced so the
+    # dashboard/viewer can show a "loaded from <tab>" badge.
+    source_layout: str | None = None
+    # True when `source_layout` is a paper-space layout rather than
+    # modelspace. Lets callers branch on "did we fall back to paper space?"
+    # without re-opening the doc.
+    source_is_paperspace: bool = False
 
 
 # Maps the operator-facing unit-override strings (persisted in
@@ -123,71 +126,21 @@ SCALE_TO_UNIT: dict[float, str] = {v: k for k, v in UNIT_TO_SCALE.items()}
 
 
 def detect_scale_factor(insunits: int | None, bbox_diagonal: float) -> float:
-    """Decide what multiplier to apply so a file's coordinates land in mm.
+    """Always returns `1.0` — automatic unit detection is disabled.
 
-    `applied_scale` semantics: `rescaled_coord = original_coord * factor`.
-    Returns `1.0` when no rescale is needed (or none is safe).
+    Every uploaded DXF is now taken to be authored in mm as-is; the
+    preprocessor never auto-rescales. Only an explicit operator choice in
+    the viewer's unit picker (`files.user_unit_override`) rescales a file,
+    and that path bypasses this function entirely (`_maybe_rescale` reads
+    `UNIT_TO_SCALE` directly). The `insunits` / `bbox_diagonal` arguments
+    are retained for signature stability with existing callers.
 
-    Declared-unit cases trust the INSUNITS header:
-      - 1 (inch) → 25.4
-      - 5 (cm)   → 10.0
-      - 6 (m)    → 1000.0
-      - 4 (mm)   → 1.0 (always trust mm — never auto-rescale)
-
-    Unitless / unknown (`0` or `None`) picks the power-of-10 in
-    `[-4, +4]` that brings the diagonal into the expected packaging
-    range, preferring the factor closest to 1. A one-order-of-magnitude
-    safety guard keeps marginal factors (e.g. ×3, ×7) at `1.0`."""
-    # Declared units are authoritative.
-    if insunits == 1:
-        return 25.4
-    if insunits == 5:
-        return 10.0
-    if insunits == 6:
-        return 1000.0
-    if insunits == 4:
-        return 1.0
-    # Unitless / unknown path. Heuristic only — bail on degenerate inputs.
-    if insunits not in (0, None):
-        return 1.0
-    if not math.isfinite(bbox_diagonal) or bbox_diagonal <= 0:
-        return 1.0
-    # Cap the unitless heuristic at ±3 orders of magnitude (M ∈ [0.001,
-    # 1000]). Bigger factors would cover declared-unit cases (e.g. m → mm
-    # is ×1000) but those bypass this path entirely; extreme-magnitude
-    # unitless rescales (e.g. ×10⁴) are almost always pathology, not a
-    # legitimate unit choice, and the safer behaviour is to leave them
-    # at M=1.0 and let the user see the warning badge.
-    candidates = [10 ** k for k in range(-3, 4)]
-    in_range = [
-        m for m in candidates
-        if EXPECTED_DIAGONAL_LOW_MM <= bbox_diagonal * m <= EXPECTED_DIAGONAL_HIGH_MM
-    ]
-    if not in_range:
-        return 1.0
-    # Prefer M=1.0 (no rescale) when it qualifies — the file is already in
-    # the expected packaging range. Otherwise pick the factor that drives
-    # the diagonal as far down inside the range as possible: packaging
-    # designs cluster in the 1–50 mm chip / 5–200 mm package band, so for
-    # an out-of-range file the aggressive choice (smallest post-rescale
-    # diagonal) is almost always right, and ambiguous cases like
-    # diagonal=6000 → {60, 600} mm pick 60 mm. The price is that a
-    # legitimate 600 mm panel mistakenly stored at 6000 units would be
-    # over-corrected to 60 mm; declared-unit files (mm/cm/m/inch) bypass
-    # this path entirely, so the only risk is genuinely unitless files
-    # which are already a guess.
-    if 1.0 in in_range:
-        best = 1.0
-    else:
-        best = min(in_range, key=lambda m: bbox_diagonal * m)
-    # Safety guard: refuse marginal factors (≤ ±1 order of magnitude) so a
-    # borderline file like a real 5×5 mm dice (diagonal ≈ 7 mm, would
-    # otherwise grab M=10 → 70 mm) stays at 1.0 and falls back to the
-    # existing "suspect" badge for a human. Strictly greater than 1 means
-    # 100×+ rescales pass; 10× rescales don't.
-    if abs(math.log10(best)) <= 1.0:
-        return 1.0
-    return float(best)
+    Previously this inspected `$INSUNITS` and the bbox diagonal to guess a
+    power-of-10 (or inch) correction. That heuristic was removed on
+    2026-06-09: it caused false rescales on legitimate files, and the
+    operator's manual picker is the authoritative override when a file
+    really is in non-mm units."""
+    return 1.0
 
 
 def _scale_primitive_coords(prim: dict[str, Any], factor: float) -> None:
@@ -289,6 +242,151 @@ def _modelspace_diagonal(doc) -> float | None:
     # files whose header lacks usable extents.
     try:
         ext = ezdxf.bbox.extents(doc.modelspace(), fast=True)
+    except Exception:
+        return None
+    if not ext.has_data:
+        return None
+    size = ext.size
+    return math.hypot(float(size.x), float(size.y))
+
+
+# Entity types that occupy a layout's entity list but never emit a render
+# primitive. AutoCAD writes a VIEWPORT into essentially every paper-space
+# layout tab (the sheet's window into model space), so counting raw
+# `len(layout)` would treat a pure framing/title-block tab as if it held
+# drawable geometry — wrongly tripping the layout picker and skewing the
+# tolerance diagonal. The "does this tab have content?" heuristics count
+# only entities NOT in this set.
+NON_RENDERED_DXFTYPES = frozenset({"VIEWPORT"})
+
+
+def _renderable_entity_count(layout) -> int:
+    """Count a layout's entities excluding `NON_RENDERED_DXFTYPES`. A cheap
+    proxy for "drawable content" — does not flatten, so it over-counts
+    entities that happen to render empty (e.g. TEXT under TextPolicy.IGNORE);
+    callers that need an exact answer flatten and check the primitive count."""
+    n = 0
+    for e in layout:
+        try:
+            if e.dxftype() in NON_RENDERED_DXFTYPES:
+                continue
+        except Exception:
+            pass
+        n += 1
+    return n
+
+
+def _layout_name(layout: Any) -> str:
+    """Best-effort tab name for an ezdxf layout / modelspace object.
+    Modelspace reports `name == "Model"`; paper-space layouts report their
+    tab name (e.g. "Layout1")."""
+    return str(getattr(layout, "name", "") or "Model")
+
+
+def _resolve_layout(doc, layout_name: str | None) -> tuple[Any, str, bool]:
+    """Choose which DXF tab to render. Returns
+    `(layout_obj, resolved_name, is_paperspace)`.
+
+    - When `layout_name` names an existing tab, that tab is rendered.
+    - Otherwise auto-resolve: modelspace when it holds ANY entities — the
+      historical default, so normal files (geometry in modelspace) behave
+      exactly as before — else the paper-space layout with the most
+      entities. This last branch is what makes DXFs exported from DWGs
+      whose geometry lives in a layout tab (rather than modelspace) render
+      at all.
+    - When nothing qualifies (truly empty file), falls back to the empty
+      modelspace, identical to the pre-feature behaviour.
+
+    An unknown `layout_name` logs a warning and falls through to
+    auto-resolution rather than raising — a stale persisted choice should
+    degrade gracefully, not break the pipeline."""
+    msp = doc.modelspace()
+    if layout_name:
+        try:
+            lay = doc.layouts.get(layout_name)
+        except Exception:
+            logger.warning(
+                "requested layout %r not found; auto-resolving instead",
+                layout_name,
+            )
+            lay = None
+        if lay is not None:
+            return lay, _layout_name(lay), bool(getattr(lay, "is_any_paperspace", False))
+    # Modelspace fast-path: `len() > 0` is O(1) and modelspace never holds
+    # the paper-space VIEWPORT entities, so the raw length is a faithful
+    # "has content?" test here without paying the per-entity scan.
+    if len(msp) > 0:
+        return msp, _layout_name(msp), False
+    # Paper-space fallback: rank by RENDERABLE entity count so a tab padded
+    # with viewports (or that is viewport-only) never out-ranks a tab with
+    # real geometry. Layouts are sheet-sized, so the per-entity scan is cheap.
+    best: tuple[Any, str] | None = None
+    best_count = 0
+    for name in doc.layout_names_in_taborder():
+        try:
+            lay = doc.layouts.get(name)
+        except Exception:
+            continue
+        if not getattr(lay, "is_any_paperspace", False):
+            continue
+        count = _renderable_entity_count(lay)
+        if count > best_count:
+            best_count = count
+            best = (lay, name)
+    if best is not None:
+        return best[0], best[1], True
+    return msp, _layout_name(msp), False
+
+
+def _enumerate_layouts_doc(doc) -> list[dict[str, Any]]:
+    """Inventory of a doc's tabs (modelspace + every paper-space layout) in
+    tab order: `[{"name", "entity_count", "is_paperspace"}, ...]`. The
+    `entity_count` excludes `NON_RENDERED_DXFTYPES` (VIEWPORTs) so a
+    viewport-only framing tab reads as zero content; it is a cheap proxy for
+    drawable geometry used to rank/flag candidate tabs, never the exact
+    rendered primitive count."""
+    out: list[dict[str, Any]] = []
+    for name in doc.layout_names_in_taborder():
+        try:
+            lay = doc.layouts.get(name)
+        except Exception:
+            continue
+        out.append({
+            "name": name,
+            # Renderable count (excludes VIEWPORTs) so a viewport-only
+            # framing tab reads as empty and never trips the picker gate.
+            "entity_count": _renderable_entity_count(lay),
+            "is_paperspace": bool(getattr(lay, "is_any_paperspace", False)),
+        })
+    return out
+
+
+def enumerate_layouts(
+    dxf_path: str | Path, *, file_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Open a DXF and return its tab inventory (see `_enumerate_layouts_doc`).
+    Used by the discovery phase to decide whether a layout picker is needed
+    and to populate it."""
+    doc, _ = _open_dxf(dxf_path, file_id=file_id)
+    return _enumerate_layouts_doc(doc)
+
+
+def _layout_diagonal(doc, layout) -> float | None:
+    """Bbox-diagonal probe for the tab being rendered. Modelspace reuses the
+    cheap header `$EXTMIN/$EXTMAX` shortcut (`_modelspace_diagonal`); a
+    paper-space layout's geometry lives in its own coordinate frame, for
+    which the header extents do not apply, so we sweep that layout's entity
+    extents directly via `ezdxf.bbox.extents(fast=True)`."""
+    if not getattr(layout, "is_any_paperspace", False):
+        return _modelspace_diagonal(doc)
+    try:
+        # Exclude the VIEWPORT frame: its paper-space placement rectangle
+        # (e.g. an A3 sheet) would otherwise dominate the diagonal and
+        # coarsen the flatten tolerance for the actual (often sub-mm) geometry.
+        drawable = [
+            e for e in layout if e.dxftype() not in NON_RENDERED_DXFTYPES
+        ]
+        ext = ezdxf.bbox.extents(drawable, fast=True)
     except Exception:
         return None
     if not ext.has_data:
@@ -552,6 +650,7 @@ def flatten_for_render(
     user_unit_override: str | None = None,
     *,
     file_id: str | None = None,
+    layout_name: str | None = None,
 ) -> RenderOutput:
     """Parse a DXF file and return drawing primitives + bbox.
 
@@ -560,18 +659,32 @@ def flatten_for_render(
     this path when the operator has used the viewer's unit picker;
     standard uploads pass `None` and fall through to the detector.
 
+    `layout_name` selects which DXF "tab" to render. `None` (the default)
+    auto-resolves: modelspace when it holds any entities — unchanged
+    behaviour for normal files — otherwise the richest paper-space layout,
+    so DXFs whose geometry lives in a layout tab (exported from DWGs
+    organised per-view) render instead of coming back empty. A non-None
+    value renders that specific tab; an unknown name degrades to
+    auto-resolution. See `_resolve_layout`.
+
     `file_id` is plumbed through to the strict/recover log line —
     optional because the test suite + ad-hoc callers don't have one."""
     doc, recover_notes = _open_dxf(dxf_path, file_id=file_id)
-    msp = doc.modelspace()
+    target, source_layout, source_is_paperspace = _resolve_layout(doc, layout_name)
+    if source_is_paperspace:
+        logger.info(
+            "flatten: rendering paper-space layout %r (modelspace empty or "
+            "layout explicitly requested)", source_layout,
+        )
     # HATCH is pure decorative noise in packaging DXFs (solder-mask fills,
     # copper pours) and its boundary edges otherwise reach the backend as
     # polylines that don't promote to circle primitives — costing render
     # budget and producing jagged N-gon outlines at zoom-in. Strip before
     # `Frontend.draw_layout` so no HATCH-sourced primitive is ever emitted.
-    for hatch in list(msp.query("HATCH")):
-        msp.delete_entity(hatch)
-    diagonal = _modelspace_diagonal(doc)
+    # Stripped from the resolved tab (modelspace or paper-space layout).
+    for hatch in list(target.query("HATCH")):
+        target.delete_entity(hatch)
+    diagonal = _layout_diagonal(doc, target)
     tol = choose_flatten_tolerance(diagonal) if diagonal is not None else BASE_TOLERANCE
     if tol != BASE_TOLERANCE:
         logger.info(
@@ -591,7 +704,7 @@ def flatten_for_render(
     Frontend(
         ctx, backend,
         config=Configuration(text_policy=TextPolicy.IGNORE),
-    ).draw_layout(msp, finalize=True)
+    ).draw_layout(target, finalize=True)
     render = RenderOutput(
         primitives=backend.primitives,
         bbox=backend.bbox,
@@ -599,6 +712,8 @@ def flatten_for_render(
         flatten_tolerance=tol,
         insunits=_read_insunits(doc),
         recover_notes=recover_notes,
+        source_layout=source_layout,
+        source_is_paperspace=source_is_paperspace,
     )
     render, _ = _maybe_rescale(render, user_unit_override=user_unit_override)
     return render

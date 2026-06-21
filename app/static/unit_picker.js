@@ -54,7 +54,12 @@ export function initUnitPicker(file, opts = {}) {
   if (!$wrap || !$select || !$badge || !$hint) return;
 
   const fileId = file.id;
+  // File endpoints are version-scoped — every fetch carries ?version_id=.
+  const versionId = opts.versionId ?? file.version_id;
+  const vq = `version_id=${encodeURIComponent(versionId)}`;
   const onComplete = typeof opts.onComplete === "function" ? opts.onComplete : null;
+  // Signed-off version: the picker is read-only (display only, no POST).
+  const readOnly = !!opts.readOnly;
 
   let currentFile = file;
   let pollTimer = null;
@@ -113,7 +118,7 @@ export function initUnitPicker(file, opts = {}) {
     stopPollingFile();
     pollTimer = setInterval(async () => {
       try {
-        const res = await fetch(`/api/files/${fileId}`);
+        const res = await fetch(`/api/files/${fileId}?${vq}`);
         if (!res.ok) return;
         const f = await res.json();
         if (f.status !== "preprocessing") {
@@ -144,12 +149,32 @@ export function initUnitPicker(file, opts = {}) {
       onCancel: () => { $select.value = committed; },
       onConfirm: async () => {
         try {
-          const res = await fetch(`/api/files/${fileId}/unit-override`, {
+          const res = await fetch(`/api/files/${fileId}/unit-override?${vq}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ unit: next }),
           });
-          if (res.status === 202 || res.status === 409) {
+          if (res.status === 409) {
+            // Distinguish "version signed-off" (frozen, no job) from the
+            // legacy "job already in flight" 409 (carries job_id).
+            const body = await res.json().catch(() => null);
+            const detail = body?.detail;
+            if (detail && detail.error === "version signed-off") {
+              $select.value = committed;
+              $select.disabled = true;
+              alert(`此版本已由 ${detail.signed_off_by} 畫押,無法變更單位。`);
+              return;
+            }
+            if (body?.job_id) {
+              $select.dataset.committed = next;
+              setJobInflight(body.job_id);
+              return;
+            }
+            $select.value = committed;
+            alert(`Unit override failed: 409`);
+            return;
+          }
+          if (res.status === 202) {
             const body = await res.json();
             const jobId = body.job_id;
             $select.dataset.committed = next;
@@ -169,6 +194,12 @@ export function initUnitPicker(file, opts = {}) {
 
   // ---- Initial paint -----------------------------------------------
   render();
+  if (readOnly) {
+    // Signed-off version: show the committed unit but reject edits.
+    $select.disabled = true;
+    $select.title = "版本已畫押(唯讀)— 無法變更單位";
+    return;
+  }
   if (file.status === "preprocessing") {
     setJobInflight(null);
   }

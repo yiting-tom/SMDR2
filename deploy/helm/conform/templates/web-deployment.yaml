@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conform-web
+  labels:
+    {{- include "conform.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.web.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:               # stateless: surge one, never drop below 2
+      maxSurge: {{ .Values.web.maxSurge }}
+      maxUnavailable: {{ .Values.web.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: conform-web
+  template:
+    metadata:
+      labels:
+        app: conform-web
+        {{- include "conform.labels" . | nindent 8 }}
+      annotations:
+        # Roll pods when only the ConfigMap changes (config-only upgrades).
+        checksum/config: {{ .Values.config | toYaml | sha256sum }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:          # spread the 2 webs across nodes when possible
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: conform-web
+      containers:
+        - name: web
+          image: {{ include "conform.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: SMDR2_EMBEDDED_WORKER
+              value: "0"           # webs only enqueue; the worker Deployment drains
+          envFrom:
+            {{- include "conform.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          # Both are auth-exempt (non-/api). Readiness uses /readyz, which
+          # pings DB / MinIO / Keycloak — a pod that can't reach a dependency
+          # is pulled from the Service so it stops taking traffic. Liveness
+          # stays on /healthz (pure liveness): a dependency blip must NOT
+          # restart the pod (that would be a restart storm), only un-ready it.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: scratch
+              mountPath: {{ .Values.config.SMDR2_DATA_DIR | quote }}
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.web.scratchSizeLimit }}

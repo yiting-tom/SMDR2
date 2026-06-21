@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: conform-web
+  labels:
+    {{- include "conform.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.web.pdbMinAvailable }}
+  selector:
+    matchLabels:
+      app: conform-web

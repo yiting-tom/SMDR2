@@ -9,7 +9,6 @@ import pytest
 
 from app.matching import (
     EntityShape,
-    NearMiss,
     align_score,
     diagnose_swap,
     find_matches,

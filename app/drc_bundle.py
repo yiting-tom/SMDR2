@@ -10,12 +10,13 @@ JSONs are shipped **per-file** with raw, unprefixed handles — the
 for the internal mock checker stays internal and never leaves the
 process boundary.
 
-The manifest also surfaces the **customer** dimension at the top
-level via ``customer_id`` (the SMDR2 ``library_id`` the product is
-bound to) and the optional ``customer`` name. ``build_manifest``
-resolves the name from the ``LIBRARIES`` registry at export time;
-if the library is missing the builder raises ``ValueError`` rather
-than emitting a manifest with a silently-dropped customer.
+The manifest carries the **version** (``version_id`` + ``version_label``)
+whose bindings and Match JSONs the bundle was built from; rules remain
+product-keyed (``product_id``). It also carries the **customer** grouping
+that sits above product — ``customer_id`` (``products.customer_id``, the
+customer entity, NOT the long-dead ``library_id``) and the optional
+human-readable ``customer`` name, resolved from the customers table at
+export time.
 
 Layout inside the zip:
 
@@ -40,12 +41,13 @@ from pathlib import Path
 
 from app.dxf import SCALE_TO_UNIT
 from app.files import FileRecord
-from app.library import LIBRARIES
 from app.products import Product
-from app.storage import match_path, upload_path
+from app.blobstore import get_blobstore
+from app.storage import match_key, upload_key
+from app.versions import Version
 
 
-BUNDLE_VERSION = "1.4.0"
+BUNDLE_VERSION = "2.3.0"
 MANIFEST_FILENAME = "manifest.json"
 DXF_DIR = "dxfs"
 MATCH_DIR = "match"
@@ -121,34 +123,40 @@ def _file_entry(rec: FileRecord) -> dict:
 
 def build_manifest(
     product: Product,
+    version: Version,
     files: list[FileRecord],
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Assemble the manifest dict for a product's role-attached files.
+    """Assemble the manifest dict for one version's role-bound files.
 
     Pure: no disk I/O. ``files`` MUST already be filtered to
-    role-attached records (``dxf_role is not None``).
+    role-bound records (``dxf_role is not None``) of this version.
+
+    ``customer_id`` is taken from ``product.customer_id`` (always present —
+    defaults to the seeded ``"uncategorized"`` customer). ``customer_name``
+    is the human-readable name the caller resolved from the customers table;
+    when falsy the ``customer`` key is omitted (keeping this function pure /
+    store-free).
     """
-    # Customer = the library the product is bound to. Resolve via the
-    # registry's store rather than the cached Library object so we
-    # don't pay for the templates load on the export path.
-    library_row = LIBRARIES.store.get_library(product.library_id)
-    if library_row is None:
+    if version.product_id != product.id:
         raise ValueError(
-            f"library {product.library_id!r} not found for product "
-            f"{product.id!r}; refusing to build manifest with missing customer"
+            f"version {version.id!r} belongs to product "
+            f"{version.product_id!r}, not {product.id!r}"
         )
     manifest: dict = {
         "bundle_version": BUNDLE_VERSION,
         "product_id": product.id,
-        "customer_id": product.library_id,
+        "customer_id": product.customer_id,
+        "version_id": version.id,
+        "version_label": version.label,
+        "check_dam": version.check_dam,
         "exported_at": _format_exported_at(now),
         "files": [_file_entry(f) for f in files],
     }
     if product.name:
         manifest["product_name"] = product.name
-    customer_name = library_row["name"] or ""
     if customer_name:
         manifest["customer"] = customer_name
     return manifest
@@ -156,21 +164,23 @@ def build_manifest(
 
 def build_bundle(
     product: Product,
+    version: Version,
     files: list[FileRecord],
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> tuple[bytes, str]:
-    """Build the DRC handoff zip for one product.
+    """Build the DRC handoff zip for one version of a product.
 
     Returns ``(zip_bytes, filename)``. ``filename`` is the suggested
-    download name (``drc-bundle-<product_id>.zip``).
+    download name (``drc-bundle-<product_id>-<version_id>.zip``).
 
     Caller responsibilities:
 
-    - ``files`` is the full list of role-attached ``FileRecord``s for
-      the product (``dxf_role is not None``). Order is preserved into
+    - ``files`` is the full list of role-bound ``FileRecord``s for
+      the version (``dxf_role is not None``). Order is preserved into
       ``manifest.files``.
-    - Every file MUST have ``match_saved == True`` — this is the
+    - Every binding MUST have ``match_saved == True`` — this is the
       caller's precondition; the function does not re-check it because
       the endpoint handler emits a richer 400 with the offending role
       list before calling here.
@@ -181,26 +191,33 @@ def build_bundle(
     hundred MB, swap for a ``SpooledTemporaryFile`` without changing
     the public contract.
     """
-    manifest = build_manifest(product, files, now=now)
+    manifest = build_manifest(
+        product, version, files, customer_name=customer_name, now=now)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
             MANIFEST_FILENAME,
             json.dumps(manifest, indent=2, ensure_ascii=False),
         )
+        blobs = get_blobstore()
         for rec in files:
-            dxf_src = upload_path(rec.id)
-            match_src = match_path(rec.id)
-            zf.write(dxf_src, arcname=f"{DXF_DIR}/{rec.id}.dxf")
-            zf.write(match_src, arcname=f"{MATCH_DIR}/{rec.id}.json")
-    return buf.getvalue(), f"drc-bundle-{product.id}.zip"
+            zf.writestr(
+                f"{DXF_DIR}/{rec.id}.dxf", blobs.get_bytes(upload_key(rec.id))
+            )
+            zf.writestr(
+                f"{MATCH_DIR}/{rec.id}.json",
+                blobs.get_bytes(match_key(version.id, rec.id)),
+            )
+    return buf.getvalue(), f"drc-bundle-{product.id}-{version.id}.zip"
 
 
 def build_bundle_dir(
     product: Product,
+    version: Version,
     files: list[FileRecord],
     dst_dir: str | Path,
     *,
+    customer_name: str | None = None,
     now: datetime | None = None,
 ) -> Path:
     """Materialise the DRC handoff bundle as a directory tree.
@@ -220,19 +237,26 @@ def build_bundle_dir(
     (dst / DXF_DIR).mkdir(parents=True, exist_ok=True)
     (dst / MATCH_DIR).mkdir(parents=True, exist_ok=True)
 
-    manifest = build_manifest(product, files, now=now)
+    manifest = build_manifest(
+        product, version, files, customer_name=customer_name, now=now)
     (dst / MANIFEST_FILENAME).write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False)
     )
+    blobs = get_blobstore()
     for rec in files:
-        shutil.copyfile(upload_path(rec.id), dst / DXF_DIR / f"{rec.id}.dxf")
-        shutil.copyfile(match_path(rec.id), dst / MATCH_DIR / f"{rec.id}.json")
+        with open(dst / DXF_DIR / f"{rec.id}.dxf", "wb") as out, \
+                blobs.open_stream(upload_key(rec.id)) as src:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
+        with open(dst / MATCH_DIR / f"{rec.id}.json", "wb") as out, \
+                blobs.open_stream(match_key(version.id, rec.id)) as src:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
     return dst
 
 
 @contextmanager
 def materialise_bundle(
     product: Product,
+    version_id: str,
     files: list[FileRecord],
     *,
     now: datetime | None = None,
@@ -242,8 +266,14 @@ def materialise_bundle(
 
     The rule-check worker uses this to hand the external rule function
     a bundle path that exists for the duration of the call and nothing
-    longer.
+    longer. ``version_id`` is resolved to a Version fresh from the store
+    (worker processes must not rely on parent-process caches).
     """
+    from app.versions import VERSION_STORE
+
+    version = VERSION_STORE.get(version_id)
+    if version is None:
+        raise ValueError(f"version {version_id!r} not found")
     with tempfile.TemporaryDirectory(prefix=f"drc-bundle-{product.id}-") as td:
-        bundle_dir = build_bundle_dir(product, files, td, now=now)
+        bundle_dir = build_bundle_dir(product, version, files, td, now=now)
         yield bundle_dir

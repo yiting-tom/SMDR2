@@ -1,7 +1,7 @@
 """Per-(product, role) view resolution.
 
-A product role (SBT / BD / POD / RING / LID) can be sourced from one
-or more DXF files; the five roles are independent and may all be
+A product role (SBT / BD / POD / RING / LID / NovelLID) can be sourced
+from one or more DXF files; the six roles are independent and may all be
 populated on the same product. Each file carries a `dxf_view`:
 
   - 'multi'           — the file contains per-view region rects; each
@@ -85,12 +85,13 @@ def resolve_views(rows: Iterable[FileRecord]) -> dict[str, ViewSource]:
     return mapping
 
 
-def resolve_for_product(
-    product_id: str, dxf_role: str
+def resolve_for_version(
+    version_id: str, dxf_role: str
 ) -> dict[str, ViewSource]:
-    """Convenience: load rows from `FILE_STORE` and resolve them."""
+    """Convenience: load a version's bindings from `FILE_STORE` and
+    resolve them."""
     rows = [
-        f for f in FILE_STORE.list_by_product(product_id)
+        f for f in FILE_STORE.list_by_version(version_id)
         if f.dxf_role == dxf_role
     ]
     return resolve_views(rows)

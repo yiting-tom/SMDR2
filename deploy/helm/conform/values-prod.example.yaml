@@ -1,0 +1,32 @@
+# Example production overrides. Copy to values-prod.yaml, fill in, and pass
+# with `-f values-prod.yaml`. NEVER put secrets here — those live in the
+# conform-secrets Secret (see deploy/PRODUCTION_DEPLOY.md §2).
+#
+#   cp values-prod.example.yaml values-prod.yaml   # values-prod.yaml is .helmignore'd
+
+image:
+  repository: registry.corp.example/conform-app
+  tag: "REPLACE_WITH_COMMIT_SHA"     # e.g. c80966e — never "latest" in prod
+
+config:
+  S3_ENDPOINT_URL: http://minio.prod.svc:9000
+  S3_BUCKET: conform
+  OIDC_ISSUER: https://sso.corp.example/realms/conform
+  OIDC_INTERNAL_BASE: http://keycloak.sso.svc:8080/realms/conform
+  OIDC_CLIENT_ID: conform-web
+  OIDC_REDIRECT_URI: https://conform.corp.example/auth/callback
+  COOKIE_SECURE: "true"
+  BOOTSTRAP_ADMINS: "alice,bob"      # set BEFORE first rollout
+
+existingSecret: conform-secrets
+
+ingress:
+  enabled: true
+  className: nginx
+  host: conform.corp.example
+  tls:
+    enabled: true
+    secretName: conform-tls          # or omit if IT terminates TLS upstream
+
+# Resource / replica defaults already match company policy (web 2, worker 2,
+# worker 8Gi). Override here only with capacity-planning sign-off.

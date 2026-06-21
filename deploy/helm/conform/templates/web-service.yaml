@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: conform-web
+  labels:
+    {{- include "conform.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: conform-web
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: 8000

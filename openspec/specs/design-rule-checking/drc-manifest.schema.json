@@ -4,14 +4,14 @@
   "title": "SMDR2 DRC Handoff Manifest",
   "description": "Top-level manifest accompanying every DRC handoff bundle. The bundle is a directory (or zip) containing this file at its root plus the DXF + Match JSON files referenced by every entry in `files`. The downstream rule-checking team consumes this manifest to group files by role and run their own DRC.",
   "type": "object",
-  "required": ["bundle_version", "product_id", "customer_id", "files"],
+  "required": ["bundle_version", "product_id", "customer_id", "version_id", "version_label", "files"],
   "additionalProperties": false,
   "properties": {
     "bundle_version": {
       "description": "Semantic version of the manifest contract. Consumers MUST refuse manifests whose major version they do not understand.",
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
-      "examples": ["1.4.0"]
+      "examples": ["2.3.0"]
     },
     "product_id": {
       "description": "SMDR2 internal product identifier. Opaque to the consumer; useful for cross-referencing reports.",
@@ -23,18 +23,32 @@
       "type": "string"
     },
     "customer_id": {
-      "description": "SMDR2 internal library identifier the product is bound to. Opaque to the consumer; stable across library renames. Mirrors `product_id`.",
+      "description": "The product's customer grouping (products.customer_id, the customer entity above product). Opaque to the consumer; stable across customer renames. Mirrors product_id. Defaults to \"uncategorized\" when the product was never assigned a customer.",
       "type": "string",
       "minLength": 1
     },
     "customer": {
-      "description": "Optional human-readable customer / library name. Omitted when the underlying library has no name. Consumers needing a stable display name SHOULD key by `customer_id` and join against their own customer table.",
+      "description": "Optional human-readable customer name, resolved from the customers table at export. Omitted when the customer cannot be resolved or has no name; consumers needing a stable display name SHOULD key by customer_id.",
       "type": "string"
+    },
+    "version_id": {
+      "description": "SMDR2 internal version identifier — the snapshot whose bindings and Match JSONs this bundle was built from. Rules are product-level and version-independent; this field tells the consumer which snapshot was checked.",
+      "type": "string",
+      "minLength": 1
+    },
+    "version_label": {
+      "description": "Human-entered version label, unique within the product (e.g. \"v1\", \"A\", \"2026-06\").",
+      "type": "string",
+      "minLength": 1
     },
     "exported_at": {
       "description": "ISO 8601 timestamp (UTC, second precision or finer) of when the bundle was generated.",
       "type": "string",
       "format": "date-time"
+    },
+    "check_dam": {
+      "description": "Whether the operator enabled the DAM (encapsulation dam) check for this version. The downstream rule-checker SHOULD run its DAM rules only when true. Absent is equivalent to false (pre-2.1.0 bundles).",
+      "type": "boolean"
     },
     "files": {
       "description": "Every DXF + Match JSON pair in the bundle, one entry per file. Order is significant only as a stable tie-breaker — consumers SHOULD group by `role` rather than rely on positional ordering.",
@@ -50,9 +64,9 @@
       "additionalProperties": false,
       "properties": {
         "role": {
-          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). All five roles are independent; a single manifest MAY contain entries under any subset, including both RING and LID.",
+          "description": "Functional role this DXF plays in the product. A role MAY appear in multiple entries (multi-DXF role). All six roles are independent; a single manifest MAY contain entries under any subset, including any of RING / LID / NovelLID. `NovelLID` was added in bundle_version 2.2.0; pre-2.2.0 consumers will not see it.",
           "type": "string",
-          "enum": ["SBT", "BD", "POD", "RING", "LID"]
+          "enum": ["SBT", "BD", "POD", "RING", "LID", "NovelLID"]
         },
         "file_id": {
           "description": "SMDR2 internal file identifier — lowercase hex, derived from the DXF content hash. Stable across re-exports of the same file. The first 8 hex characters are the canonical short form used elsewhere in SMDR2.",

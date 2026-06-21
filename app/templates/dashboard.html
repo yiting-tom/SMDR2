@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>SMDR2 — Products</title>
+  <title>尋形 Conform — 產品</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body class="dashboard">
+<body class="dashboard" data-page="dashboard">
   <header>
-    <span class="title">SMDR2</span>
+    <a class="brand" href="/"><img class="brand-mark" src="/static/favicon.svg" alt="" />尋形 <span class="brand-sub">Conform</span></a>
+    <span class="page-context">產品</span>
     <span id="status">—</span>
     <span class="spacer"></span>
     <button id="dev-mode-toggle" type="button" aria-pressed="false"
@@ -19,20 +21,27 @@
     </label>
     <button id="dev-params-toggle" type="button" hidden
             title="Adjust matching / DXF tunables (dev mode only)">⚙</button>
+    <nav id="topnav"></nav>
   </header>
 
   <main class="dashboard-main">
-    <section id="library-bar">
-      <label for="library-select">Library:</label>
-      <select id="library-select" aria-label="Active library"></select>
-      <button id="new-library-btn" type="button" title="Create a new library">+ New library</button>
+    <section id="dashboard-toolbar">
+      <h1>產品</h1>
+      <span id="product-count" title="顯示中 / 全部產品數"></span>
       <span class="spacer"></span>
-      <button id="new-product-btn" type="button">+ New product</button>
+      <input id="product-search" type="search" placeholder="搜尋產品名稱或檔名…"
+             autocomplete="off" aria-label="搜尋產品名稱或檔名" />
+      <button id="new-product-btn" type="button">＋ 新增產品</button>
     </section>
 
     <section id="product-list-section">
       <div id="product-list"></div>
-      <p class="empty" id="empty-msg" hidden>No products yet — click <em>+ New product</em> to start.</p>
+      <div class="empty-state" id="empty-msg" hidden>
+        <p class="empty-state-title" data-empty-title>尚無產品</p>
+        <p class="empty-state-hint" data-empty-hint>
+          點「＋ 新增產品」建立產品,再把 DXF 拖進對應的角色欄位開始比對。
+        </p>
+      </div>
     </section>
   </main>
 
@@ -41,22 +50,26 @@
     <div class="modal-bg" data-close></div>
     <div class="modal-panel" role="dialog" aria-label="New product">
       <header class="modal-header">
-        <h2>New product</h2>
+        <h2>新增產品</h2>
         <span class="spacer"></span>
-        <button type="button" class="modal-close" data-close>×</button>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
       </header>
       <div class="modal-body">
         <label class="form-row">
-          <span>Name</span>
-          <input id="new-product-name" type="text" placeholder="e.g., Customer-A P/N 12345" />
+          <span>產品名稱</span>
+          <input id="new-product-name" type="text" placeholder="例:Customer-A P/N 12345" />
         </label>
         <label class="form-row">
-          <span>Library (customer)</span>
-          <select id="new-product-library"></select>
+          <span>版本標籤 <em class="required-mark">*</em></span>
+          <input id="new-product-version-label" type="text" placeholder="例:v1" />
+        </label>
+        <label class="form-row">
+          <span>客戶</span>
+          <select id="new-product-customer"></select>
         </label>
         <div class="form-actions">
-          <button id="new-product-create" type="button">Create</button>
-          <button type="button" data-close>Cancel</button>
+          <button type="button" data-close>取消</button>
+          <button id="new-product-create" type="button">建立</button>
         </div>
       </div>
     </div>
@@ -70,7 +83,7 @@
         <h2 id="rule-results-title">Rule Check</h2>
         <span id="rule-results-summary"></span>
         <span class="spacer"></span>
-        <button type="button" class="modal-close" data-close>×</button>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
       </header>
       <div id="rule-results-body"></div>
     </div>
@@ -83,7 +96,7 @@
       <header class="modal-header">
         <h2 data-layer-title>Pick layers to include</h2>
         <span class="spacer"></span>
-        <button type="button" class="modal-close" data-close>×</button>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
       </header>
       <div data-layer-body class="layer-modal-body"></div>
       <footer class="modal-footer">
@@ -95,6 +108,24 @@
     </div>
   </div>
 
+  <!-- Layout (AutoCAD-tab) selection modal — shown when a DXF's geometry
+       lives in more than one paper-space layout (model space empty). -->
+  <div id="layout-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="Pick view">
+      <header class="modal-header">
+        <h2 data-layout-title>Pick which view (AutoCAD tab) to load</h2>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
+      </header>
+      <div data-layout-body class="layer-modal-body"></div>
+      <footer class="modal-footer">
+        <span class="spacer"></span>
+        <button type="button" data-layout-confirm class="primary">Pick a view</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Developer parameter overrides modal (Dev Mode only) -->
   <div id="dev-params-modal" class="modal" hidden>
     <div class="modal-bg" data-close></div>
@@ -102,7 +133,7 @@
       <header class="modal-header">
         <h2>Developer parameters</h2>
         <span class="spacer"></span>
-        <button type="button" class="modal-close" data-close>×</button>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
       </header>
       <div class="modal-body">
         <p class="dev-params-banner">
@@ -120,9 +151,29 @@
     </div>
   </div>
 
+  <!-- Version diff modal (版本差異比較) -->
+  <div id="version-diff-modal" class="modal" hidden>
+    <div class="modal-bg" data-close></div>
+    <div class="modal-panel modal-wide" role="dialog" aria-label="版本差異比較">
+      <header class="modal-header">
+        <h2 id="version-diff-title">版本差異比較</h2>
+        <span class="version-diff-pickers">
+          <select id="version-diff-from" title="比較基準版本(from)"></select>
+          <span class="version-diff-arrow">→</span>
+          <select id="version-diff-to" title="比較目標版本(to)"></select>
+        </span>
+        <span class="spacer"></span>
+        <button type="button" class="modal-close" data-close aria-label="關閉">×</button>
+      </header>
+      <div id="version-diff-body"></div>
+    </div>
+  </div>
+
   <!-- Hidden file picker reused per slot -->
   <input type="file" id="file-input" accept=".dxf" hidden />
 
+  <script src="/static/csrf.js"></script>
+  <script src="/static/topnav.js"></script>
   <script type="module" src="/static/dashboard.js"></script>
 </body>
 </html>

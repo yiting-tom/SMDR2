@@ -18,7 +18,6 @@ import time
 import pytest
 
 from app.library import (
-    DEFAULT_LIBRARY_ID,
     LibraryRegistry,
     Store,
     Template,
@@ -328,40 +327,43 @@ def test_circle_fast_path_is_fast():
 
 
 # ---- entity_kinds round-trip through SQLite -----------------------------
-def test_entity_kinds_roundtrips_through_sqlite(tmp_db):
-    """A committed template's entity_kinds survives a store reload.
+# No default library exists under the versioned model (libraries are
+# created by version creation); tests create a plain library directly.
+LIB_ID = "lib-fastpath"
 
-    Use a library-scoped class (FiducialCircle) so the surviving row's
-    product_id IS NULL and the library-admin reload sees it. The
+
+def _test_lib(tmp_db):
+    store = Store(tmp_db)
+    if store.get_library(LIB_ID) is None:
+        store.create_library(LIB_ID, "Fast-path Lib")
+    return LibraryRegistry(store).get(LIB_ID)
+
+
+def test_entity_kinds_roundtrips_through_sqlite(tmp_db):
+    """A committed template's entity_kinds survives a store reload. The
     entity_kinds round-trip is the only thing under test here; class
     choice is incidental."""
-    store = Store(tmp_db)
-    lib = LibraryRegistry(store).get(DEFAULT_LIBRARY_ID)
+    lib = _test_lib(tmp_db)
     tpl_points = _sample_circle(0.0, 0.0, 1.0)
     tpl = Template.from_entities("FiducialCircle", [tpl_points], entity_kinds=["circle"])
     lib.add_template(tpl)
 
-    # Reload from disk.
-    lib2 = LibraryRegistry(Store(tmp_db)).get(DEFAULT_LIBRARY_ID)
+    # Reload from disk (fresh Store + registry).
+    lib2 = _test_lib(tmp_db)
     reloaded = lib2.templates_of("FiducialCircle")
     assert len(reloaded) == 1
     assert reloaded[0].entity_kinds == ["circle"]
 
 
 def test_legacy_template_loads_with_null_kinds(tmp_db):
-    """A row inserted with entity_kinds=NULL (simulating pre-migration data)
-    parses back as [None, ...].
-
-    Use a library-scoped class (FiducialCircle) so the row's null
-    product_id is legitimate and survives the boot purge. The test's
-    point is the entity_kinds=NULL → [None] fallback; class choice is
-    incidental."""
+    """A row inserted with entity_kinds=NULL (simulating a template
+    committed before the column existed) parses back as [None, ...]."""
     import sqlite3
     import json as _json
     import time as _time
     import uuid as _uuid
 
-    Store(tmp_db)  # initialise schema + migration
+    _test_lib(tmp_db)  # initialise schema + create the library row
 
     # Manually insert a row with NULL entity_kinds via raw SQL.
     raw_points = [_sample_circle(0.0, 0.0, 1.0)]
@@ -372,14 +374,14 @@ def test_legacy_template_loads_with_null_kinds(tmp_db):
             " bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, created_at, entity_kinds) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             (
-                str(_uuid.uuid4()), DEFAULT_LIBRARY_ID, "FiducialCircle",
+                str(_uuid.uuid4()), LIB_ID, "FiducialCircle",
                 _json.dumps(raw_points), 0.0, 0.0, -1.0, -1.0, 1.0, 1.0, _time.time(),
             ),
         )
         conn.commit()
 
     # Reload via Library and confirm fallback.
-    lib = LibraryRegistry(Store(tmp_db)).get(DEFAULT_LIBRARY_ID)
+    lib = _test_lib(tmp_db)
     reloaded = lib.templates_of("FiducialCircle")
     assert len(reloaded) == 1
     assert reloaded[0].entity_kinds == [None]

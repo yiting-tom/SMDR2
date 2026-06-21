@@ -31,7 +31,7 @@ from pathlib import Path
 # Iterate roles in spec order so the rule sidebar lists sub-rules in a
 # predictable sequence regardless of upload order. RING / LID at the
 # end since they're optional.
-_ROLE_ORDER = ("SBT", "BD", "POD", "RING", "LID")
+_ROLE_ORDER = ("SBT", "BD", "POD", "RING", "LID", "NovelLID")
 
 
 def check_rules(product_id: str, bundle_dir: str) -> dict:

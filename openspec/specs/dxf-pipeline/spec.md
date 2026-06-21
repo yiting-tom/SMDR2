@@ -385,14 +385,21 @@ the file's library snapshot, and persists the parsed primitives and the
 pre-match handle-by-class to disk under `data/parsed/{file_id}.json`
 and `data/prematch/{file_id}.json`.
 
+The persisted pre-match snapshot SHALL additionally carry a
+`library_revision` field set to the library's `current_revision` (see
+`template-library`) at the time the snapshot is computed, so a later read
+can detect whether the library has changed since the snapshot was written.
+
 #### Scenario: Pre-match against an empty library
 - **WHEN** preprocessing completes for a file whose library has no templates
 - **THEN** `data/prematch/{file_id}.json` exists with `{by_class: {}, total: 0}`
+- **AND** it carries the library's current `library_revision`
 
 #### Scenario: Pre-match against a populated library
 - **WHEN** preprocessing completes for a file whose library has at least one template
 - **THEN** `data/prematch/{file_id}.json` contains handles grouped by class
 - **AND** the totals match the sum of unique handles across classes
+- **AND** it carries the library's current `library_revision`
 
 ### Requirement: Per-file Match JSON export
 
@@ -1131,4 +1138,63 @@ mechanism is introduced.
 - **WHEN** a recompute job for `file_id` with target unit `"inch"` starts running
 - **THEN** the job writes `user_unit_override = "inch"` to the file row before invoking `flatten_for_render`
 - **AND** `flatten_for_render` reads the persisted override and skips the detector
+
+### Requirement: Save Match refreshes the pre-match snapshot
+
+A completed Save Match job SHALL rewrite `data/prematch/{file_id}.json` from the
+same live library scan it runs to build the Match JSON, so the auto-shown
+pre-match overlay on a later viewer load reflects every template in the file's
+current library — including templates committed after the file was
+preprocessed. The refreshed snapshot SHALL use the same not-side-aware
+`{by_class: {display_name: [handle, ...]}, total}` contract `_preprocess_worker`
+writes: a per-display-class handle **union** taken before view-split
+(`split_matches_by_side`) and before contained-match suppression (the union is
+invariant to suppression).
+
+Refreshing the snapshot SHALL be best-effort and SHALL NOT fail the Match JSON
+the job has already persisted: if the snapshot cannot be written, the system
+SHALL log a warning and leave the previous snapshot in place.
+
+#### Scenario: Save Match adds a post-preprocess class to the snapshot
+
+- **WHEN** a file's stored pre-match snapshot was written at preprocess time, when its library had no template matching class `C`
+- **AND** a template for class `C` is later committed and the operator runs Save Match, whose live scan matches handles for `C`
+- **THEN** `data/prematch/{file_id}.json` SHALL be rewritten to include class `C` with the handles the live scan matched
+- **AND** the next viewer load's auto-shown overlay SHALL show class `C` without a manual Scan All
+
+#### Scenario: Snapshot keeps the not-side-aware union shape
+
+- **WHEN** Save Match refreshes the pre-match snapshot
+- **THEN** the snapshot SHALL contain a per-class handle union, not the view-split per-instance shape of the Match JSON
+- **AND** its `total` SHALL equal the sum of unique handles across classes
+
+#### Scenario: A snapshot-refresh failure does not fail Save Match
+
+- **WHEN** the Match JSON has been written but the pre-match snapshot cannot be rewritten (e.g. a filesystem error)
+- **THEN** the Save Match job SHALL still complete successfully with its Match JSON persisted
+- **AND** the system SHALL log a warning and retain the previous snapshot
+
+### Requirement: Pre-match endpoint reports staleness
+
+`GET /api/files/{file_id}/prematch` SHALL return the cached pre-match snapshot
+together with a boolean `stale` flag. The flag SHALL be `true` when the snapshot
+is absent, carries no `library_revision`, or carries a `library_revision` that
+differs from the file's library `current_revision`; otherwise it SHALL be
+`false`. The endpoint SHALL NOT recompute the snapshot — it only reports
+freshness so the client can decide whether to fall through to a live scan.
+
+#### Scenario: Fresh snapshot reports not stale
+- **WHEN** the snapshot's `library_revision` equals the library's current revision
+- **THEN** the response carries the snapshot's `by_class`/`total`
+- **AND** `stale` is `false`
+
+#### Scenario: Snapshot from before a library mutation reports stale
+- **WHEN** a template is committed to the library after the snapshot was written
+- **AND** the snapshot's `library_revision` no longer matches the current revision
+- **THEN** the response sets `stale` to `true`
+
+#### Scenario: Missing or unstamped snapshot reports stale
+- **WHEN** no snapshot exists for the file, or the snapshot carries no `library_revision`
+- **THEN** the response sets `stale` to `true`
+- **AND** `total` is `0`
 

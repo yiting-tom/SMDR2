@@ -14,12 +14,16 @@ import json
 
 import pytest
 
-from app.rule_check import RuleCheckOutputError, check_rules
+from app.rule_check import (
+    RuleCheckOutputError,
+    _validate_envelope,
+    check_rules,
+)
 
 
 # ---- envelope helper -----------------------------------------------------
 
-_VALID_PARTS = {"SBT", "BD", "POD", "RING", "LID"}
+_VALID_PARTS = {"SBT", "BD", "POD", "RING", "LID", "NovelLID"}
 
 
 def _check_envelope(result):
@@ -629,3 +633,77 @@ def test_validate_rejects_list_to_without_from(monkeypatch):
                         lambda *_: result)
     with pytest.raises(RuleCheckOutputError, match="`to`"):
         check_rules("p", "/tmp/b")
+
+
+# ---- coordinate-mode sub-rules (add-rule-check-coordinate-display) --------
+
+def _env(sub):
+    return {"R": {"pass": True, "text": "t", "rules": [sub]}}
+
+
+def _coord_sub(**over):
+    base = {"part": "BD", "text": "x"}
+    base.update(over)
+    return base
+
+
+def test_point_to_point_coordinates_valid_without_file_id():
+    # Coordinate group is self-located in the open frame — no file_id needed.
+    _validate_envelope(_env(_coord_sub(
+        from_coordinates=[10, 20], to_coordinates=[13, 24])))
+
+
+def test_to_entity_polygon_valid_without_file_id():
+    _validate_envelope(_env(_coord_sub(
+        to_entity=[[0, 0], [5, 0], [5, 5], [0, 5]])))
+
+
+def test_from_entity_alias_accepted():
+    _validate_envelope(_env(_coord_sub(
+        from_entity="AA00", to="AB12", file_id="f1")))
+
+
+def test_coordinate_distance_and_outline_combine():
+    _validate_envelope(_env(_coord_sub(
+        from_coordinates=[0, 0], to_coordinates=[1, 1],
+        to_entity=[[2, 2], [3, 3]])))
+
+
+def test_unpaired_coordinates_rejected():
+    with pytest.raises(RuleCheckOutputError, match="together|pair"):
+        _validate_envelope(_env(_coord_sub(from_coordinates=[10, 20])))
+
+
+def test_malformed_coordinate_rejected():
+    with pytest.raises(RuleCheckOutputError, match="number"):
+        _validate_envelope(_env(_coord_sub(
+            from_coordinates=[10], to_coordinates=[1, 2])))
+
+
+def test_nan_coordinate_rejected():
+    with pytest.raises(RuleCheckOutputError, match="number"):
+        _validate_envelope(_env(_coord_sub(
+            from_coordinates=[0, 0], to_coordinates=[1, float("nan")])))
+
+
+def test_bool_coordinate_rejected():
+    with pytest.raises(RuleCheckOutputError, match="number"):
+        _validate_envelope(_env(_coord_sub(
+            from_coordinates=[0, True], to_coordinates=[1, 2])))
+
+
+def test_empty_to_entity_rejected():
+    with pytest.raises(RuleCheckOutputError, match="empty"):
+        _validate_envelope(_env(_coord_sub(to_entity=[])))
+
+
+def test_to_entity_bad_point_rejected():
+    with pytest.raises(RuleCheckOutputError, match="to_entity"):
+        _validate_envelope(_env(_coord_sub(to_entity=[[0, 0], [5]])))
+
+
+def test_from_entity_conflicting_with_from_rejected():
+    sub = {"part": "BD", "text": "x", "from": "AA00",
+           "from_entity": "BB11", "to": "C", "file_id": "f1"}
+    with pytest.raises(RuleCheckOutputError, match="disagree|from_entity"):
+        _validate_envelope(_env(sub))

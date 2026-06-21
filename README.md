@@ -1,17 +1,20 @@
-# SMDR2
+# 尋形 Conform(repo: SMDR2)
 
-Web 工具：上傳半導體封裝相關的 DXF 圖紙，框選樣板形狀建類別庫，自動
-找出圖內所有同類別 instance，再把結果交給下游 Design Rule Check
-（DRC）團隊做檢查。
+Web 工具:上傳半導體封裝相關的 DXF 圖紙,框選樣板形狀建類別庫,自動
+找出圖內所有同類別 instance,再把結果交給下游 Design Rule Check
+(DRC)團隊做檢查。產品名 2026-06-08 起為「尋形 / Conform」,repo 目錄
+與部分舊識別字仍沿用 SMDR2。
 
 ```
-[upload DXF]
+[create product + version]          ← 版號必填;建新版 = clone 上一版
+  → upload DXF (per version role)   ← 檔案 content-hash 跨版共用
   → preprocess (parse + flatten)
   → pick layers
   → ready_to_match
-  → frame-select template → commit to library
-  → match → Save Match (per file)
-  → product-level Rule Check / DRC bundle export
+  → frame-select template → commit to 該 version 的 library
+  → match → Save Match (per version+file)
+  → version-level Rule Check / DRC bundle export
+  → sign-off（畫押,可選附證明圖片）凍結 version;舊版結果永久可回看
 ```
 
 ## Quick start
@@ -22,23 +25,39 @@ uv run uvicorn app.main:app --reload
 open http://localhost:8000
 ```
 
-預設無 auth、預設綁 127.0.0.1，內網部署用。
+裸跑預設 `SMDR2_AUTH_MODE=bypass`(合成 admin,等同無 auth)、SQLite +
+本機 data/,適合開發與測試。**Production 形態**(MariaDB + MinIO +
+Keycloak OIDC + 多 replica)用 compose 鏡像驗證:
+
+```bash
+docker compose up --build        # 入口 http://localhost:8080(經 LB)
+```
+
+測試帳號與服務一覽見 [`deploy/README.md`](deploy/README.md);完整設計
+(API 全表、資料模型、部署、SLA)見 [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md)。
 
 ## Repo 結構
 
 ```
 app/                  FastAPI 後端 + frontend (static / templates)
-  external_rule_check/  量測組（外部 DRC team）的 in-tree module — 目前是 _stub.py
-  rule_check.py         Adapter：呼叫 external_rule_check.check_rules + 驗 envelope
-  tools/                CLI 小工具（drc_dry_run 等）
-  static/             dashboard.js / canvas.js / style.css / layer_modal.js
-  templates/          dashboard.html / viewer.html
-data/                 持久化資料（uploads / parsed / match / rule_check / library.sqlite）
+  db.py               SQLAlchemy Core facade(SQLite dev / MariaDB prod,方言翻譯集中於此)
+  blobstore.py        BlobStore 雙後端(Local data/ ←→ MinIO boto3;禁用 list API)
+  jobstore.py / worker_loop.py / jobs.py   DB-backed job queue + worker(見 ARCHITECTURE §3)
+  auth.py / oidc.py / guards.py            Keycloak BFF 登入 + 自建授權 + 守門鏈
+  external_rule_check/  量測組(外部 DRC team)的 in-tree module — 目前是 _stub.py
+  rule_check.py         Adapter:呼叫 external_rule_check.check_rules + 驗 envelope
+  tools/                CLI 小工具(drc_dry_run 等)
+  static/             dashboard.js / canvas.js / admin.js / csrf.js / edit_lock.js / …
+  templates/          dashboard.html / viewer.html / admin.html
+alembic/              MariaDB schema migrations(SQLite 由 store 常數 bootstrap)
+data/                 本機持久化(prod 時退化為 scratch,blob 進 MinIO)
+deploy/               docker-compose 鏡像環境 + k8s manifest + Keycloak realm
 openspec/
-  specs/              各 capability 的正式 spec（machine-validated）
+  specs/              各 capability 的正式 spec(machine-validated)
   changes/            進行中 / 已 archive 的變更提案
-skill/                自訂 skill 定義（add-rule 等）
-tests/                pytest 套件
+skill/                自訂 skill 定義(add-rule 等)
+tests/                pytest 套件(700 條,零外部依賴;另有 env-gated smoke)
+azure-pipelines.yml   CI(test+smoke)→ build → approval-gated k8s deploy
 ```
 
 ## 可調整的「定值」一覽
@@ -194,13 +213,18 @@ Handle 從 bundle 內各檔的 match JSON 第一個 match group 取，所以**�
 
 Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
-### 5) 背景 job 佇列 — `app/jobs.py`
+### 5) 背景 job 佇列 — `app/jobstore.py` + `app/worker_loop.py` + `app/jobs.py`
 
-| 常數 | 預設 | 行 | 作用 |
-|---|---|---|---|
-| `MAX_WORKERS` | `2`（env `SMDR2_MAX_WORKERS`）| 58 | preprocess / save_match / rule_check 同時跑幾支 worker process，讀 `SMDR2_MAX_WORKERS` 環境變數 |
+佇列是 **DB 表**(多 replica 安全;模型詳見 `ARCHITECTURE.md` §3、協定
+常數見 `SYSTEM_DESIGN.md` §7.1):
 
-大量併發上傳時調高；單機 dev 用 1–2 就好。
+| 常數 | 預設 | 作用 |
+|---|---|---|
+| `MAX_WORKERS`(env `SMDR2_MAX_WORKERS`)| `2` | ProcessPool 同時執行的 job 數。**150MB 大檔單支峰值 ~6.3GiB**,k8s worker 設 1 |
+| `SMDR2_EMBEDDED_WORKER` | `1` | `1` = worker thread 內嵌 web 進程(dev/測試);`0` = 只 enqueue(k8s web) |
+| `HEARTBEAT_SECONDS` / `STALE_AFTER_SECONDS` / `MAX_ATTEMPTS` | 30 / 120 / 3 | 認領者死亡 → 120s 後 requeue,3 次耗盡轉 error |
+
+大量併發上傳時調高 MAX_WORKERS;單機 dev 用 1–2 就好。
 
 > ⚠️ **Worker store-access 不變式**：所有背景 worker（`_preprocess_worker` /
 > `_save_match_worker` / `_rule_check_worker` / `_discover_layers_worker`）讀
@@ -223,14 +247,16 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | 常數 | 行 | 作用 |
 |---|---|---|
-| `DEFAULT_CLASSES` | 32 | 新 library 自動 seed 的 17 個類別清單（Substrate / Pin-1 / Lid / LidOuter / LidInner / DieArea / FiducialCircle / FiducialCross / FiducialSquare / SMD-2T / C4Ball / BGABall / Protrusion / 2DBarcode / SMD-3T / SMD-8T / SMD-14T）|
-| `DEPRECATED_CLASSES` | 53 | 已停用但歷史 DB 可能還有 — migration 會清除 |
-| `CLASS_JSON_KEY` | 59 | 顯示名 → match JSON 內 snake_case key 對照 |
-| `LEGACY_CLASS_RENAME` | 80 | 一次性 migration：舊 class 名 → 新 ID |
-| `DEFAULT_LIBRARY_ID` / `DEFAULT_LIBRARY_NAME` | 92–93 | `"default"` / `"Default"` |
+| `DEFAULT_CLASSES` | — | 新 library 自動 seed 的 20 個類別(Substrate / Pin-1 / Lid / **LidOuter** / RingOuter / RingInner / DieArea / DAM1 / DAM2 / FiducialCircle / FiducialCross / FiducialSquare / SMD-2T / C4Ball / BGABall / Protrusion / 2DBarcode / SMD-3T / SMD-8T / SMD-14T);既有 library 在 boot 時自動補齊 |
+| `DEPRECATED_CLASSES` | — | 已停用但歷史 DB 可能還有 — migration 會清除 |
+| `CLASS_JSON_KEY` | — | 顯示名 → match JSON 內 snake_case key 對照 |
+| `LEGACY_CLASS_RENAME` | — | 一次性 migration:舊 class 名 → 新 ID(上線前全 purge 後即可刪) |
+| `CLASS_CATEGORY` / `CLASS_COLORS` | — | 工具列分組(library.py)與顏色(canvas.js)— canvas.js 鏡像由 drift-guard 測試鎖同步 |
 
-加新 class：把 PascalCase 加進 `DEFAULT_CLASSES`，配對 snake_case 加進
-`CLASS_JSON_KEY`，重啟即可。
+加新 class:PascalCase 加進 `DEFAULT_CLASSES`、snake_case 配進
+`CLASS_JSON_KEY`、分組加進 `CLASS_CATEGORY`(library.py)與 canvas.js
+鏡像(顏色 + 分組;drift-guard 測試會擋漏)。重啟即可,既有 library
+自動補種子。
 
 ### 7) 檔案系統路徑 — `app/storage.py`
 
@@ -249,11 +275,19 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 整個 `data/` 目錄 portable — 備份/搬遷直接拷貝即可。
 
+> **Production 注意(2026-06-12)**:以上是本機/測試的預設。設了
+> `DATABASE_URL` 時關聯資料走 **MariaDB**(schema 由 Alembic 管理),設了
+> `S3_ENDPOINT_URL` 時所有 blob 走 **MinIO(boto3)**,`data/` 退化為
+> per-request scratch;auth 以 `SMDR2_AUTH_MODE=oidc` 開啟(Keycloak BFF)。
+> 完整架構與環境變數契約見 [`SYSTEM_DESIGN.md`](SYSTEM_DESIGN.md) 與
+> [`deploy/README.md`](deploy/README.md)。
+
 ### 8) 檔案狀態列舉 — `app/files.py`
 
-`status` 欄位可能值（行 27–33）：
-`discovering_layers` / `awaiting_layers` / `preprocessing` /
-`ready_to_match` / `checking_rules` / `report` / `error`。
+`status` 欄位可能值:
+`discovering_layers` / `awaiting_layout`(幾何散在多個 paper-space tab,
+等使用者選)/ `awaiting_layers` / `preprocessing` / `ready_to_match` /
+`checking_rules` / `report` / `error`。
 
 要新增狀態：列舉這裡 + dashboard.js 的 `fileStatusBits()` 對應顏色 / 標籤。
 
@@ -269,7 +303,6 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 | Key | 寫入處 | 作用 |
 |---|---|---|
-| `smdr2.dashboard.selectedLibrary` | `dashboard.js:93` | dashboard library 下拉的選項 |
 | `smdr2.hiddenLayers.<file_id>` | `canvas.js:49` | viewer 隱藏的 layer 集合（per file）|
 | `smdr2.viewer.ruleOpened` | `canvas.js:1422` | rule sidebar 中被使用者展開的 rule 名稱集合（預設全部摺疊；fail 排在 pass 前面）|
 
@@ -277,10 +310,20 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 ### 10) 環境變數
 
+完整對照表(dev vs prod、哪些走 Vault)見 **`SYSTEM_DESIGN.md` §13.1**。
+本機常用的:
+
 | 變數 | 預設 | 用途 |
 |---|---|---|
-| `SMDR2_N_JOBS` | `1` | 比對引擎的 worker 數，見 `matching.py:75` |
-| `SMDR2_DEV_MOCK_DRC` | unset | `"1"` → `app/external_rule_check/_stub.py` dispatch 到 `_dev_mock.py`，回傳 3 條 mock 規則（涵蓋 viewer 全部三種顯示模式）給開發 smoke 用；正式部署留空 |
+| `SMDR2_N_JOBS` | `1` | 比對引擎的 worker 數(matching.py) |
+| `SMDR2_MAX_WORKERS` | `2` | job 佇列 ProcessPool 上限 |
+| `SMDR2_EMBEDDED_WORKER` | `1` | `0` = 本進程不執行 job(k8s web) |
+| `SMDR2_AUTH_MODE` | `bypass` | `oidc` = Keycloak BFF(需 OIDC_* / SESSION_SECRET) |
+| `DATABASE_URL` | unset | 設了 → 關聯資料走 MariaDB(Alembic 管 schema) |
+| `S3_ENDPOINT_URL` | unset | 設了 → blob 走 MinIO(boto3;另需 S3_BUCKET / 憑證) |
+| `SMDR2_MAX_UPLOAD_MB` | `300` | 上傳上限(prod 設 200 並與 ingress 同步) |
+| `SMDR2_DEV_TOOLS` | `1` | `0` = 關閉 dev overrides(多 pod 必關) |
+| `SMDR2_DEV_MOCK_DRC` | unset | `"1"` → mock DRC(3 條規則,涵蓋三種顯示模式);正式部署留空 |
 
 其他 host / port 等請傳給 `uvicorn` CLI。
 
@@ -307,26 +350,32 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 ## HTTP API 速查
 
-`app/main.py` 共約 45 條路由，下表只列日常會碰的重點；**完整清單以
-`app/main.py` 的 `@app.*` decorator 為準**（含 layer 篩選、template CRUD、
-side-regions、scan-all、prematch、dev 端點等）。
+`app/main.py` 共 66 條路由,下表只列日常會碰的重點;**完整清單(含每條
+的 guard 等級)見 `SYSTEM_DESIGN.md` §4**,程式以 `@app.*` decorator 為準。
 
-錯誤碼慣例：`404` 找不到資源、`400` 輸入錯誤 / 持久化檔損毀（帶檔案路徑
-context）、`413` 上傳超過 `SMDR2_MAX_UPLOAD_MB`、`425` 檔案尚未 ready。
+錯誤碼慣例:`404` 找不到、`400` 輸入錯 / 持久化檔損毀(帶 context)、
+`401` 未登入、`403` 角色不足/CSRF、`423` 編輯鎖被佔(帶持有者)、
+`409` 已簽核凍結/重複版號、`413` 上傳超限、`415` 證明圖片格式不符、
+`425` 檔案尚未 ready。
 
 | Method · Path | 用途 |
 |---|---|
-| `GET /` | Dashboard |
-| `GET /viewer/{file_id}` | DXF viewer |
-| `GET /api/products` · `POST` · `GET /{id}` · `DELETE /{id}` | Product CRUD |
-| `POST /api/products/{pid}/files` | 上傳 DXF 到 product 的某 role |
+| `GET /` · `/viewer/{fid}` · `/admin` | Dashboard / DXF viewer / 管理頁 |
+| `GET /auth/login` · `/auth/callback` · `POST /auth/logout` · `GET /api/me` | OIDC BFF(bypass 模式下 /api/me 回合成 admin)|
+| `GET/POST /api/products` · `GET/DELETE /{pid}` | Product CRUD(建/刪 admin only,必掛 customer)|
+| `POST /api/products/{pid}/versions` | 建新版 = clone 上一版 |
+| `POST /api/versions/{vid}/sign-off` | 畫押(可選 multipart `evidence` 證明圖);`DELETE` 解簽(admin) |
+| `POST /api/products/{pid}/lock` · `/heartbeat` · `DELETE` | product 編輯鎖(423 帶持有者;admin `?force=1`)|
+| `POST /api/versions/{vid}/files` | 上傳 DXF 到該版本的某 role |
 | `GET /api/files/{id}/primitives` | 取 flatten 過的繪圖 primitives |
 | `POST /api/files/{id}/match` | 對單一 template 跑 match |
-| `POST /api/files/{id}/match-json` | Save Match — 寫 `data/match/{id}.json`；回傳 payload 包含 `arbitration_counts`（class-arbitration 仲裁結果，BGABall vs FiducialCircle 等同尺寸衝突的分流統計）|
-| `GET /api/files/{id}/match-json` | 讀回 Match JSON（dev mode "Download Match" 用這條）|
-| `POST /api/products/{pid}/rule-check` | 跑 mock DRC |
-| `GET /api/products/{pid}/rule-check` | 取最近一次 DRC 結果 |
-| `GET /api/products/{pid}/drc-bundle` | 下載 DRC handoff zip（dev mode "Download All Match" 用這條）|
+| `POST /api/files/{id}/match-json` | Save Match — 寫 `match/{vid}/{fid}.json`;回傳含 `arbitration_counts` |
+| `GET /api/files/{id}/match-json` | 讀回 Match JSON(dev mode "Download Match")|
+| `POST /api/versions/{vid}/rule-check` | 跑 DRC(版本層,全部角色檔)|
+| `GET /api/versions/{vid}/rule-check` | 取最近一次 DRC 結果 |
+| `GET /api/versions/{vid}/drc-bundle` | 下載 DRC handoff zip(dev mode "Download All Match")|
+| `GET /api/jobs/{job_id}` | job 狀態(DB-backed,任一 replica 可答)|
+| `POST/GET/DELETE /api/customers` · `/api/grants` · `GET /api/audit` | 管理面(admin)|
 
 ## 開發者模式
 
@@ -383,12 +432,19 @@ detail**。job 卡住或結果不對時，這是第一手線索。
 
 ## 文件
 
-- 架構與維護指南（新人先讀）：`ARCHITECTURE.md` — pipeline 資料流、worker
-  併發模型、快取陷阱、怎麼加 job / route / capability、OpenSpec 工作流
-- 正式契約：`openspec/specs/<capability>/spec.md`（每個 capability 一份）
-- 變更提案歷史：`openspec/changes/`
-- 外部 DRC 串接：`openspec/specs/design-rule-checking/INTEGRATION.md`
-- 新增 DRC rule：`skill/add-rule/SKILL.md`
-- Manifest schema：`openspec/specs/design-rule-checking/drc-manifest.schema.json`
+- **系統設計書**:`SYSTEM_DESIGN.md` — 需求/容量/API 全表(含 guard)/
+  資料模型/失效模式/取捨/技術債/部署與 SLA/全部視圖(C4、DFD、UML)
+- 架構與維護指南(新人先讀):`ARCHITECTURE.md` — pipeline 資料流、job
+  佇列模型、快取陷阱、怎麼加 job / route / class、OpenSpec 工作流
+- 部署:`deploy/README.md`(compose 鏡像環境 + k8s + CI/CD)、
+  `azure-pipelines.yml`、`deploy/k8s/conform.yaml`
+- Schema 細節:`docs/schema-auth-jobs.md`(auth/jobs/lock 逐欄規格)
+- 正式契約:`openspec/specs/<capability>/spec.md`(每個 capability 一份)
+- 變更提案歷史:`openspec/changes/`;版本沿革:`CHANGELOG.md`
+- 外部 DRC 串接:`openspec/specs/design-rule-checking/INTEGRATION.md`
+- 新增 DRC rule:`skill/add-rule/SKILL.md`
+- Manifest schema:`openspec/specs/design-rule-checking/drc-manifest.schema.json`
+- 決策史(point-in-time,結論以 SYSTEM_DESIGN 為準):`docs/DISCUSSION.md`、
+  `docs/auth-permissions.md`、`docs/product-versioning.md`
 
 驗證 spec：`openspec validate --specs`（CI / pre-merge gate）。

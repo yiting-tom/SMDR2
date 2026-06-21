@@ -28,3 +28,4 @@ data/*.original.dxf
 .idea/
 *.swp
 .DS_Store
+.playwright-mcp/
