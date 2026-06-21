@@ -148,6 +148,120 @@ function fmtSignedAt(ts) {
   catch { return String(ts); }
 }
 
+// ---- in-app dialogs (replace native prompt / confirm / alert) -------------
+// Self-building modal + toast helpers so dashboard flows never fall back to
+// the browser's native dialogs. All return Promises; Enter confirms, Esc /
+// backdrop cancels, focus moves to the field / primary button on open. No
+// markup required in dashboard.html — the nodes are created on demand.
+function _uiModal({ title, message, input, confirmText = "確定", cancelText, danger }) {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement;
+    const wrap = document.createElement("div");
+    wrap.className = "modal ui-dialog";
+    const bg = document.createElement("div");
+    bg.className = "modal-bg";
+    const panel = document.createElement("div");
+    panel.className = "modal-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+
+    const header = document.createElement("header");
+    header.className = "modal-header";
+    const h2 = document.createElement("h2");
+    h2.textContent = title || "";
+    header.appendChild(h2);
+
+    const body = document.createElement("div");
+    body.className = "modal-body";
+    if (message) {
+      const p = document.createElement("p");
+      p.className = "ui-dialog-message";
+      p.textContent = message;          // textContent — never inject markup
+      body.appendChild(p);
+    }
+    let field = null;
+    if (input) {
+      field = document.createElement("input");
+      field.type = "text";
+      field.className = "ui-dialog-input";
+      field.value = input.value || "";
+      if (input.placeholder) field.placeholder = input.placeholder;
+      body.appendChild(field);
+    }
+
+    const footer = document.createElement("footer");
+    footer.className = "modal-footer";
+    const spacer = document.createElement("span");
+    spacer.className = "spacer";
+    footer.appendChild(spacer);
+    let cancelBtn = null;
+    if (cancelText !== undefined) {
+      cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.className = "link-btn";
+      cancelBtn.textContent = cancelText || "取消";
+      footer.appendChild(cancelBtn);
+    }
+    const okBtn = document.createElement("button");
+    okBtn.type = "button";
+    okBtn.className = danger ? "primary ui-danger" : "primary";
+    okBtn.textContent = confirmText;
+    footer.appendChild(okBtn);
+
+    panel.append(header, body, footer);
+    wrap.append(bg, panel);
+    document.body.appendChild(wrap);
+
+    const close = (result) => {
+      window.removeEventListener("keydown", onKey, true);
+      wrap.remove();
+      if (prevFocus && prevFocus.focus) prevFocus.focus();
+      resolve(result);
+    };
+    const onConfirm = () => close(input ? field.value : true);
+    const onCancel = () => close(input ? null : false);
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); onCancel(); }
+      else if (e.key === "Enter" && document.activeElement !== cancelBtn) {
+        e.preventDefault(); onConfirm();
+      }
+    };
+    okBtn.addEventListener("click", onConfirm);
+    if (cancelBtn) cancelBtn.addEventListener("click", onCancel);
+    bg.addEventListener("click", onCancel);
+    window.addEventListener("keydown", onKey, true);   // capture: pre-empt page Esc
+
+    (field || okBtn).focus();
+    if (field) field.select();
+  });
+}
+function uiAlert(message, { title = "提示" } = {}) {
+  return _uiModal({ title, message });                 // single OK button
+}
+function uiConfirm(message, { title = "確認", confirmText = "確定", cancelText = "取消", danger = false } = {}) {
+  return _uiModal({ title, message, confirmText, cancelText, danger });
+}
+function uiPrompt(message, { title = "輸入", value = "", placeholder = "", confirmText = "確定" } = {}) {
+  return _uiModal({ title, message, input: { value, placeholder }, confirmText, cancelText: "取消" });
+}
+// Non-blocking, auto-dismissing toast (top-right). For soft notices like the
+// signed-off 409 — informs without stealing focus or blocking the page.
+function uiToast(message, { kind = "info", timeout = 5000 } = {}) {
+  let host = document.getElementById("ui-toast-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "ui-toast-host";
+    document.body.appendChild(host);
+  }
+  const el = document.createElement("div");
+  el.className = `ui-toast ui-toast-${kind}`;
+  el.textContent = message;
+  host.appendChild(el);
+  const remove = () => { el.classList.add("ui-toast-out"); setTimeout(() => el.remove(), 200); };
+  el.addEventListener("click", remove);
+  setTimeout(remove, timeout);
+}
+
 // Every mutating call on a signed-off version returns HTTP 409 with
 // detail {error: "version signed-off", signed_off_by, signed_off_at}.
 // Surface that uniformly; returns true when the response WAS that 409
@@ -157,7 +271,8 @@ async function handleSignedOff409(res) {
   let detail = null;
   try { detail = (await res.clone().json())?.detail; } catch { /* not JSON */ }
   if (detail && detail.error === "version signed-off") {
-    alert(`此版本已由 ${detail.signed_off_by} 於 ${fmtSignedAt(detail.signed_off_at)} 畫押,無法修改。`);
+    uiToast(`此版本已由 ${detail.signed_off_by} 於 ${fmtSignedAt(detail.signed_off_at)} 畫押,無法修改。`,
+            { kind: "warn" });
     return true;
   }
   return false;
@@ -455,7 +570,9 @@ function versionBar(p, version) {
 }
 
 async function createNewVersion(p, sourceVersion) {
-  const label = prompt(`新版本標籤(將複製 "${sourceVersion ? sourceVersion.label : "最新版"}" 的內容):`);
+  const label = await uiPrompt(
+    `新版本標籤(將複製 "${sourceVersion ? sourceVersion.label : "最新版"}" 的內容):`,
+    { title: "建立新版本", placeholder: "例如 v2 / 2026-Q3" });
   if (label === null) return;
   const trimmed = label.trim();
   if (!trimmed) { $status.textContent = "版本標籤不可為空"; return; }
@@ -467,7 +584,7 @@ async function createNewVersion(p, sourceVersion) {
     body: JSON.stringify(body),
   });
   if (res.status === 409) {
-    alert(`版本標籤 "${trimmed}" 已存在於此產品,請換一個標籤。`);
+    await uiAlert(`版本標籤 "${trimmed}" 已存在於此產品,請換一個標籤。`, { title: "標籤重複" });
     return;
   }
   if (!res.ok) {
@@ -525,7 +642,7 @@ async function signOffVersion(p, version) {
   if (!res.ok) {
     if (await handleSignedOff409(res)) { await refresh(); return; }
     if (res.status === 413 || res.status === 415) {
-      alert("證明圖片無效:僅接受 PNG/JPEG/WebP 且不可超過 10MB。版本未畫押。");
+      await uiAlert("證明圖片無效:僅接受 PNG/JPEG/WebP 且不可超過 10MB。版本未畫押。", { title: "證明圖片無效" });
       return;
     }
     $status.textContent = `sign-off failed: ${res.status}`;
@@ -538,7 +655,8 @@ async function signOffVersion(p, version) {
 }
 
 async function unsignVersion(p, version) {
-  if (!confirm(`確定要解除 "${p.name} / ${version.label}" 的畫押嗎?(管理者操作)`)) return;
+  if (!(await uiConfirm(`確定要解除 "${p.name} / ${version.label}" 的畫押嗎?(管理者操作)`,
+                        { title: "解除畫押", danger: true }))) return;
   const res = await fetch(`/api/versions/${version.id}/sign-off`, { method: "DELETE" });
   if (!res.ok) {
     $status.textContent = `unsign failed: ${res.status}`;
@@ -819,7 +937,7 @@ async function uploadRuleJson(product, version) {
       JSON.parse(body);  // fail fast before the round-trip
     } catch (e) {
       $status.textContent = `upload aborted: invalid JSON — ${e.message}`;
-      alert(`Invalid JSON in "${file.name}":\n\n${e.message}`);
+      await uiAlert(`Invalid JSON in "${file.name}":\n\n${e.message}`, { title: "Invalid JSON" });
       return;
     }
     try {
@@ -836,7 +954,7 @@ async function uploadRuleJson(product, version) {
           if (typeof j?.detail === "string") detail = j.detail;
         } catch { /* not JSON */ }
         $status.textContent = `upload rejected: ${detail}`;
-        alert(`Upload rejected (envelope invalid):\n\n${detail}`);
+        await uiAlert(`Upload rejected (envelope invalid):\n\n${detail}`, { title: "Upload rejected" });
         return;
       }
       const summary = await r.json();
@@ -1237,7 +1355,8 @@ async function uploadFile(versionId, role, file, replaceFileId = null) {
 }
 
 async function deleteVersionFile(version, role, file) {
-  if (!confirm(`Remove "${file.name}" from ${role}?`)) return;
+  if (!(await uiConfirm(`Remove "${file.name}" from ${role}?`,
+                        { title: "Remove file", confirmText: "Remove", danger: true }))) return;
   const res = await fetch(`/api/versions/${version.id}/files/${file.id}`, { method: "DELETE" });
   if (!res.ok) {
     if (await handleSignedOff409(res)) { await refresh(); return; }
@@ -1249,7 +1368,8 @@ async function deleteVersionFile(version, role, file) {
 }
 
 async function deleteProduct(p) {
-  if (!confirm(`Delete product "${p.name}" — every version, file binding, and result with it?`)) return;
+  if (!(await uiConfirm(`Delete product "${p.name}" — every version, file binding, and result with it?`,
+                        { title: "Delete product", confirmText: "Delete", danger: true }))) return;
   const res = await fetch(`/api/products/${p.id}`, { method: "DELETE" });
   if (!res.ok) {
     $status.textContent = `delete failed: ${res.status}`;
