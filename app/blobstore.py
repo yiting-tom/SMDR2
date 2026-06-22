@@ -150,6 +150,8 @@ class S3BlobStore:
         import boto3
         from botocore.config import Config
 
+        from app.tlsconfig import ssl_verify
+
         self.bucket = bucket
         self._client = boto3.client(
             "s3",
@@ -157,6 +159,9 @@ class S3BlobStore:
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             config=Config(signature_version="s3v4"),
+            # verify follows SSL_VERIFY; only bites when endpoint is https://
+            # (a plain http:// MinIO does no TLS regardless).
+            verify=ssl_verify(),
         )
 
     def ping(self) -> None:

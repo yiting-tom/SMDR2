@@ -154,6 +154,9 @@ def exchange_code(
     import httpx
     from authlib.jose import JsonWebToken
 
+    from app.tlsconfig import ssl_verify
+    verify = ssl_verify()
+
     blob = json.loads(_unsign(cfg.session_secret, state_cookie))
     if time.time() - blob.get("ts", 0) > STATE_TTL_SECONDS:
         logger.warning("OIDC login state expired (> %.0fs)", STATE_TTL_SECONDS)
@@ -170,7 +173,7 @@ def exchange_code(
         "code": code,
         "redirect_uri": cfg.redirect_uri,
         "code_verifier": blob["verifier"],
-    }, timeout=10.0)
+    }, timeout=10.0, verify=verify)
     if resp.status_code != 200:
         # Body snippet (never the token — this is the error body) so a
         # login-broken incident has a server-side cause.
@@ -184,7 +187,8 @@ def exchange_code(
     # uncaught 500, and log the reason (no token material).
     try:
         jwks = httpx.get(
-            f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=10.0
+            f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=10.0,
+            verify=verify,
         ).json()
         jwt = JsonWebToken(["RS256"])
         claims = jwt.decode(

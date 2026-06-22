@@ -58,3 +58,4 @@
 - [x] 8.2 k8s manifests(web ×2 + worker ×1、env/Vault 對應、ingress client_max_body_size)
 - [x] 8.3 `SMDR2_AUTH_MODE=oidc` 切換演練(compose):無 grant 登入體驗、admin 預先 grant 流程
 - [x] 8.4 docs 同步:ARCHITECTURE/README/CHANGELOG;archive 本 change
+- [x] 8.5 內網自簽 CA:`SSL_VERIFY` env 開關(`app/tlsconfig.py`)套用 httpx(oidc 交換/JWKS、connectivity 探針)與 boto3(blobstore);啟動 log `ssl_verify=` 狀態、關閉時 WARNING;helm/k8s 文件補 `SSL_VERIFY` + DB 密碼特殊字元改走 `DB_*` 拆分(`URL.create` 自動編碼)

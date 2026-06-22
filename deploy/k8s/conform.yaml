@@ -44,9 +44,15 @@ data:
   OIDC_CLIENT_ID: conform-web
   OIDC_REDIRECT_URI: https://conform.example.internal/auth/callback
   COOKIE_SECURE: "true"
+  # Outbound TLS cert verification (Keycloak/MinIO https://). Self-signed
+  # internal CA → "0" to skip, or a path to the mounted CA bundle to keep
+  # verifying (e.g. SSL_VERIFY: /etc/ssl/internal-ca.pem).
+  SSL_VERIFY: "1"
   BOOTSTRAP_ADMINS: ""          # comma-separated userids; set BEFORE first rollout
   # DB: set DATABASE_URL in the Secret, OR split — DB_USER/DB_PASSWORD in the
-  # Secret + these non-secret parts here (app composes the URL, pw URL-encoded):
+  # Secret + these non-secret parts here (app composes the URL, pw URL-encoded —
+  # use the split form when the password has special chars; a hand-built
+  # DATABASE_URL needs them percent-encoded yourself):
   #   DB_HOST: mariadb.example.internal   # required to trigger the parts path
   #   DB_PORT: "3306"                     # default 3306
   #   DB_NAME: conform                    # default conform

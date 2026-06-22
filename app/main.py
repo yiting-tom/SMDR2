@@ -321,10 +321,13 @@ def validate_startup_config() -> None:
             "Missing required configuration (set via environment / secrets): "
             + ", ".join(missing)
         )
+    from app.tlsconfig import ssl_verify
+    verify = ssl_verify()
     logger.info(
-        "startup config OK (auth_mode=%s, s3=%s)",
+        "startup config OK (auth_mode=%s, s3=%s, ssl_verify=%s)",
         os.environ.get("SMDR2_AUTH_MODE", "bypass"),
         "on" if os.environ.get("S3_ENDPOINT_URL") else "local",
+        verify if isinstance(verify, str) else ("on" if verify else "OFF"),
     )
 
 
