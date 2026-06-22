@@ -122,6 +122,19 @@ Must-set before the **first** rollout:
 > ingress URL); `OIDC_INTERNAL_BASE` is how the backend reaches Keycloak
 > in-cluster for token/JWKS calls. They are usually different hosts — set both.
 
+Optional config worth setting per environment:
+
+- `SSL_VERIFY` — TLS verification for the app's **outbound** calls (Keycloak,
+  MinIO over `https://`). Default `1` (verify against system CAs). On an
+  internal network fronted by a self-signed CA, either set `0` to skip
+  verification, or — preferred — mount the internal CA bundle and point
+  `SSL_VERIFY` at its path (e.g. `/etc/ssl/internal-ca.pem`) to keep verifying.
+- `SMDR2_LOG_LEVEL` (default `INFO`), `SMDR2_N_JOBS` (per-match parallelism).
+
+> **Complete env var reference:** this runbook lists the operationally-grouped
+> secret/ConfigMap vars. For the single full table of *every* env var (defaults,
+> dev vs prod, what's a secret), see [`SYSTEM_DESIGN.md` §13.1](../SYSTEM_DESIGN.md).
+
 ---
 
 ## 4. First install
