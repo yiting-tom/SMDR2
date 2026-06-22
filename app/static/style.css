@@ -1115,6 +1115,58 @@ body.dashboard main.dashboard-main {
   flex-direction: column;
   gap: 1rem;
 }
+
+/* ---- customer grouping (collapsible) ---- */
+.customer-group { display: flex; flex-direction: column; }
+.customer-group-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 0.4rem 0.25rem;
+  margin-bottom: 0.75rem;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.customer-group-header:hover { border-bottom-color: var(--border-strong); }
+.customer-group-header .chev {
+  font-size: 0.75em;
+  opacity: 0.65;
+  transition: transform 0.12s ease;
+}
+.customer-group.collapsed .customer-group-header .chev { transform: rotate(-90deg); }
+.customer-group-header .customer-name { font-weight: 600; }
+.customer-group-header .customer-count {
+  margin-left: auto;
+  color: var(--text-2);
+  font-size: 0.85em;
+  background: var(--surface-inset);
+  border-radius: var(--radius-pill);
+  padding: 0.05rem 0.55rem;
+}
+.customer-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.customer-group.collapsed .customer-group-body { display: none; }
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+}
+
 .product-card {
   background: var(--surface);
   border: 1px solid var(--border);

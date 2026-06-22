@@ -840,6 +840,10 @@ async def release_lock(
 async def list_products(ident=Depends(current_identity)) -> dict:
     """Products visible to the caller (viewer scope filtering —
     grant-less users see an empty system), each with its versions."""
+    # Resolve customer names once (id→name) so the dashboard can show and group
+    # by customer without a second fetch; fall back to the id for a product
+    # whose customer row is gone. One query, no per-product lookup.
+    cust_names = {c["id"]: c["name"] for c in AUTH_STORE.list_customers()}
     items = []
     for p in visible_products(ident, PRODUCT_STORE.list_all()):
         versions = [
@@ -847,6 +851,7 @@ async def list_products(ident=Depends(current_identity)) -> dict:
         ]
         items.append({
             **p.to_dict(),
+            "customer": cust_names.get(p.customer_id) or p.customer_id,
             "versions": versions,
             # The caller's role on THIS product (same fn the write guards
             # use) so the client can gate affordances — advisory only, the
@@ -863,8 +868,10 @@ async def get_product(
     p = PRODUCT_STORE.get(product_id)
     if p is None:
         raise HTTPException(status_code=404, detail="product not found")
+    c = AUTH_STORE.get_customer(p.customer_id)
     return {
         **p.to_dict(),
+        "customer": c["name"] if c else p.customer_id,
         "versions": [
             _version_payload(v) for v in VERSION_STORE.list_by_product(p.id)
         ],

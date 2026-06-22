@@ -19,6 +19,8 @@ const $emptyTitle = $empty.querySelector("[data-empty-title]");
 const $emptyHint = $empty.querySelector("[data-empty-hint]");
 const $count = document.getElementById("product-count");
 const $search = document.getElementById("product-search");
+const $customerFilter = document.getElementById("product-customer-filter");
+const $scrollEl = document.querySelector("main.dashboard-main");
 const $status = document.getElementById("status");
 const $newProductBtn = document.getElementById("new-product-btn");
 const $modal = document.getElementById("product-modal");
@@ -100,6 +102,70 @@ function getSkipLayerPick() {
 function setSkipLayerPick(on) {
   if (on) localStorage.setItem(SKIP_LAYER_PICK_KEY, "1");
   else    localStorage.removeItem(SKIP_LAYER_PICK_KEY);
+}
+
+// ---- dashboard filter / fold / scroll state -----------------------------
+// Customer + text filter, persisted in localStorage so they survive reload and
+// navigation. customerFilter "" = all customers.
+const FILTER_KEY = "smdr2.dashboard.filter";
+let filterText = "";
+let customerFilter = "";
+(function loadFilterState() {
+  try {
+    const o = JSON.parse(localStorage.getItem(FILTER_KEY) ?? "{}");
+    filterText = o.text || "";
+    customerFilter = o.customer || "";
+  } catch { /* storage unavailable — in-memory defaults */ }
+})();
+function saveFilterState() {
+  try {
+    localStorage.setItem(FILTER_KEY, JSON.stringify({ text: filterText, customer: customerFilter }));
+  } catch { /* ignore */ }
+}
+
+// Collapsed customer groups, persisted (localStorage). Default expanded.
+const CUSTOMER_FOLD_KEY = "smdr2.dashboard.foldedCustomers";
+function loadFoldedCustomers() {
+  try { return new Set(JSON.parse(localStorage.getItem(CUSTOMER_FOLD_KEY) ?? "[]")); }
+  catch { return new Set(); }
+}
+function saveFoldedCustomers(set) {
+  try { localStorage.setItem(CUSTOMER_FOLD_KEY, JSON.stringify([...set])); } catch {}
+}
+let foldedCustomers = loadFoldedCustomers();
+
+// Dashboard scroll position across navigation (sessionStorage, per-tab):
+// the list renders after an async fetch, so restore after render and clamp to
+// the content height; restore once per load so filter re-renders don't fight
+// the user. Saved on pagehide (covers navigating into a product and back).
+const DASH_SCROLL_KEY = "smdr2.dashboard.scroll";
+let dashScrollRestored = false;
+function saveDashScroll() {
+  try { if ($scrollEl) sessionStorage.setItem(DASH_SCROLL_KEY, String($scrollEl.scrollTop)); }
+  catch { /* ignore */ }
+}
+function restoreDashScroll() {
+  if (dashScrollRestored || !$scrollEl) return;
+  dashScrollRestored = true;
+  let y;
+  try { y = parseFloat(sessionStorage.getItem(DASH_SCROLL_KEY) ?? ""); } catch { return; }
+  if (!Number.isFinite(y) || y <= 0) return;
+  requestAnimationFrame(() => {
+    const max = Math.max(0, $scrollEl.scrollHeight - $scrollEl.clientHeight);
+    $scrollEl.scrollTop = Math.min(y, max);
+    try { sessionStorage.removeItem(DASH_SCROLL_KEY); } catch {}
+  });
+}
+window.addEventListener("pagehide", saveDashScroll);
+
+const UNCATEGORIZED = "未分類";
+function customerOf(p) { return p.customer || p.customer_id || UNCATEGORIZED; }
+// Sort customers by name; the uncategorized bucket always sorts last.
+function customerSort(a, b) {
+  if (a === b) return 0;
+  if (a === UNCATEGORIZED) return 1;
+  if (b === UNCATEGORIZED) return -1;
+  return a.localeCompare(b);
 }
 
 // Generic browser-side download: wraps a Blob in a transient <a download>,
@@ -415,15 +481,46 @@ async function _syncRuleCheckJobsFromProducts() {
   }
 }
 
-// Search filter (page-head input): matches the product name or any file
-// name in the currently selected version. In-memory only — polling
-// re-renders keep the filter applied.
-let filterText = "";
+// Search + customer filter (page-head). Both persist in localStorage
+// (filterText / customerFilter declared above) so they survive reload and
+// navigation; polling re-renders keep them applied.
 if ($search) {
+  $search.value = filterText;
   $search.addEventListener("input", () => {
     filterText = $search.value;
+    saveFilterState();
     renderProducts();
   });
+}
+if ($customerFilter) {
+  $customerFilter.addEventListener("change", () => {
+    customerFilter = $customerFilter.value;
+    saveFilterState();
+    renderProducts();
+  });
+}
+
+function clearFilters() {
+  filterText = "";
+  customerFilter = "";
+  if ($search) $search.value = "";
+  if ($customerFilter) $customerFilter.value = "";
+  saveFilterState();
+  renderProducts();
+}
+
+// Rebuild the customer-filter options from the customers present in the
+// current product set, preserving the active selection (or falling back to
+// "all" if that customer is gone).
+function populateCustomerFilter() {
+  if (!$customerFilter) return;
+  const names = [...new Set(products.map(customerOf))].sort(customerSort);
+  $customerFilter.innerHTML =
+    `<option value="">全部客戶</option>` +
+    names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  const keep = names.includes(customerFilter) ? customerFilter : "";
+  $customerFilter.value = keep;
+  if (keep !== customerFilter) { customerFilter = keep; saveFilterState(); }
 }
 
 function productMatchesFilter(p, q) {
@@ -436,18 +533,30 @@ function productMatchesFilter(p, q) {
 
 function renderProducts() {
   $list.innerHTML = "";
+  populateCustomerFilter();
+  // Apply both filters BEFORE grouping, so empty groups don't render and the
+  // per-group count reflects only what's shown.
   const q = filterText.trim().toLowerCase();
-  const shown = q ? products.filter((p) => productMatchesFilter(p, q)) : products;
+  let shown = products;
+  if (customerFilter) shown = shown.filter((p) => customerOf(p) === customerFilter);
+  if (q) shown = shown.filter((p) => productMatchesFilter(p, q));
+  const filtering = !!(q || customerFilter);
   if ($count) {
     $count.textContent = products.length
-      ? (q ? `${shown.length} / ${products.length}` : String(products.length))
+      ? (filtering ? `${shown.length} / ${products.length}` : String(products.length))
       : "";
   }
   if (!shown.length) {
     $empty.hidden = false;
     if (products.length) {
       $emptyTitle.textContent = "沒有符合的產品";
-      $emptyHint.textContent = `沒有產品符合「${filterText.trim()}」— 試試其他關鍵字。`;
+      $emptyHint.innerHTML = "沒有產品符合目前的篩選。 ";
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "link-btn";
+      clear.textContent = "清除篩選";
+      clear.addEventListener("click", clearFilters);
+      $emptyHint.appendChild(clear);
     } else {
       $emptyTitle.textContent = "尚無產品";
       $emptyHint.textContent =
@@ -456,9 +565,46 @@ function renderProducts() {
     return;
   }
   $empty.hidden = true;
-  // Flat list — no customer/library grouping (libraries are version
-  // internals now).
-  for (const p of shown) $list.appendChild(productCard(p));
+  // Group by customer; groups sorted by name, 未分類 last.
+  const groups = new Map();
+  for (const p of shown) {
+    const c = customerOf(p);
+    (groups.get(c) ?? groups.set(c, []).get(c)).push(p);
+  }
+  for (const name of [...groups.keys()].sort(customerSort)) {
+    $list.appendChild(customerGroup(name, groups.get(name)));
+  }
+  // Restore prior scroll once the list exists (no-op after the first render).
+  restoreDashScroll();
+}
+
+// One collapsible customer group: a header (name + shown count) over the
+// product cards. Collapsed state persists in localStorage.
+function customerGroup(name, items) {
+  const sec = document.createElement("section");
+  sec.className = "customer-group";
+  if (foldedCustomers.has(name)) sec.classList.add("collapsed");
+
+  const header = document.createElement("button");
+  header.type = "button";
+  header.className = "customer-group-header";
+  header.innerHTML =
+    `<span class="chev" aria-hidden="true">▾</span>` +
+    `<span class="customer-name">${escapeHtml(name)}</span>` +
+    `<span class="customer-count">${items.length}</span>`;
+  header.addEventListener("click", () => {
+    if (foldedCustomers.has(name)) foldedCustomers.delete(name);
+    else foldedCustomers.add(name);
+    saveFoldedCustomers(foldedCustomers);
+    sec.classList.toggle("collapsed");
+  });
+  sec.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "customer-group-body";
+  for (const p of items) body.appendChild(productCard(p));
+  sec.appendChild(body);
+  return sec;
 }
 
 // ---- version bar ----------------------------------------------------------
