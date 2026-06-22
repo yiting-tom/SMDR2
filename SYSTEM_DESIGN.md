@@ -439,6 +439,31 @@ worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request
 - **audit_log**(業務層,admin 可查):範本增刪改/搬移、調參、簽核/解簽、product/customer 建刪、grants 異動、強制解鎖、首登 — actor + product/version 冗餘欄位,免 join 可篩。
 - **`/healthz`**:所有模式免 auth;k8s readiness/liveness 唯一允許的探針端點(`/api/*` 在 oidc 模式會 401 kubelet → rollout 卡死,review 修正項)。
 
+### 7.9 對外連線的 TLS 驗證(`app/tlsconfig.py`,2026-06-22)
+
+**問題**:本服務對外的 HTTPS 呼叫只有兩類 ——
+(1) Keycloak:token 交換 + JWKS 取得(`app/oidc.py`,httpx)、`/readyz` 連線探針(`app/connectivity.py`,httpx);
+(2) MinIO / S3:blob 讀寫(`app/blobstore.py`,boto3,**僅當 `S3_ENDPOINT_URL` 是 `https://` 才走 TLS**)。
+公司內網的這兩個服務由**自簽 CA** 簽憑證,對公開信任庫(系統 CA)驗證一定失敗;預設驗證會讓登入與上傳整個壞掉。
+
+**設計**:單一環境變數 `SSL_VERIFY`,**集中**在 `app/tlsconfig.ssl_verify()` 解析,回傳值可直接當 httpx 與 boto3 的 `verify=` 參數。三態:
+
+| `SSL_VERIFY` | `ssl_verify()` 回傳 | 行為 |
+|---|---|---|
+| 未設 / `1` / `true` / `yes` / `on` | `True` | 對系統 CA 驗證(**預設,最安全**) |
+| `0` / `false` / `no` / `off` | `False` | 跳過驗證(自簽內網用) |
+| 其他(任意字串) | 該字串(原樣) | 當成 CA bundle 檔/目錄路徑 — httpx 與 botocore 都接受路徑當 `verify=` |
+
+**落點與一致性**:四個呼叫點(oidc 兩處 + connectivity 一處 + blobstore 一處)各自 `from app.tlsconfig import ssl_verify` 取值,**沒有任何一處自己讀 env 或自己判斷布林** —— 政策只有一個來源,改規則只改 `tlsconfig.py`。
+
+**安全姿態**(code review 重點):
+- 關閉驗證**只在可信內網**才安全;**較佳做法是給 CA bundle 路徑保留驗證**,而非整個關掉。
+- 預設是「驗證」——必須由 operator 顯式設 `0` 才會關,不會默默放行。
+- 可觀測:啟動時 `validate_startup_config` log 一行 `ssl_verify=on/OFF/<path>`;一旦關閉,`ssl_verify()` 在該 process **WARNING 一次**(web 與 worker 各自會印)——prod 誤關必留痕。
+- **MariaDB 不在此範圍**:pymysql 預設不啟 TLS(明文連線),沒有憑證可驗。若日後 IT 強制 DB 走 TLS,再在 `app/db.py` 的 `create_engine(connect_args={"ssl": …})` 處比照 `SSL_VERIFY` 加掛(目前刻意不做,避免無謂強制 TLS)。
+
+> **交接注意 — 別跟 DB 密碼特殊字元搞混**:那是另一回事,且已處理。密碼含 `@ : / # ?` 時走 `DB_*` 拆分設定(§13.1 資料庫段),由 SQLAlchemy `URL.create` 自動 percent-encode;不要手拼 `DATABASE_URL`。`SSL_VERIFY` 與密碼編碼是兩個獨立的設定面。
+
 ## 8. 失效模式與韌性
 
 | 失效 | 影響 | 對策 |
@@ -482,6 +507,7 @@ worker I/O(150MB 友善):`blobs.local_input(key)` 把 DXF stream 到 per-request
 | 併發控制 | product 級悲觀鎖 | 樂觀鎖(ETag) | 編輯是數十分鐘連續互動;樂觀鎖存檔才報衝突 → 白做工 |
 | 簽核凍結 | server 端守門鏈 | 前端 disable | API 直打也要擋 |
 | 隔離級別 | READ COMMITTED | InnoDB 預設 REPEATABLE READ | 長連線 + 預設隔離 = 跨 replica 凍結視圖(實測) |
+| 對外 TLS 驗證 | 單一 `SSL_VERIFY` env(預設驗證,可填 CA bundle 路徑)| 寫死關閉 / 各 client 各自讀 env | 自簽內網需可關,但預設安全 + 政策單一來源(§7.9);硬綁 bundle 路徑換環境就要改 code |
 
 ## 11. 演進路徑
 
@@ -937,23 +963,67 @@ flowchart TD
 
 外部待取:Keycloak realm/client/issuer(dev 走 .env、prod 走 Vault)、DBA 連線與專用 schema。
 
-### 13.1 設定參考(env var 是唯一的環境差異面)
+### 13.1 設定參考 — 環境變數總表(唯一真相)
 
-| 變數 | dev(compose) | prod(k8s) | 語意 |
-|---|---|---|---|
-| `DATABASE_URL` | compose MariaDB | **Secret(Vault)** | 未設 → SQLite `DB_PATH`(測試隔離:非預設路徑永遠走 SQLite,不會誤連共用 DB) |
-| `S3_ENDPOINT_URL` / `S3_BUCKET` | compose MinIO / `conform` | ConfigMap / 公司 MinIO | 未設 endpoint → Local blobstore |
-| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | .env | **Secret** | boto3 憑證 |
-| `SMDR2_AUTH_MODE` | `oidc`(compose 演練)/ 預設 `bypass` | `oidc` | bypass = 合成 admin(dev/測試) |
-| `OIDC_ISSUER` / `OIDC_INTERNAL_BASE` | localhost / 容器內 URL | ingress URL / cluster svc URL | 雙 URL 設計(§7.3) |
-| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `SESSION_SECRET` | .env | **Secret(Vault)** | client 憑證;session/state HMAC 金鑰 |
-| `OIDC_REDIRECT_URI` / `COOKIE_SECURE` | http localhost / false | https ingress / `true` | — |
-| `BOOTSTRAP_ADMINS` | `admin1` | 上線前設(逗號分隔 userid) | 冪等 seed 第一批 admin grant |
-| `SMDR2_EMBEDDED_WORKER` | web=0, worker 不設 | **web=0**(只 enqueue) | 預設 1(單容器/測試) |
-| `SMDR2_MAX_WORKERS` | 1 | worker=1(150MB 檔 ≈6.3GiB/併發) | ProcessPool 上限;與記憶體 request 必須一起調 |
-| `SMDR2_MAX_UPLOAD_MB` | 200 | 200(ingress `proxy-body-size` 同步) | SEC-001 |
-| `SMDR2_DATA_DIR` | volume | `/scratch`(emptyDir) | S3 模式下僅 scratch 用 |
-| `SMDR2_DEV_TOOLS` / `SMDR2_DEV_USER` / `SMDR2_DEV_MOCK_DRC` | 開 | **`SMDR2_DEV_TOOLS=0`** | dev_overrides 是 process-local,多 pod 必關(§9) |
+> env var 是唯一的環境差異面。**本表是全專案 env var 的唯一完整來源**;README §10 是
+> 本機/開發子集、`deploy/PRODUCTION_DEPLOY.md` §2–3 是上線操作分組(secret/ConfigMap),
+> 兩者皆指向本表。新增 env var 一律先補在這裡。
+> 慣例:布林開關吃 `1/true/yes/on` vs `0/false/no/off`;**Secret** = 機密,走 Vault/Secret,絕不進 repo。
+
+**資料庫(app DB)** — 兩種設定法擇一,`DATABASE_URL` 優先;皆未設 → 退化 SQLite。
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `DATABASE_URL` | unset | compose MariaDB 全 URL | **Secret(Vault)** | 完整 SQLAlchemy URL(`mysql+pymysql://…?charset=utf8mb4`)。未設 → SQLite `DB_PATH`(測試隔離:非預設路徑永遠走 SQLite,不誤連共用 DB) |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` | — / `3306` / `conform` | — | ConfigMap | 拆分設定的非機密部分;`DB_HOST` 設了才觸發此路徑 |
+| `DB_USER` / `DB_PASSWORD` | — | — | **Secret(Vault)** | 帳密;**密碼含特殊字元(`@ : / # ?`)時務必走拆分路徑** — 由 `URL.create` 自動 percent-encode,別手拼 `DATABASE_URL` |
+| `DB_DRIVERNAME` / `DB_CHARSET` | `mysql+pymysql` / `utf8mb4` | — | (少用) | 覆寫驅動 / 連線字元集 |
+
+**Blob store(MinIO / S3)** — `S3_ENDPOINT_URL` 觸發 S3,未設 → Local(`data/`)。
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `S3_ENDPOINT_URL` / `S3_BUCKET` | unset / — | compose MinIO / `conform` | ConfigMap / 公司 MinIO | 未設 endpoint → Local blobstore |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | — | .env | **Secret** | boto3 憑證(`S3_ENDPOINT_URL` 設了即必填) |
+
+**認證 / 授權(OIDC BFF,§7.3)** — `SMDR2_AUTH_MODE=oidc` 開啟;以下在 oidc 模式啟動即驗證(`validate_startup_config`)。
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `SMDR2_AUTH_MODE` | `bypass` | `oidc`(演練) | `oidc` | bypass = 合成 admin(dev/測試,等同無 auth) |
+| `OIDC_ISSUER` / `OIDC_INTERNAL_BASE` | — / =ISSUER | localhost / 容器內 URL | ingress URL / cluster svc URL | 雙 URL 設計(§7.3):token `iss` vs 後端實際連線 |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | — | .env | **Secret(Vault)** | Keycloak `conform-web` client 憑證 |
+| `OIDC_REDIRECT_URI` | — | http localhost/callback | https ingress/callback | 須與 Keycloak 註冊一致 |
+| `OIDC_POST_LOGOUT_REDIRECT_URI` | 由 redirect_uri 推導 | unset | 通常 unset | app origin 與 callback 不同時才覆寫;須在 Keycloak 註冊 |
+| `SESSION_SECRET` | — | .env | **Secret(Vault)** | session/state cookie HMAC 金鑰;**生成一次保持穩定**,輪替使在途登入失效 |
+| `COOKIE_SECURE` | `false` | `false` | `true` | `true` 需 ingress 有 TLS |
+| `BOOTSTRAP_ADMINS` | 空 | `admin1` | 上線前設(逗號分隔 userid) | 冪等 seed 第一批 admin grant;空 = 沒人能管理 |
+
+**對外 TLS 驗證** — 內網自簽 CA 用。
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `SSL_VERIFY` | `1`(驗證) | `1` | `1`,或自簽 CA 環境設 `0` / CA bundle 路徑 | 控制 httpx(Keycloak token/JWKS、connectivity 探針)與 boto3(MinIO)的 `verify=`。`0`/`false` 關閉驗證;其他值當 CA bundle 路徑(較佳)。關閉時啟動 WARNING 一次。MariaDB 走 pymysql 預設不啟 TLS,無此問題。**設計理由與落點見 §7.9** |
+
+**Worker / 執行期**
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `SMDR2_EMBEDDED_WORKER` | `1` | web=0, worker 不設 | **web=0**(只 enqueue) | `1` = job 在本進程 daemon thread 跑(單容器/測試);`0` = 只 enqueue,交給獨立 worker |
+| `SMDR2_MAX_WORKERS` | `2` | 1 | worker=1(150MB 檔 ≈6.3GiB/併發) | job 佇列 ProcessPool 上限;**與記憶體 request 必須一起調** |
+| `SMDR2_N_JOBS` | `1` | — | 大圖設 CPU 核心數 | 單支比對引擎內部的 worker 數(matching.py) |
+| `SMDR2_MAX_UPLOAD_MB` | `300` | 200 | 200(ingress `proxy-body-size` 同步) | 單檔 DXF 上限,超過回 413(SEC-001) |
+| `SMDR2_DATA_DIR` | repo `data/` | volume | `/scratch`(emptyDir) | S3 模式下僅 per-request scratch 用 |
+| `SMDR2_LOG_LEVEL` | `INFO` | — | 視需要 | 根 logger 等級 |
+
+**開發專用(多 pod 一律關)** — process-local,prod 必須關(§9)。
+
+| 變數 | 預設 | dev(compose) | prod(k8s) | 語意 |
+|---|---|---|---|---|
+| `SMDR2_DEV_TOOLS` | `1` | 開 | **`0`** | dev overrides 總開關 |
+| `SMDR2_DEV_USER` | unset | 設 | 不設 | bypass 模式下的合成身分 userid |
+| `SMDR2_DEV_RESOLVE_GRANTS` | unset | 視需要 | 不設 | `1` = bypass 下改用該 user 的真實 grant(權限演練) |
+| `SMDR2_DEV_MOCK_DRC` | unset | 視需要 | 不設 | `1` = mock DRC(3 條規則涵蓋三種顯示模式) |
 
 ### 13.2 k8s 部署形態(`deploy/k8s/conform.yaml`)
 

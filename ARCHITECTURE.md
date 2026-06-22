@@ -218,6 +218,13 @@ README §6：PascalCase 加進 `DEFAULT_CLASSES`、snake_case 配進
 那是量測組的 in-tree module（`app/external_rule_check/`），見
 `skill/add-rule/SKILL.md` 與 `openspec/specs/design-rule-checking/INTEGRATION.md`。
 
+### 加一個對外 HTTPS 連線（或改 TLS 驗證）
+任何對外的 httpx / boto3 client，`verify=` 一律帶 `app.tlsconfig.ssl_verify()`
+——**不要自己讀 `SSL_VERIFY` 或自己判斷**。內網全是自簽 CA,這個開關是唯一
+的政策來源(設計理由見 SYSTEM_DESIGN §7.9,變數見 §13.1)。新增環境變數則
+**先補進 SYSTEM_DESIGN §13.1 那張總表**(唯一完整來源),再視需要在 README §10
+(開發子集)或 `deploy/PRODUCTION_DEPLOY.md`(上線操作)補一行。
+
 ---
 
 ## 7. OpenSpec 工作流（改「行為」一定要走）

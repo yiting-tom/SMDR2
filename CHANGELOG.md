@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-06-22 — `SSL_VERIFY` toggle + env var reference consolidated
+
+Internal network fronts Keycloak/MinIO with self-signed CAs, so a new
+`SSL_VERIFY` env var (`app/tlsconfig.ssl_verify()`) controls TLS cert
+verification for all outbound clients — httpx (OIDC token exchange + JWKS,
+connectivity probe) and boto3 (S3). Values: unset/`1` verify, `0` skip,
+any other value = CA-bundle path. Startup logs `ssl_verify=` and WARNs once
+when disabled. MariaDB stays plaintext via pymysql (no verify to disable);
+DB-password special chars were already handled by the `DB_*` split path
+(`URL.create` percent-encodes). Tracked as task 8.5 in
+`add-production-infra-and-auth`.
+
+Docs: `SYSTEM_DESIGN.md` §13.1 is now the **single complete env var
+reference** (all ~33 vars, grouped DB/blob/auth/TLS/runtime/dev, with
+defaults; previously undocumented `SMDR2_LOG_LEVEL`, `SMDR2_N_JOBS`,
+`SMDR2_DEV_RESOLVE_GRANTS`, `OIDC_POST_LOGOUT_REDIRECT_URI`, and the `DB_*`
+split vars now included). README §10 and `deploy/PRODUCTION_DEPLOY.md` were
+reduced to operational subsets that point to §13.1.
+
+
 ## 2026-06-12 — unified dashboard + admin UI, identity chip
 
 Both `/` and `/admin` now share one header: the 尋形 Conform wordmark, a

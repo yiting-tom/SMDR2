@@ -310,8 +310,8 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 
 ### 10) 環境變數
 
-完整對照表(dev vs prod、哪些走 Vault)見 **`SYSTEM_DESIGN.md` §13.1**。
-本機常用的:
+**所有** env var 的唯一完整對照表(dev vs prod、哪些走 Vault、DB 拆分設定、TLS)見
+**`SYSTEM_DESIGN.md` §13.1**。下表只列本機/開發常用子集:
 
 | 變數 | 預設 | 用途 |
 |---|---|---|
@@ -324,6 +324,7 @@ Schema 在 `openspec/specs/design-rule-checking/drc-manifest.schema.json`。
 | `SMDR2_MAX_UPLOAD_MB` | `300` | 上傳上限(prod 設 200 並與 ingress 同步) |
 | `SMDR2_DEV_TOOLS` | `1` | `0` = 關閉 dev overrides(多 pod 必關) |
 | `SMDR2_DEV_MOCK_DRC` | unset | `"1"` → mock DRC(3 條規則,涵蓋三種顯示模式);正式部署留空 |
+| `SSL_VERIFY` | `1` | 對外 TLS 驗證;內網自簽 CA 設 `0` 關閉,或填 CA bundle 路徑 |
 
 其他 host / port 等請傳給 `uvicorn` CLI。
 
