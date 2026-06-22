@@ -63,6 +63,47 @@ def test_files_endpoint_returns_a_list():
         assert "files" in r.json()
 
 
+def test_products_expose_resolved_customer_name():
+    """`/api/products` (list + single) exposes a `customer` display name beside
+    `customer_id`: the seeded `uncategorized` resolves to `未分類`, a named
+    customer resolves to its name, and a dangling reference falls back to the id
+    (dashboard-customer-grouping)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.auth import AUTH_STORE
+
+    with TestClient(app) as client:
+        # Default product → seeded uncategorized customer.
+        r = client.post("/api/products", json={
+            "name": "cust-default", "version_label": "v1",
+        })
+        assert r.status_code == 200, r.text
+        pid_default = r.json()["id"]
+
+        # Named customer → product bound to it.
+        cid = AUTH_STORE.create_customer("客戶-測試", actor="api-test")
+        r = client.post("/api/products", json={
+            "name": "cust-named", "version_label": "v1", "customer_id": cid,
+        })
+        assert r.status_code == 200, r.text
+        pid_named = r.json()["id"]
+
+        by_id = {p["id"]: p for p in client.get("/api/products").json()["products"]}
+        assert by_id[pid_default]["customer_id"] == "uncategorized"
+        assert by_id[pid_default]["customer"] == "未分類"
+        assert by_id[pid_named]["customer_id"] == cid
+        assert by_id[pid_named]["customer"] == "客戶-測試"
+
+        # Single-product read also carries the name.
+        assert client.get(f"/api/products/{pid_named}").json()["customer"] == "客戶-測試"
+
+        # Dangling reference (customer row deleted) → falls back to the id.
+        AUTH_STORE.delete_customer(cid, actor="api-test")
+        by_id = {p["id"]: p for p in client.get("/api/products").json()["products"]}
+        assert by_id[pid_named]["customer"] == cid
+        assert by_id[pid_named]["customer"]  # non-empty
+
+
 def test_create_product_requires_version_label():
     """C7: no version-less products — a missing version_label is a 422."""
     from fastapi.testclient import TestClient
