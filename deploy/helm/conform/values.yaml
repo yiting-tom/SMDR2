@@ -28,6 +28,13 @@ config:
   OIDC_CLIENT_ID: conform-web
   OIDC_REDIRECT_URI: https://conform.example.internal/auth/callback
   COOKIE_SECURE: "true"          # requires TLS on the ingress host
+  # TLS cert verification for OUTBOUND calls (Keycloak/MinIO over https://).
+  # Internal services fronted by a self-signed CA fail public-trust-store
+  # verification: set "0" to skip it, OR point at the internal CA bundle
+  # mounted into the pod (preferred — keeps verification on):
+  #   SSL_VERIFY: "0"                       # skip verification
+  #   SSL_VERIFY: /etc/ssl/internal-ca.pem  # verify against internal CA
+  SSL_VERIFY: "1"                # default: verify against system CAs
   # Comma-separated userids seeded as admins on first boot. SET BEFORE THE
   # FIRST ROLLOUT — it is the only way the first admin comes into existence.
   BOOTSTRAP_ADMINS: ""
@@ -36,7 +43,9 @@ config:
   #   DB_HOST: mariadb.prod.svc
   #   DB_PORT: "3306"            # default 3306
   #   DB_NAME: conform           # default conform
-  # The app composes the URL (password URL-encoded). DATABASE_URL wins if set.
+  # The app composes the URL (password URL-encoded) — use the split form when
+  # the password has special chars (@ : / ? # etc.); a hand-built DATABASE_URL
+  # would need them percent-encoded yourself. DATABASE_URL wins if set.
   # See deploy/PRODUCTION_DEPLOY.md §2 "DB from parts".
 
 # The Secret holding the required keys: SESSION_SECRET, OIDC_CLIENT_SECRET,

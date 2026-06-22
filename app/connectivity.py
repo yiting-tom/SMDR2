@@ -47,9 +47,11 @@ def _check_oidc() -> tuple[bool, str]:
     try:
         import httpx
         from app.oidc import OidcConfig
+        from app.tlsconfig import ssl_verify
         cfg = OidcConfig.from_env()
         resp = httpx.get(
-            f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=5.0)
+            f"{cfg.internal_base}/protocol/openid-connect/certs", timeout=5.0,
+            verify=ssl_verify())
         resp.raise_for_status()
         return True, "JWKS ok"
     except Exception as e:  # noqa: BLE001
