@@ -1864,6 +1864,30 @@ function setOpenedRules(s) {
   sessionStorage.setItem(RULE_OPEN_KEY, JSON.stringify([...s]));
 }
 
+// Rule-sidebar scroll position, restored across cross-file rule jumps so the
+// operator returns to their place instead of the rebuilt list's top. Per-file
+// (the jump target is a different file with a different rule list), in
+// sessionStorage, mirroring VIS_STORAGE_KEY. try/catch so a disabled store
+// degrades to today's top-reset behaviour.
+const RULE_SCROLL_KEY = `smdr2.viewer.ruleScroll.${FILE_ID}`;
+function saveRuleScroll() {
+  try { sessionStorage.setItem(RULE_SCROLL_KEY, String($ruleSidebarBody.scrollTop)); }
+  catch { /* storage unavailable — skip */ }
+}
+function restoreRuleScroll() {
+  let y;
+  try { y = parseFloat(sessionStorage.getItem(RULE_SCROLL_KEY) ?? ""); }
+  catch { return; }
+  if (!Number.isFinite(y) || y <= 0) return;
+  // The body was just rebuilt; restore after layout, clamped to its height.
+  requestAnimationFrame(() => {
+    const max = Math.max(0, $ruleSidebarBody.scrollHeight - $ruleSidebarBody.clientHeight);
+    $ruleSidebarBody.scrollTop = Math.min(y, max);
+  });
+}
+// Catch-all for browser back/forward and other exits.
+window.addEventListener("pagehide", saveRuleScroll);
+
 let currentProductInfo = null;     // version payload cached for sibling links (files_by_role*)
 let currentRuleResults = null;     // /api/versions/{vid}/rule-check response cached
 
@@ -1892,6 +1916,12 @@ async function loadRuleSidebar(role) {
     $ruleSidebar.hidden = false;
     $rulesBtn.classList.add("active");
   }
+
+  // Restore the prior scroll (e.g. after a cross-file rule jump). Runs after
+  // the focus block so the sidebar is already un-hidden when a ?rule=&idx=
+  // jump brought us here; focus only highlights/recenters and doesn't scroll
+  // the sidebar, so this doesn't fight it.
+  restoreRuleScroll();
 }
 
 function renderRuleSidebar(role) {
@@ -2047,6 +2077,7 @@ function renderSubRuleItem(ruleName, idx, sub, currentRole, rulePass) {
       focusSubRule(ruleName, idx, rulePass, sub);
       highlightFocusedInSidebar();
     } else if (targetFile) {
+      saveRuleScroll();   // remember our place before the cross-file jump
       location.href = `/viewer/${targetFile.id}?version_id=${encodeURIComponent(VERSION_ID)}&rule=${encodeURIComponent(ruleName)}&idx=${idx}`;
     }
   });
