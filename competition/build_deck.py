@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-尋形 Conform — Claude Code 開發競賽簡報 — 6 頁 (16:9)
-產出: 尋形Conform_競賽簡報.pptx
+尋形 Conform — Claude Code 開發競賽簡報 — 7 分鐘簡報 + 3 分鐘 Q&A (16:9)
+產出: 尋形Conform_競賽簡報.pptx（封面 + 7 內容頁 + Q&A + BACKUP 決策表，共 10 張）
 風格: 參考 contrastive_learning_evolution 風格 —
       冷灰底 #F4F6FB + 深 slate 卡 #162039、膠囊徽章、Tailwind 重點色、
       PingFang TC 標題 + Menlo 等寬標籤、卡片/架構流程語言。
-重點: 嚴守 6 頁上限; 詳細決策表 / 講稿放每頁 notes (備註不計頁數)。
+重點: 無頁數/章節限制; 以 7:00 節奏配頁, 每頁 notes 開頭標 ⏱ 時間帶;
+      決策表併入主檔 BACKUP 頁（Q&A 免切檔）。
 """
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
@@ -44,6 +45,8 @@ WHITE    = RGBColor(0xFF, 0xFF, 0xFF)
 
 FONT = "PingFang TC"     # CJK + Latin body/heading
 MONO = "Menlo"           # labels, years, code, page numbers
+
+TOTAL = 8                # numbered pages: 封面 01 … 收尾 08 (Q&A / BACKUP 不編號)
 
 prs = Presentation()
 prs.slide_width  = Inches(13.333)
@@ -159,7 +162,7 @@ def brandmark(s, x, y, size, form_color=CYAN6, bracket_color=NAVY):
     rect(s, x + size * 0.94 - t, y + size * 0.94 - arm, t, arm, fill=bracket_color)
 
 
-def header(s, badge_zh, badge_en, zh, en, idx, accent=AMBER, badge_w=2.5):
+def header(s, badge_zh, badge_en, zh, en, idx, accent=AMBER, badge_w=2.5, tag=None):
     rect(s, 0, 0, SW, SH, fill=BG)
     pill(s, 0.6, 0.5, badge_w, 0.46, badge_zh, badge_en, accent, WHITE if accent != AMBER else NAVY)
     txt(s, 0.57, 1.04, 9.4, 0.7, [one(zh, 27, True, HEAD)])
@@ -167,7 +170,8 @@ def header(s, badge_zh, badge_en, zh, en, idx, accent=AMBER, badge_w=2.5):
     # top-right brand lockup
     brandmark(s, SW - 0.92, 0.52, 0.36)
     txt(s, SW - 4.3, 0.46, 3.27, 0.34, [one("尋形 Conform", 13, True, HEAD, align=PP_ALIGN.RIGHT)], anchor=MSO_ANCHOR.MIDDLE)
-    txt(s, SW - 4.3, 0.78, 3.27, 0.3, [one(f"{idx:02d} / 06", 11, True, accent, align=PP_ALIGN.RIGHT, name=MONO)], anchor=MSO_ANCHOR.MIDDLE)
+    page = tag if tag else f"{idx:02d} / {TOTAL:02d}"
+    txt(s, SW - 4.3, 0.78, 3.27, 0.3, [one(page, 11, True, accent, align=PP_ALIGN.RIGHT, name=MONO)], anchor=MSO_ANCHOR.MIDDLE)
     rect(s, 0.6, 2.0, SW - 1.2, 0.014, fill=CARDLN)
 
 
@@ -187,11 +191,42 @@ def chip(s, x, y, w, h, text, fill, fg, size=12, bold=True):
 
 
 # =================================================================
-# Slide 1 — 背景與痛點
+# Slide 1 — 封面 / Hook
+# =================================================================
+s = slide()
+rect(s, 0, 0, SW, SH, fill=BG_DARK)
+rect(s, 0, SH - 0.16, SW, 0.16, fill=CYAN6)
+brandmark(s, 5.92, 1.15, 1.5, form_color=CYAN, bracket_color=WHITE)
+txt(s, 0.6, 3.0, SW - 1.2, 1.0, [
+    one("尋形 Conform", 48, True, WHITE, align=PP_ALIGN.CENTER)])
+txt(s, 0.6, 4.05, SW - 1.2, 0.5, [
+    one("框選一個形，找出所有同形——先進封裝 DXF 的幾何比對與設計規則檢查", 17, True, DLT, align=PP_ALIGN.CENTER)])
+txt(s, 0.6, 4.62, SW - 1.2, 0.4, [
+    one("Frame-select one pattern, find every instance — geometry matching & DRC for advanced packaging",
+        12, False, DMUTE, align=PP_ALIGN.CENTER, italic=True)])
+# teaser metrics strip
+tw = 3.3; tg = 0.5
+tx0 = (SW - 3 * tw - 2 * tg) / 2
+teasers = [("480 → 1", "等效人工工時 → 機器 1 小時"),
+           ("100%", "選定圖樣全 entity 覆蓋（vs 抽樣）"),
+           ("400,768", "單張真實 DXF 實體數，秒級互動")]
+for i, (big, sub) in enumerate(teasers):
+    x = tx0 + i * (tw + tg)
+    rect(s, x, 5.35, tw, 1.05, fill=NAVY, shape=MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.12, shadow=True)
+    txt(s, x, 5.5, tw, 0.5, [one(big, 22, True, CYAN, align=PP_ALIGN.CENTER, name=MONO)])
+    txt(s, x + 0.15, 6.0, tw - 0.3, 0.35, [one(sub, 10.5, False, DMUTE, align=PP_ALIGN.CENTER)])
+txt(s, SW - 3.5, 0.35, 3.0, 0.3, [one("01 / 08", 11, True, CYAN, align=PP_ALIGN.RIGHT, name=MONO)])
+notes(s, "⏱ 0:00–0:20（20 秒）\n"
+         "開場一句自我介紹＋一句產品定義：『尋形 Conform——在先進封裝的 DXF 圖紙上，框選一個圖樣，"
+         "系統找出所有同形實例並自動跑設計規則檢查。』\n"
+         "指一下三個數字當 hook（480→1、100% 覆蓋、40 萬實體秒級），細節後面每頁展開，這頁不停留。")
+
+# =================================================================
+# Slide 2 — 背景與痛點
 # =================================================================
 s = slide()
 header(s, "痛點", "PROBLEM", "驗證瓶頸：先進封裝設計檢查的痛點",
-       "The Verification Bottleneck — why Conform exists", 1, accent=ROSE, badge_w=2.45)
+       "The Verification Bottleneck — why Conform exists", 2, accent=ROSE, badge_w=2.45)
 
 txt(s, 0.6, 2.16, 12.1, 0.5, [
     one("先進封裝後段驗證：一個漏檢的設計錯誤，可能造成基板重投、封裝組裝良率損失，甚至流到客戶端釀成客退——良率與可靠度的最後一道防線。", 14.5, True, TEXT)])
@@ -219,22 +254,82 @@ txt(s, 0.95, 5.78, 11.4, 0.92, [
     one("這三個瓶頸是結構性的，不是效率問題——加人、加班、買授權只能緩解、無法消除，得換驗證方式。", 16, True, WHITE)],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "開場一句把嚴重性與『物理限制』框定：先進封裝漏檢後果嚴重；舊流程的三個限制不是『慢』，是結構性的——"
+notes(s, "⏱ 0:20–1:10（50 秒）\n"
+         "開場一句把嚴重性與『物理限制』框定：先進封裝漏檢後果嚴重；舊流程的三個限制不是『慢』，是結構性的——"
          "人力(6人>10天)、抽樣(看不完→會漏)、授權(僅4套AutoCAD併發，全隊序列化)。"
          "收尾關鍵句：這三個瓶頸只靠加人或加班解不開，必須換做法。下一頁帶出 尋形 Conform 的解。")
 
 # =================================================================
-# Slide 2 — 解法與系統架構
+# Slide 3 — 解法：框選到報告的閉環
 # =================================================================
 s = slide()
-header(s, "解法", "SOLUTION", "解法：像找星系一樣，在圖海中找出每一個同形",
-       "The Matching Engine & its astronomy inspiration", 2, accent=CYAN6, badge_w=2.45)
+header(s, "解法", "SOLUTION", "解法：框選即查詢——從框選到規則報告的閉環",
+       "Frame-select → match → rule check, one closed loop", 3, accent=CYAN6, badge_w=2.45)
 
-# intro — frame as geometric pattern matching; hard part = scale
+txt(s, 0.6, 2.16, 12.1, 0.5, [
+    one("工程師在瀏覽器裡框選一個圖樣，系統即時找出全部同形、確認後入庫；範本庫隨使用累積，之後新圖一鍵全掃、直出報告。",
+        14.5, True, TEXT)])
+
+flow3 = [
+    ("① 上傳 DXF", "前處理＋圖層過濾＋渲染", NAVY, WHITE),
+    ("② 框選圖樣", "AutoCAD 式互動操作", CYAN6, NAVY),
+    ("③ 即時比對", "找出全部同形實例", NAVY, WHITE),
+    ("④ 確認入庫", "範本庫隨使用累積", CYAN6, NAVY),
+    ("⑤ 規則檢查", "100+ 條自動判 pass/fail", NAVY, WHITE),
+]
+fw = (12.13 - 4 * 0.4) / 5
+fy = 2.78
+for i, (t, sub, fill, fg) in enumerate(flow3):
+    x = 0.6 + i * (fw + 0.4)
+    rect(s, x, fy, fw, 1.3, fill=fill, shape=MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.1, shadow=True)
+    sub_c = RGBColor(0x0B, 0x3A, 0x44) if fg == NAVY else DLT
+    txt(s, x + 0.1, fy + 0.2, fw - 0.2, 0.5, [one(t, 14.5, True, fg, align=PP_ALIGN.CENTER)])
+    txt(s, x + 0.12, fy + 0.72, fw - 0.24, 0.5, [one(sub, 11, False, sub_c, align=PP_ALIGN.CENTER, ls=1.05)])
+    if i < 4:
+        rect(s, x + fw + 0.08, fy + 0.52, 0.24, 0.26, fill=CYAN6, shape=MSO_SHAPE.CHEVRON)
+
+# two supporting cards
+sy3 = 4.4; sh3 = 1.8; sw3 = 5.95
+card(s, 0.6, sy3, sw3, sh3, 'white')
+rect(s, 0.6, sy3 + 0.18, 0.12, sh3 - 0.36, fill=CYAN6)
+txt(s, 0.94, sy3 + 0.2, sw3 - 0.55, 0.4, [
+    {'runs': [("零學習成本　", 14, True, CYAN8, False, FONT), ("FAMILIAR UX", 10, True, CYAN6, False, MONO)]}])
+txt(s, 0.94, sy3 + 0.68, sw3 - 0.6, 1.0, [
+    one("互動完全比照 AutoCAD：中鍵拖曳平移、左→右 window ／ 右→左 crossing 框選。", 12.5, False, TEXT, sa=4, ls=1.1),
+    one("驗證工程師不需重新學一套工具，開瀏覽器就能上手。", 12.5, False, MUTE, ls=1.1)])
+
+rx3 = 0.6 + sw3 + 0.33
+card(s, rx3, sy3, sw3, sh3, 'dark')
+label(s, rx3 + 0.32, sy3 + 0.2, "FLYWHEEL", AMBER, size=10)
+txt(s, rx3 + 0.32, sy3 + 0.48, sw3 - 0.6, 0.4, [one("範本庫飛輪：越用越省", 14, True, WHITE)])
+txt(s, rx3 + 0.32, sy3 + 0.94, sw3 - 0.64, 0.8, [
+    one("每次確認的圖樣都累積進範本庫（現有 50+ 範本）；", 12, False, DLT, sa=4, ls=1.1),
+    one("新圖上傳後一鍵 scan-all 全範本掃描——第一張圖教過的，之後每張圖都自動會。", 12, False, DLT, ls=1.1)])
+
+card(s, 0.6, 6.42, 12.13, 0.72, 'navy')
+txt(s, 0.95, 6.42, 11.4, 0.72, [
+    one("閉環的關鍵在第③步「即時比對」——在 40 萬個實體裡找出全部同形，還要秒級回應。下一頁講怎麼辦到。",
+        14.5, True, WHITE)], anchor=MSO_ANCHOR.MIDDLE)
+
+notes(s, "⏱ 1:10–2:00（50 秒）\n"
+         "用一個 operator 的一天講工作流程：上傳 DXF → 系統前處理渲染 → 框選一個圖樣 → 即時看到全部同形被標記 → "
+         "確認入庫 → 規則引擎跑 100+ 條檢查直出報告。\n"
+         "兩個賣點各一句：(1) 零學習成本——互動完全仿 AutoCAD（中鍵平移、window/crossing 框選），驗證工程師零遷移成本；"
+         "(2) 範本庫飛輪——確認過的圖樣進庫（現有 50+ 範本），新圖一鍵 scan-all，教一次、之後全自動。\n"
+         "收尾一句設 hook：閉環成立的前提是第③步能在 40 萬實體裡秒級找同形——轉下一頁演算法。")
+
+# =================================================================
+# Slide 4 — 演算法：規模與天文學靈感
+# =================================================================
+s = slide()
+header(s, "演算法", "ALGORITHM", "像找星系一樣，在圖海中找出每一個同形",
+       "The Matching Engine & its astronomy inspiration", 4, accent=CYAN6, badge_w=2.45)
+
+# intro — bridge from the loop: step ③, and the hard part = scale
 txt(s, 0.6, 2.14, 12.1, 0.46, [
-    {'runs': [("框選一個 DXF 圖樣 → 找出", 14.5, True, TEXT, False, FONT),
+    {'runs': [("閉環的第③步：在整張 DXF 裡找出框選圖樣的", 14.5, True, TEXT, False, FONT),
               ("全部同形實例", 14.5, True, CYAN8, False, FONT),
-              (" → 送規則引擎判 pass/fail。難點全在中間那步：", 14.5, True, TEXT, False, FONT),
+              ("。難點只有一個：", 14.5, True, TEXT, False, FONT),
               ("規模", 14.5, True, ROSE_DK, False, FONT),
               ("。", 14.5, True, TEXT, False, FONT)]}])
 
@@ -299,7 +394,7 @@ txt(s, 0.92, 6.46, 11.5, 0.74, [
               ("簽章 gate ＋ cKDTree 空間索引剪枝到近線性　→　互動式秒級回應", 12.5, True, WHITE, False, FONT)]}],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "P2 改成『演算法 + 複雜度 + 天文學靈感』頁。\n"
+notes(s, "⏱ 2:00–3:10（70 秒）——演算法 + 複雜度 + 天文學靈感頁。\n"
          "先把問題講成幾何模式比對：在一張 DXF（N≈400,768 個實體）裡，找某個框選圖樣的『全部同形實例』。\n"
          "暴力解 O(N²·k)：遍歷每個 entity 兩兩比較是 O(N²)；又因 query pattern 最多由 k=120 個 entity 組成、每個都要比 → 再 ×k → O(N²·k)。"
          "真實 DXF N≈400,768、k≤120 → 量級 ≈ 1.9×10¹³ 次／每個模板，每次還要旋轉對位＋容差比對，遍歷下完全跑不完"
@@ -313,16 +408,16 @@ notes(s, "P2 改成『演算法 + 複雜度 + 天文學靈感』頁。\n"
          "演算法五步：①幾何簽章 gate（旋轉/鏡像/縮放不變）剪掉絕大多數候選 → ②cKDTree 空間索引 O(log N) 鄰域 → "
          "③PCA 主軸對位＋4 個鏡射/旋轉 sign-variant 取最佳（Procrustes 式對齊）→ ④對稱 chamfer 評分容差 → ⑤inverted-index 內含抑制。\n"
          "效能：比對掃描 O(N²·k) 遍歷（單核估算數天～數週）→ 經簽章 gate + cKDTree 空間索引剪枝到近線性、互動式秒級回應。"
-         "（內含抑制 20s→8ms 是另一後處理步、見 P3；皆為 design.md／備忘的實測或量級估算，非現場 benchmark。）\n"
+         "（內含抑制 20s→8ms 是另一後處理步、見 P5；皆為 design.md／備忘的實測或量級估算，非現場 benchmark。）\n"
          "誠實措辭：astrometry.net / friends-of-friends 是『同類方法』的類比，用來說明思路，非本專案直接套用其程式庫；"
          "本專案實作為自寫的 signature gate + scipy cKDTree + PCA 主軸對位/sign-variant 擇優/對稱 chamfer + inverted index（matcher 為 Procrustes 式對位，未跑 SVD-based Kabsch）。")
 
 # =================================================================
-# Slide 3 — 成效與效益 (★ 40%)
+# Slide 5 — 成效與效益 (★ 40%)
 # =================================================================
 s = slide()
 header(s, "成效 ★", "IMPACT", "成效：6 人 10 天 → 1 人 1 小時",
-       "Results & Impact — the core metric", 3, accent=AMBER, badge_w=2.55)
+       "Results & Impact — the core metric", 5, accent=AMBER, badge_w=2.55)
 
 # hero metric band (dark, reference LOSS-card spirit)
 card(s, 0.6, 2.16, 12.13, 1.42, 'dark')
@@ -371,7 +466,7 @@ txt(s, 8.55, hy, 4.0, 0.72, [
     one("生產級規模｜真實 DXF 400,768 圓", 11.5, True, CYAN, sa=1),
     one("內含抑制 20s → 8ms（實測）", 11.5, True, DLT)], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "★ 這是最高權重(40%)的核心頁，講最久。\n"
+notes(s, "⏱ 3:10–4:30（80 秒）——★ 最高權重(40%)的核心頁，講最久。\n"
          "頭條：6 人 × 10 天 → 1 人 × 1 小時（含操作 + 100+ 條自動化檢查）。換算約 480 工程師小時 → 1，約 1/480。\n"
          "三列對比表逐列講：(1)人力工時；(2)覆蓋率——這是最防守得住的一句：從抽樣變 100% 全 entity，"
          "再加 100+ 條自動化條件檢查，『漏檢』從機率問題變成不可能，這是品質的階躍不只是加速；"
@@ -380,11 +475,11 @@ notes(s, "★ 這是最高權重(40%)的核心頁，講最久。\n"
          "誠實守則：1 小時是實際運行成效；480× 是換算，被問就說明算法(6×10×8 工時 vs 1 工時)。")
 
 # =================================================================
-# Slide 4 — Claude Code 生產線
+# Slide 6 — Claude Code 生產線
 # =================================================================
 s = slide()
 header(s, "開發", "PROCESS", "用 Claude Code 把開發變成生產線",
-       "Building Conform as a Claude Code Production Line", 4, accent=VIOLET, badge_w=2.3)
+       "Building Conform as a Claude Code Production Line", 6, accent=VIOLET, badge_w=2.3)
 
 steps4 = [
     ("① 人類意圖\nspectra-propose", False),
@@ -459,6 +554,7 @@ txt(s, 0.6, dy + 1.42, 12.13, 0.34, [one(
     11.5, True, CYAN8, align=PP_ALIGN.CENTER, name=MONO)])
 
 notes(s,
+    "⏱ 4:30–5:30（60 秒）\n"
     "口頭講稿(約180字)：我把 Claude 當一位資深工程師，每個提案都拿來質問，不照單全收。\n"
     "舉真實功能『量測距離工具』：先下 spectra-propose，Claude 產出 proposal、design(10 條編號決策)、tasks 三份文件，"
     "我在規格層就審完意圖、便宜地修正方向，而不是事後改 diff。接著 spectra-apply，Claude 用 codegraph 直接跳到 "
@@ -481,11 +577,11 @@ notes(s,
     "• RTK 省 ~52% token(4.8M/88k 指令)是全域 hook 分析數據。")
 
 # =================================================================
-# Slide 5 — 程式品質 × 規格驅動
+# Slide 7 — 程式品質 × 規格驅動
 # =================================================================
 s = slide()
 header(s, "品質", "QUALITY", "程式品質 × 規格驅動工程",
-       "Code Quality × Spec-Driven Development", 5, accent=CYAN8, badge_w=2.3)
+       "Code Quality × Spec-Driven Development", 7, accent=CYAN8, badge_w=2.3)
 
 colw = 5.9
 lx, ly = 0.6, 2.18
@@ -528,19 +624,19 @@ txt(s, 0.9, 6.42, 11.5, 0.66, [one(
     "規格驅動讓「不同意」變便宜——我們在 design.md 的 ## Decisions 吵完每個 Alternative，而不是等 diff 出來才回頭。",
     13, True, RGBColor(0x8A, 0x59, 0x06))], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "把 25%+25% 兩個品質軸(程式品質 + 開發流程)合在這頁高密度交代。\n"
+notes(s, "⏱ 5:30–6:20（50 秒）——把 25%+25% 兩個品質軸(程式品質 + 開發流程)合在這頁高密度交代。\n"
          "左欄：規格驅動——品質是被流程『強制』出來的(9 契約、70 changes、validate 閘門)，不是嘴上說有測試。\n"
          "右欄：工程硬證據，每條都能翻到對應 file/test(倒排索引、AST 不變量、envelope 驗證、drift-guard)。\n"
          "中段藍帶：matcher 是技術核心，三條 fast path 由真實生產 bug 逼出(400,768 圓)——強調『bug 驅動，不是紙上設計』。\n"
-         "結尾 callback 呼應 P4 的決策表：spec-driven 讓爭論發生在 design.md，不是 diff 之後。\n"
+         "結尾 callback 呼應 P6 的決策表：spec-driven 讓爭論發生在 design.md，不是 diff 之後。\n"
          "誠實：442 是測試函式數(約 546 通過案例，含參數化)；前端 canvas 零自動化 UI 測試，被問就框成 roadmap。")
 
 # =================================================================
-# Slide 6 — 創新差異化與未來擴展
+# Slide 8 — 創新差異化與未來擴展（收尾）
 # =================================================================
 s = slide()
 header(s, "擴展", "ROADMAP", "創新差異化與未來擴展",
-       "Differentiation & Roadmap", 6, accent=EMER, badge_w=2.3)
+       "Differentiation & Roadmap", 8, accent=EMER, badge_w=2.3)
 
 # vs old method
 card(s, 0.6, 2.18, 12.13, 0.9, 'white')
@@ -588,28 +684,46 @@ txt(s, 0.9, 6.46, 11.5, 0.76, [
         "定位為「幾何→規則引擎」的通用前端層，可餵任意第三方 DRC 後端。", 12.5, True, WHITE, ls=1.05)],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "創新 10% 核心 + 應用廣度收尾。\n"
+notes(s, "⏱ 6:20–7:00（40 秒）——創新 10% 核心 + 應用廣度收尾。\n"
          "vs 舊法：一句話講清差異——從人工逐物件抽樣量測，變成框選→比對→規則檢查的閉環，引擎是 class-agnostic 幾何不是封裝寫死。\n"
          "輻射圖：中央是 尋形 Conform『幾何→規則引擎』，向外是鄰近應用——封裝 DXF 已實作，其餘(PCB Gerber/ODB++、GDSII/OASIS、"
          "photomask/MEMS、interposer/RDL)標『可擴展』，誠實不誇大成已做。\n"
          "底部：乾淨團隊邊界(adapter + 版本化 bundle)讓 尋形 Conform 可獨立出貨，定位成多個 DRC 後端的通用前端層，而非單一用途工具。\n"
          "收尾口頭金句可用：『尋形 Conform 不是一個封裝檢查工具，是一層幾何→規則的通用前端。』")
 
-prs.save("/Users/yi-tingli/Documents/Projects/side/SMDR2/competition/尋形Conform_競賽簡報.pptx")
-print("main saved:", len(prs.slides.__iter__.__self__._sldIdLst), "slides")
+# =================================================================
+# Slide 9 — Q&A（3 分鐘）
+# =================================================================
+s = slide()
+rect(s, 0, 0, SW, SH, fill=BG_DARK)
+rect(s, 0, SH - 0.16, SW, 0.16, fill=CYAN6)
+brandmark(s, 6.17, 1.3, 1.0, form_color=CYAN, bracket_color=WHITE)
+txt(s, 0.6, 2.55, SW - 1.2, 1.0, [one("Q & A", 44, True, WHITE, align=PP_ALIGN.CENTER, name=MONO)])
+txt(s, 0.6, 3.6, SW - 1.2, 0.5, [
+    one("6 人 × 10 天 → 1 人 × 1 小時　·　選定圖樣 100% 覆蓋　·　零 AutoCAD 授權依賴", 16, True, DLT, align=PP_ALIGN.CENTER)])
+qa_hints = [("演算法細節", "簽章 gate / cKDTree / PCA 對位 → P4"),
+            ("數字怎麼算", "480 工時換算與量級估算 → P5 備註"),
+            ("AI 怎麼用", "採用／否決決策日誌 → 下一頁 BACKUP")]
+qw = 3.6; qg = 0.45
+qx0 = (SW - 3 * qw - 2 * qg) / 2
+for i, (t, sub) in enumerate(qa_hints):
+    x = qx0 + i * (qw + qg)
+    rect(s, x, 4.55, qw, 1.15, fill=NAVY, shape=MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.12, shadow=True)
+    txt(s, x, 4.73, qw, 0.45, [one(t, 15, True, CYAN, align=PP_ALIGN.CENTER)])
+    txt(s, x + 0.2, 5.18, qw - 0.4, 0.4, [one(sub, 10.5, False, DMUTE, align=PP_ALIGN.CENTER)])
+txt(s, SW - 3.5, 0.35, 3.0, 0.3, [one("Q&A · 3 MIN", 11, True, CYAN, align=PP_ALIGN.RIGHT, name=MONO)])
+notes(s, "⏱ 7:00–10:00（3 分鐘問答）\n"
+         "停在這頁等提問；一行 recap 讓評審提問時眼前就有核心數字。\n"
+         "預判三類問題與跳頁策略：演算法細節→回 P4；數字換算→口述 P5 備註的算法(6×10×8 工時 vs 1 工時、量級估算非現場 benchmark)；"
+         "AI 使用深度→切下一頁 BACKUP 決策日誌逐列講。\n"
+         "誠實守則：效能絕對數字以 design.md／專案備忘為準；被問到沒把握的數字，答『量級估算』不要硬報精確值。")
 
 # =================================================================
-# 附錄（獨立檔，主簡報維持嚴格 6 頁）— 完整採用／否決決策日誌
+# Slide 10 — BACKUP：完整採用／否決決策日誌（Q&A 深問時用）
 # =================================================================
-prs = Presentation()
-prs.slide_width = Inches(13.333); prs.slide_height = Inches(7.5)
-BLANK = prs.slide_layouts[6]
-
 s = slide()
 header(s, "附錄", "APPENDIX", "採用／否決 決策日誌",
-       "AI-proposed / human-decided log（backup，不計入 6 頁）", 1, accent=MUTE, badge_w=2.3)
-# overwrite page tag for appendix
-txt(s, SW - 4.3, 0.78, 3.27, 0.3, [one("BACKUP", 11, True, MUTE, align=PP_ALIGN.RIGHT, name=MONO)], anchor=MSO_ANCHOR.MIDDLE)
+       "AI-proposed / human-decided log（Q&A backup）", 0, accent=MUTE, badge_w=2.3, tag="BACKUP")
 
 cx = [0.5, 2.5, 4.7, 6.12, 10.45, 12.83]
 heads = ["改進主題", "Claude 建議", "我的決定", "我們怎麼討論／理由", "結果"]
@@ -652,12 +766,12 @@ txt(s, cx[0] + 0.2, y + 0.1, cx[5] - cx[0] - 0.4, 0.5, [one(
     "錨點均經 git/reflog 核對；效能絕對數字以 design.md／專案備忘為準，非現場 benchmark。",
     11, True, RGBColor(0x8A, 0x59, 0x06))], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "這是 backup 附錄頁，主簡報嚴格 6 頁、此頁獨立檔。\n"
-         "用途：P4 決策帶只放 4 條精簡版；評審若深問『哪些採用哪些否決、怎麼討論』就切到這張完整 7 列表逐列講。\n"
-         "字級：理由欄為求容納 7 列降到 10.5pt（低於 12pt 規範）——僅作 backup 參考，不要當正式 6 頁之一。若要併入主簡報需精簡列數放大字級。\n"
+notes(s, "BACKUP 頁——不在 7 分鐘主線內，只在 Q&A 被深問『哪些採用哪些否決、怎麼討論』時切過來逐列講。\n"
+         "P6 決策帶只放 4 條精簡版；這張是完整 7 列表。\n"
+         "字級：理由欄為求容納 7 列降到 10.5pt——backup 參考用，不進主線。\n"
          "誠實：commit hash(77e8832/fffd30e/13f179f/9db06a6→c4df21d)、Decision 8、SEC-001 皆 repo 實證；"
          "17,482 / 6000 / 20000 球與時間數字來自 design.md／專案備忘的實測記述，非現場重跑。")
 
-prs.save("/Users/yi-tingli/Documents/Projects/side/SMDR2/competition/尋形Conform_附錄_決策表.pptx")
-print("appendix saved:", len(prs.slides.__iter__.__self__._sldIdLst), "slide")
+prs.save("/Users/yi-tingli/Documents/Projects/side/SMDR2/competition/尋形Conform_競賽簡報.pptx")
+print("saved:", len(prs.slides._sldIdLst), "slides (封面+7內容+Q&A+BACKUP)")
 print("OK")
