@@ -56,8 +56,11 @@ BLANK = prs.slide_layouts[6]
 
 
 # ---------- helpers ----------
+MIN_PT = 12   # 競賽規範: 全簡報字體不得小於 12pt — 由此處全域強制
+
 def _setfont(run, size, bold=False, color=TEXT, name=FONT, italic=False):
     f = run.font
+    size = max(size, MIN_PT)
     f.size = Pt(size); f.bold = bold; f.italic = italic
     f.color.rgb = color; f.name = name
     rPr = run._r.get_or_add_rPr()
@@ -358,7 +361,7 @@ txt(s, rx2 + 0.32, ay + 1.0, aw - 0.62, 1.25, [
     {'runs': [("①  ", 12, True, CYAN, False, MONO), ("旋轉／縮放／平移都不變的幾何簽章", 11.5, False, DLT, False, FONT)], 'space_after': 3},
     {'runs': [("②  ", 12, True, CYAN, False, MONO), ("空間索引快速定位候選天區", 11.5, False, DLT, False, FONT)], 'space_after': 3},
     {'runs': [("③  ", 12, True, CYAN, False, MONO), ("只對倖存候選做精確比對", 11.5, False, DLT, False, FONT)], 'space_after': 5},
-    one("（同類思路：astrometry.net 星形 quad-hash、friends-of-friends 分群）", 10, False, DMUTE, ls=1.08)])
+    one("（同類思路：astrometry.net quad-hash、FoF 分群）", 12, False, DMUTE, ls=1.08)])
 
 # the algorithm, applied to DXF
 my = 5.06
@@ -528,11 +531,11 @@ chip(s, 8.85, tcy, 3.88, 0.42, "信任邊界：機密 DXF 不進 context", AMBER
 sky = tcy + 0.52
 card(s, 0.6, sky, 12.13, 0.62, 'tint', radius=0.1)
 txt(s, 0.85, sky, 11.65, 0.62, [
-    {'runs': [("Skills｜自建技能生態　", 11, True, CYAN8, False, FONT),
-              ("規格流 spectra-* ×12（propose→apply→archive→verify…）· 測試 tdd · 審查 grill-me / grill-with-docs / diagnose / triage",
-               10, False, TEXT, False, FONT)], 'space_after': 2},
-    one("規劃 to-prd / to-issues · 領域 add-rule · 雛型 prototype · 架構 improve-codebase-architecture · zoom-out · write-a-skill · caveman",
-        10, False, MUTE)], anchor=MSO_ANCHOR.MIDDLE)
+    {'runs': [("Skills｜自建技能生態　", 12, True, CYAN8, False, FONT),
+              ("規格流 spectra-* ×12 · 測試 tdd · 審查 grill-me / diagnose / triage",
+               12, False, TEXT, False, FONT)], 'space_after': 2},
+    one("規劃 to-prd / to-issues · 領域 add-rule · 雛型 prototype · 架構 improve-codebase-architecture 等",
+        12, False, MUTE)], anchor=MSO_ANCHOR.MIDDLE)
 
 # decision strip
 dy = sky + 0.72
@@ -748,7 +751,7 @@ DEC = [
     ("上傳上限 SEC-001 預檢", "加請求層 Content-Length 預檢，buffer 前拒絕", "延後", MUTE,
      "multipart 的 Content-Length 涵蓋整個 body 非單檔，FastAPI 無 per-part length；對內部信任使用者邊際價值低", "緩衝後 len() 為權威防線"),
 ]
-rh = 0.58
+rh = 0.60
 y = ty + hh + 0.05
 for r, (topic, prop, dec, dcol, why, res) in enumerate(DEC):
     bg = WHITE if r % 2 == 0 else GRAYBG
@@ -768,7 +771,7 @@ txt(s, cx[0] + 0.2, y + 0.1, cx[5] - cx[0] - 0.4, 0.5, [one(
 
 notes(s, "BACKUP 頁——不在 7 分鐘主線內，只在 Q&A 被深問『哪些採用哪些否決、怎麼討論』時切過來逐列講。\n"
          "P6 決策帶只放 4 條精簡版；這張是完整 7 列表。\n"
-         "字級：理由欄為求容納 7 列降到 10.5pt——backup 參考用，不進主線。\n"
+         "字級：全簡報由 _setfont 強制 ≥12pt（MIN_PT），此表理由欄 12pt 兩行內收納。\n"
          "誠實：commit hash(77e8832/fffd30e/13f179f/9db06a6→c4df21d)、Decision 8、SEC-001 皆 repo 實證；"
          "17,482 / 6000 / 20000 球與時間數字來自 design.md／專案備忘的實測記述，非現場重跑。")
 
