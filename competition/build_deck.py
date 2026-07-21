@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-尋形 Conform — Claude Code 開發競賽簡報 — 7 分鐘簡報 + 3 分鐘 Q&A (16:9)
+尋形 Conform — Claude Code 開發競賽簡報 — 6 分鐘簡報 + Q&A 另計（約 3 分鐘）(16:9)
 產出: 尋形Conform_競賽簡報.pptx（封面 + 8 內容頁 + Q&A + BACKUP 決策表，共 11 張）
 風格: 參考 contrastive_learning_evolution 風格 —
       冷灰底 #F4F6FB + 深 slate 卡 #162039、膠囊徽章、Tailwind 重點色、
       PingFang TC 標題 + Menlo 等寬標籤、卡片/架構流程語言。
-重點: 無頁數/章節限制; 以 7:00 節奏配頁, 每頁 notes 開頭標 ⏱ 時間帶;
+重點: 無頁數/章節限制; 以 6:00 節奏配頁, 每頁 notes 開頭標 ⏱ 時間帶;
       決策表併入主檔 BACKUP 頁（Q&A 免切檔）。
 """
 from pptx import Presentation
@@ -219,7 +219,7 @@ for i, (big, sub) in enumerate(teasers):
     txt(s, x, 5.5, tw, 0.5, [one(big, 22, True, CYAN, align=PP_ALIGN.CENTER, name=MONO)])
     txt(s, x + 0.15, 6.0, tw - 0.3, 0.35, [one(sub, 10.5, False, DMUTE, align=PP_ALIGN.CENTER)])
 txt(s, SW - 3.5, 0.35, 3.0, 0.3, [one(f"01 / {TOTAL:02d}", 11, True, CYAN, align=PP_ALIGN.RIGHT, name=MONO)])
-notes(s, "⏱ 0:00–0:20（20 秒）\n"
+notes(s, "⏱ 0:00–0:18（18 秒）\n"
          "開場一句自我介紹＋一句產品定義：『尋形 Conform——在先進封裝的 DXF 圖紙上，框選一個圖樣，"
          "系統找出所有同形實例並自動跑設計規則檢查。』\n"
          "指一下三個數字當 hook（480→1、100% 覆蓋、82 萬實體秒級），細節後面每頁展開，這頁不停留。")
@@ -257,7 +257,7 @@ txt(s, 0.95, 5.78, 11.4, 0.92, [
     one("這三個瓶頸是結構性的，不是效率問題——加人、加班、買授權只能緩解、無法消除，得換驗證方式。", 16, True, WHITE)],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 0:20–1:05（45 秒）\n"
+notes(s, "⏱ 0:18–0:58（40 秒）\n"
          "開場一句把嚴重性與『物理限制』框定：先進封裝漏檢後果嚴重；舊流程的三個限制不是『慢』，是結構性的——"
          "人力(6人>10天)、抽樣(看不完→會漏)、授權(僅4套AutoCAD併發，全隊序列化)。"
          "收尾關鍵句：這三個瓶頸只靠加人或加班解不開，必須換做法。下一頁帶出 尋形 Conform 的解。")
@@ -314,7 +314,7 @@ txt(s, 0.95, 6.42, 11.4, 0.72, [
     one("閉環的關鍵在第③步「即時比對」——在 82 萬個實體裡找出全部同形，還要秒級回應。下一頁講怎麼辦到。",
         14.5, True, WHITE)], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 1:05–1:50（45 秒）\n"
+notes(s, "⏱ 0:58–1:38（40 秒）\n"
          "用一個 operator 的一天講工作流程：上傳 DXF → 系統前處理渲染 → 框選一個圖樣 → 即時看到全部同形被標記 → "
          "確認入庫 → 規則引擎跑 100+ 條檢查直出報告。\n"
          "兩個賣點各一句：(1) 零學習成本——互動完全仿 AutoCAD（中鍵平移、window/crossing 框選），驗證工程師零遷移成本；"
@@ -397,7 +397,7 @@ txt(s, 0.92, 6.46, 11.5, 0.74, [
               ("簽章 gate ＋ cKDTree 空間索引剪枝到近線性　→　互動式秒級回應", 12.5, True, WHITE, False, FONT)]}],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 1:50–2:50（60 秒）——演算法 + 複雜度 + 天文學靈感頁。\n"
+notes(s, "⏱ 1:38–2:30（52 秒）——演算法 + 複雜度 + 天文學靈感頁。\n"
          "先把問題講成幾何模式比對：在一張 DXF（N≈820,212 個實體）裡，找某個框選圖樣的『全部同形實例』。\n"
          "暴力解 O(N²·k)：遍歷每個 entity 兩兩比較是 O(N²)；又因 query pattern 最多由 k=120 個 entity 組成、每個都要比 → 再 ×k → O(N²·k)。"
          "真實 DXF N≈820,212、k≤120 → 量級 ≈ 8.1×10¹³ 次／每個模板，每次還要旋轉對位＋容差比對，遍歷下完全跑不完"
@@ -469,7 +469,7 @@ txt(s, 8.55, hy, 4.0, 0.72, [
     one("生產級規模｜真實 DXF 820,212 實體", 12, True, CYAN, sa=1),
     one("內含抑制 20s → 8ms（實測）", 11.5, True, DLT)], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 2:50–4:05（75 秒）——★ 最高權重(40%)的核心頁，講最久。\n"
+notes(s, "⏱ 2:30–3:38（68 秒）——★ 最高權重(40%)的核心頁，講最久。\n"
          "頭條：6 人 × 10 天 → 1 人 × 1 小時（含操作 + 100+ 條自動化檢查）。換算約 480 工程師小時 → 1，約 1/480。\n"
          "三列對比表逐列講：(1)人力工時；(2)覆蓋率——這是最防守得住的一句：從抽樣變 100% 全 entity，"
          "再加 100+ 條自動化條件檢查，『漏檢』從機率問題變成不可能，這是品質的階躍不只是加速；"
@@ -513,7 +513,7 @@ txt(s, 0.95, 6.4, 11.4, 0.78, [
     one("這三個問題，就是接下來兩頁——尋形 Conform 的開發生產線與品質工程，全部圍繞它們設計。",
         14.5, True, WHITE)], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 4:05–4:40（35 秒）——核心理念頁，給後半場定調。\n"
+notes(s, "⏱ 3:38–4:08（30 秒）——核心理念頁，給後半場定調。\n"
          "一句開場：LLM 時代 demo 很便宜，人人都能『做出一個產品』；但『能跑』不等於『對』。"
          "寫程式的成本降了，做對產品的成本沒降。\n"
          "三問三答各一句：(Q1) 符合需求嗎→規格先行，在 proposal/design 紙上吵完才動手；"
@@ -601,7 +601,7 @@ txt(s, 0.6, dy + 1.42, 12.13, 0.34, [one(
     12, True, CYAN8, align=PP_ALIGN.CENTER, name=MONO)])
 
 notes(s,
-    "⏱ 4:40–5:35（55 秒）\n"
+    "⏱ 4:08–4:55（47 秒）\n"
     "口頭講稿(約180字)：我把 Claude 當一位資深工程師，每個提案都拿來質問，不照單全收。\n"
     "舉真實功能『量測距離工具』：先下 spectra-propose，Claude 產出 proposal、design(10 條編號決策)、tasks 三份文件，"
     "我在規格層就審完意圖、便宜地修正方向，而不是事後改 diff。接著 spectra-apply，Claude 用 codegraph 直接跳到 "
@@ -671,7 +671,7 @@ txt(s, 0.9, 6.42, 11.5, 0.66, [one(
     "規格驅動讓「不同意」變便宜——我們在 design.md 的 ## Decisions 吵完每個 Alternative，而不是等 diff 出來才回頭。",
     13, True, RGBColor(0x8A, 0x59, 0x06))], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 5:35–6:25（50 秒）——把 25%+25% 兩個品質軸(程式品質 + 開發流程)合在這頁高密度交代。\n"
+notes(s, "⏱ 4:55–5:38（43 秒）——把 25%+25% 兩個品質軸(程式品質 + 開發流程)合在這頁高密度交代。\n"
          "左欄：規格驅動——品質是被流程『強制』出來的(10 契約、89 changes、validate 閘門)，不是嘴上說有測試。\n"
          "右欄：工程硬證據，每條都能翻到對應 file/test(倒排索引、AST 不變量、envelope 驗證、drift-guard)。\n"
          "中段藍帶：matcher 是技術核心，三條 fast path 由真實生產 bug 逼出(820,212 實體)——強調『bug 驅動，不是紙上設計』。\n"
@@ -736,7 +736,7 @@ txt(s, 0.9, 6.34, 11.5, 0.9, [
                12.5, True, WHITE, False, FONT)]}],
     anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "⏱ 6:25–7:00（35 秒）——創新 10% 核心 + 應用廣度收尾。\n"
+notes(s, "⏱ 5:38–6:00（22 秒）——創新 10% 核心 + 應用廣度收尾。\n"
          "vs 舊法：一句話講清差異——從人工逐物件抽樣量測，變成框選→比對→規則檢查的閉環，引擎是 class-agnostic 幾何不是封裝寫死。\n"
          "輻射圖：中央是 尋形 Conform『幾何→規則引擎』，向外是鄰近應用——封裝 DXF 已實作，其餘(PCB Gerber/ODB++、GDSII/OASIS、"
          "photomask/MEMS、interposer/RDL)標『可擴展』，誠實不誇大成已做。\n"
@@ -767,7 +767,7 @@ for i, (t, sub) in enumerate(qa_hints):
     txt(s, x, 4.73, qw, 0.45, [one(t, 15, True, CYAN, align=PP_ALIGN.CENTER)])
     txt(s, x + 0.2, 5.18, qw - 0.4, 0.4, [one(sub, 10.5, False, DMUTE, align=PP_ALIGN.CENTER)])
 txt(s, SW - 3.5, 0.35, 3.0, 0.3, [one("Q&A · 3 MIN", 11, True, CYAN, align=PP_ALIGN.RIGHT, name=MONO)])
-notes(s, "⏱ 7:00–10:00（3 分鐘問答）\n"
+notes(s, "⏱ 6:00 後 · Q&A（另計，約 3 分鐘）\n"
          "停在這頁等提問；一行 recap 讓評審提問時眼前就有核心數字。\n"
          "預判三類問題與跳頁策略：演算法細節→回 P4；數字換算→口述 P5 備註的算法(6×10×8 工時 vs 1 工時、量級估算非現場 benchmark)；"
          "AI 使用深度→切下一頁 BACKUP 決策日誌逐列講。\n"
@@ -821,7 +821,7 @@ txt(s, cx[0] + 0.2, y + 0.1, cx[5] - cx[0] - 0.4, 0.5, [one(
     "錨點均經 git/reflog 核對；效能絕對數字以 design.md／專案備忘為準，非現場 benchmark。",
     11, True, RGBColor(0x8A, 0x59, 0x06))], anchor=MSO_ANCHOR.MIDDLE)
 
-notes(s, "BACKUP 頁——不在 7 分鐘主線內，只在 Q&A 被深問『哪些採用哪些否決、怎麼討論』時切過來逐列講。\n"
+notes(s, "BACKUP 頁——不在 6 分鐘主線內，只在 Q&A 被深問『哪些採用哪些否決、怎麼討論』時切過來逐列講。\n"
          "P7 決策帶只放 4 條精簡版；這張是完整 7 列表。\n"
          "字級：全簡報由 _setfont 強制 ≥12pt（MIN_PT），此表理由欄 12pt 兩行內收納。\n"
          "誠實：commit hash(77e8832/fffd30e/13f179f/9db06a6→c4df21d)、Decision 8、SEC-001 皆 repo 實證；"
